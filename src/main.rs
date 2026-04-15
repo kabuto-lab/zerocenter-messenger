@@ -51,11 +51,12 @@ async fn main() -> Result<()> {
     // Create channel for CLI commands
     let (cmd_tx, cmd_rx) = mpsc::channel::<NodeCommand>(32);
 
-    // Clone for CLI handlers
+    // Clone for CLI handlers — each handler closure moves its own Sender.
     let cmd_tx_for_connect = cmd_tx.clone();
     let cmd_tx_for_send = cmd_tx.clone();
     let cmd_tx_for_peers = cmd_tx.clone();
     let cmd_tx_for_contacts = cmd_tx.clone();
+    let cmd_tx_for_history = cmd_tx.clone();
 
     // Build command handlers
     let mut handlers: std::collections::HashMap<String, zerocenter_messenger::cli::CommandHandler> = 
@@ -108,7 +109,7 @@ async fn main() -> Result<()> {
     // History handler
     handlers.insert("history".to_string(), Box::new(move |args: &str| -> Result<()> {
         let limit: usize = args.trim().parse().unwrap_or(20);
-        futures::executor::block_on(cmd_tx_for_contacts.send(NodeCommand::History(limit)))
+        futures::executor::block_on(cmd_tx_for_history.send(NodeCommand::History(limit)))
             .map_err(|e| anyhow::anyhow!("Failed to send command: {}", e))?;
         Ok(())
     }));
