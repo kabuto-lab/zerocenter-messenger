@@ -396,38 +396,53 @@ impl P2PNode {
             }
             crate::network::BehaviourEvent::RequestResponse(req_event) => {
                 match req_event {
-                    request_response::Event::Message { peer, message } => {
-                        // Received a direct message request - message.request contains the DirectMessageRequest
-                        match ProtocolMessage::from_bytes(&message.request.0) {
-                            Ok(proto_msg) => {
-                                let my_peer_id = self.identity.peer_id();
-                                let sender = PeerId::from_bytes(&proto_msg.from)
-                                    .unwrap_or(my_peer_id);
+                    request_response::Event::Message { peer, message, .. } => {
+                        // In libp2p 0.53 `Message` is an enum with Request/Response
+                        // variants — destructure it explicitly.
+                        match message {
+                            request_response::Message::Request { request, .. } => {
+                                match ProtocolMessage::from_bytes(&request.0) {
+                                    Ok(proto_msg) => {
+                                        let my_peer_id = self.identity.peer_id();
+                                        let sender = PeerId::from_bytes(&proto_msg.from)
+                                            .unwrap_or(my_peer_id);
 
-                                info!("Direct message from {}: {}", sender, String::from_utf8_lossy(&proto_msg.payload));
+                                        info!(
+                                            "Direct message from {} (via {}): {}",
+                                            sender,
+                                            peer,
+                                            String::from_utf8_lossy(&proto_msg.payload)
+                                        );
 
-                                // Store the message
-                                if let Some(ref store) = self.message_store {
-                                    store.store_message(
-                                        &proto_msg.from,
-                                        &proto_msg.to,
-                                        &proto_msg.payload,
-                                        proto_msg.ttl,
-                                    )?;
+                                        // Store the message
+                                        if let Some(ref store) = self.message_store {
+                                            store.store_message(
+                                                &proto_msg.from,
+                                                &proto_msg.to,
+                                                &proto_msg.payload,
+                                                proto_msg.ttl,
+                                            )?;
+                                        }
+
+                                        // Print received message
+                                        println!(
+                                            "\n📨 Direct message from {}: {}",
+                                            sender,
+                                            String::from_utf8_lossy(&proto_msg.payload)
+                                        );
+                                        println!("> ");
+                                    }
+                                    Err(e) => {
+                                        warn!("Failed to parse direct message: {}", e);
+                                    }
                                 }
-
-                                // Print received message
-                                println!("\n📨 Direct message from {}: {}",
-                                    sender,
-                                    String::from_utf8_lossy(&proto_msg.payload));
-                                println!("> ");
                             }
-                            Err(e) => {
-                                warn!("Failed to parse direct message: {}", e);
+                            request_response::Message::Response { .. } => {
+                                // We don't send responses yet; ignore.
                             }
                         }
                     }
-                    request_response::Event::ResponseSent { peer, request_id } => {
+                    request_response::Event::ResponseSent { peer, .. } => {
                         info!("Response sent to {}", peer);
                     }
                     request_response::Event::InboundFailure { peer, error, .. } => {
@@ -436,7 +451,6 @@ impl P2PNode {
                     request_response::Event::OutboundFailure { peer, error, .. } => {
                         warn!("Outbound request failure to {}: {:?}", peer, error);
                     }
-                    _ => {}
                 }
             }
         }

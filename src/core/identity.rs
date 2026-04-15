@@ -86,15 +86,15 @@ impl Identity {
         };
         
         let data = serde_json::to_string_pretty(&identity_file)?;
-        std::fs::write(key_path, data)?;
-        
+        std::fs::write(&key_path, data)?;
+
         // Set restrictive permissions (owner read/write only)
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mut perms = std::fs::metadata(key_path)?.permissions();
+            let mut perms = std::fs::metadata(&key_path)?.permissions();
             perms.set_mode(0o600);
-            std::fs::set_permissions(key_path, perms)?;
+            std::fs::set_permissions(&key_path, perms)?;
         }
         
         Ok(())
