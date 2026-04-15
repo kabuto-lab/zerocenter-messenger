@@ -15,6 +15,9 @@ pub struct StoredMessage {
     pub ttl: i64,
 }
 
+/// A single contact row: (peer_id, public_key, alias).
+pub type ContactRow = (Vec<u8>, Vec<u8>, Option<String>);
+
 /// Local message storage using SQLite
 pub struct MessageStore {
     conn: Connection,
@@ -152,7 +155,7 @@ impl MessageStore {
     }
 
     /// Get all contacts
-    pub fn get_contacts(&self) -> Result<Vec<(Vec<u8>, Vec<u8>, Option<String>)>> {
+    pub fn get_contacts(&self) -> Result<Vec<ContactRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT peer_id, public_key, alias FROM contacts ORDER BY alias"
         )?;

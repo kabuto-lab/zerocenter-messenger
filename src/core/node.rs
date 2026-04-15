@@ -210,7 +210,7 @@ impl P2PNode {
                             if self.connected_peers.is_empty() {
                                 println!("  (no contacts yet - connect to peers first)");
                             } else {
-                                for (pid, _) in &self.connected_peers {
+                                for pid in self.connected_peers.keys() {
                                     println!("  {}", pid);
                                 }
                             }
