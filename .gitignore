@@ -1,0 +1,37 @@
+# Rust
+/target/
+**/*.rs.bk
+# NOTE: Cargo.lock is committed for binary crates (reproducible builds).
+
+# Tauri
+icons/*.svg
+icons/*.png
+icons/*.icns
+icons/*.ico
+
+# Development
+*.log
+*.db
+*.db-shm
+*.db-wal
+
+# Environment
+.env
+.env.local
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Data (local test profiles)
+data/
+
+# Secrets — never commit identity keys
+identity.json
+**/identity.json

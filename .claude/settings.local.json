@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(dir \"C:\\\\__Qwen1\\\\ME55\" /s /b)",
+      "Bash(cmd /c \"dir C:\\\\__Qwen1\\\\ME55 /s /b\")"
+    ]
+  }
+}

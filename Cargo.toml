@@ -1,0 +1,70 @@
+[package]
+name = "zerocenter-messenger"
+version = "0.1.0"
+edition = "2021"
+authors = ["ZeroCenter Team"]
+description = "Censorship-Resistant, Zero-Trust, Leaderless P2P Messenger"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1.35", features = ["full"] }
+
+# P2P networking
+# NOTE: "quic" is temporarily disabled because it transitively requires `ring`,
+# whose C build script crashes cl.exe on some local Windows toolchains.
+# Re-enable once the MSVC toolchain is updated (VS Build Tools 2022+).
+libp2p = { version = "0.53", features = [
+    "tokio",
+    "tcp",
+    # "quic",
+    "noise",
+    "yamux",
+    "kad",
+    "gossipsub",
+    "mdns",
+    "relay",
+    "identify",
+    "dns",
+    "macros",
+    "request-response",
+    "cbor"
+] }
+
+# Cryptography
+ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+x25519-dalek = "2.0"
+rand = "0.8"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Storage
+rusqlite = { version = "0.30", features = ["bundled"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Utilities
+anyhow = "1.0"
+thiserror = "1.0"
+dirs = "5.0"
+
+# CLI
+clap = { version = "4.4", features = ["derive"] }
+
+# Futures executor
+futures = "0.3"
+
+# Base58 encoding for peer IDs
+bs58 = "0.5"
+
+[[bin]]
+name = "zerocenter"
+path = "src/main.rs"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

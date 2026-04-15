@@ -1,0 +1,398 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ZeroCenter Messenger — Project Overview</title>
+<style>
+  :root {
+    --bg: #0b0d10;
+    --panel: #13171c;
+    --panel-2: #1a1f26;
+    --border: #262c35;
+    --text: #e6e9ef;
+    --muted: #9aa3b2;
+    --accent: #7dd3fc;
+    --accent-2: #a78bfa;
+    --ok: #4ade80;
+    --warn: #fbbf24;
+    --err: #f87171;
+    --code-bg: #0f1318;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; line-height: 1.6; }
+  header {
+    padding: 48px 32px 32px;
+    background: linear-gradient(135deg, #0f1318 0%, #1a1030 100%);
+    border-bottom: 1px solid var(--border);
+  }
+  header .wrap { max-width: 1100px; margin: 0 auto; }
+  .badge {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.03em;
+    background: rgba(125, 211, 252, 0.12);
+    color: var(--accent);
+    border: 1px solid rgba(125, 211, 252, 0.3);
+  }
+  h1 { font-size: 42px; margin: 12px 0 8px; letter-spacing: -0.02em; }
+  h1 .dot { color: var(--accent-2); }
+  .subtitle { color: var(--muted); font-size: 18px; max-width: 720px; }
+  main { max-width: 1100px; margin: 0 auto; padding: 32px; }
+  section { margin-bottom: 48px; }
+  h2 { font-size: 26px; margin: 0 0 16px; border-left: 3px solid var(--accent); padding-left: 12px; }
+  h3 { font-size: 18px; margin: 24px 0 8px; color: var(--accent); }
+  p { margin: 0 0 12px; color: #cfd4de; }
+  code { font-family: "SF Mono", Consolas, Monaco, monospace; font-size: 13px; background: var(--code-bg); padding: 2px 6px; border-radius: 4px; color: #fde68a; }
+  pre { background: var(--code-bg); padding: 16px; border-radius: 8px; border: 1px solid var(--border); overflow-x: auto; font-size: 13px; }
+  pre code { background: none; padding: 0; color: #d4d4d8; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px;
+  }
+  .card h4 { margin: 0 0 8px; font-size: 15px; color: var(--accent); }
+  .card p { font-size: 14px; color: var(--muted); margin: 0; }
+  table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 14px; }
+  th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { background: var(--panel-2); color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; }
+  tr:hover td { background: rgba(125, 211, 252, 0.03); }
+  .status { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 12px; font-weight: 600; }
+  .s-done { background: rgba(74, 222, 128, 0.15); color: var(--ok); }
+  .s-todo { background: rgba(248, 113, 113, 0.15); color: var(--err); }
+  .s-wip { background: rgba(251, 191, 36, 0.15); color: var(--warn); }
+  .s-plan { background: rgba(167, 139, 250, 0.15); color: var(--accent-2); }
+  .pri-crit { color: var(--err); font-weight: 700; }
+  .pri-high { color: var(--warn); font-weight: 600; }
+  .pri-med { color: var(--accent); }
+  .pri-low { color: var(--muted); }
+  ul { padding-left: 20px; }
+  li { margin-bottom: 6px; }
+  .timeline { position: relative; padding-left: 32px; }
+  .timeline::before {
+    content: "";
+    position: absolute;
+    left: 10px;
+    top: 8px;
+    bottom: 8px;
+    width: 2px;
+    background: linear-gradient(var(--accent), var(--accent-2));
+  }
+  .phase {
+    position: relative;
+    margin-bottom: 28px;
+    padding: 16px 20px;
+    background: var(--panel);
+    border-radius: 10px;
+    border: 1px solid var(--border);
+  }
+  .phase::before {
+    content: "";
+    position: absolute;
+    left: -27px;
+    top: 20px;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: var(--accent);
+    border: 3px solid var(--bg);
+    box-shadow: 0 0 0 1px var(--accent);
+  }
+  .phase.done::before { background: var(--ok); box-shadow: 0 0 0 1px var(--ok); }
+  .phase.wip::before { background: var(--warn); box-shadow: 0 0 0 1px var(--warn); }
+  .phase.plan::before { background: var(--accent-2); box-shadow: 0 0 0 1px var(--accent-2); }
+  .phase h3 { margin-top: 0; }
+  .phase .tag { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; }
+  .callout {
+    border-left: 4px solid var(--warn);
+    background: rgba(251, 191, 36, 0.06);
+    padding: 14px 18px;
+    border-radius: 0 8px 8px 0;
+    margin: 16px 0;
+  }
+  .callout.err { border-color: var(--err); background: rgba(248, 113, 113, 0.06); }
+  .callout.ok { border-color: var(--ok); background: rgba(74, 222, 128, 0.06); }
+  footer { padding: 32px; text-align: center; color: var(--muted); font-size: 13px; border-top: 1px solid var(--border); margin-top: 48px; }
+  kbd { font-family: "SF Mono", Consolas, monospace; font-size: 12px; padding: 2px 6px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 4px; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap">
+    <span class="badge">RUST · libp2p · P2P MESSENGER</span>
+    <h1>ZeroCenter Messenger<span class="dot">.</span></h1>
+    <p class="subtitle">A censorship-resistant, zero-trust, leaderless peer-to-peer communication platform.
+    No servers. No accounts. No central authority. Cryptographic identity, direct peer connections, and local-first storage.</p>
+  </div>
+</header>
+
+<main>
+
+<section id="concept">
+  <h2>Concept</h2>
+  <p>ZeroCenter is a messenger built on a simple thesis: <strong>communication infrastructure should not require trust in any third party</strong>.
+  There is no central server, no phone number registry, no account provider. Each participant is cryptographically addressed by the hash of their own Ed25519 public key, and messages flow directly between peers over an encrypted transport.</p>
+
+  <div class="grid">
+    <div class="card">
+      <h4>Zero-Trust</h4>
+      <p>No registration authority, no identity provider. Your keys are your identity; they never leave the device.</p>
+    </div>
+    <div class="card">
+      <h4>Leaderless</h4>
+      <p>No master node, no rendezvous server. Peer discovery via Kademlia DHT and mDNS on local networks.</p>
+    </div>
+    <div class="card">
+      <h4>Censorship-Resistant</h4>
+      <p>Target: pluggable obfuscated transports (Obfs4, Snowflake) so the protocol survives DPI and blocklists.</p>
+    </div>
+    <div class="card">
+      <h4>Local-First</h4>
+      <p>Messages and contacts stored in a per-profile SQLite database. Works offline; syncs when peers come online.</p>
+    </div>
+  </div>
+</section>
+
+<section id="architecture">
+  <h2>Architecture</h2>
+  <h3>Technology Stack</h3>
+  <table>
+    <thead><tr><th>Layer</th><th>Technology</th><th>Purpose</th></tr></thead>
+    <tbody>
+      <tr><td>Language</td><td>Rust 2021</td><td>Memory-safe, async-first</td></tr>
+      <tr><td>Async runtime</td><td>Tokio 1.35</td><td>Event loop, task scheduling</td></tr>
+      <tr><td>P2P networking</td><td>libp2p 0.53</td><td>Swarm, transports, discovery</td></tr>
+      <tr><td>Transport</td><td>TCP + QUIC, Noise, Yamux</td><td>Encrypted, multiplexed streams</td></tr>
+      <tr><td>Discovery</td><td>Kademlia DHT + mDNS</td><td>Global and LAN peer lookup</td></tr>
+      <tr><td>Messaging</td><td>Gossipsub + Request-Response (CBOR)</td><td>Pubsub broadcast + direct DMs</td></tr>
+      <tr><td>Identity</td><td>Ed25519 (<code>ed25519-dalek</code>)</td><td>Signing keys, peer IDs</td></tr>
+      <tr><td>Key agreement</td><td>X25519 (<code>x25519-dalek</code>)</td><td>Planned: E2EE session keys</td></tr>
+      <tr><td>Storage</td><td>SQLite (<code>rusqlite</code>)</td><td>Local message + contact store</td></tr>
+      <tr><td>CLI</td><td><code>clap</code> 4.4</td><td>Arg parsing, multi-profile</td></tr>
+      <tr><td>Future GUI</td><td>Tauri</td><td>Cross-platform desktop UI</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Module Layout</h3>
+<pre><code>src/
+├── main.rs              Entry point, multi-profile, async bootstrap
+├── lib.rs               Public re-exports
+├── cli.rs               stdin REPL + command dispatcher
+├── core/
+│   ├── identity.rs      Ed25519 keys, load/save, libp2p keypair bridge
+│   ├── config.rs        Node config (profile, data_dir, bootstrap)
+│   └── node.rs          P2PNode: swarm, event loop, command channel
+├── network/
+│   └── behaviour.rs     Composed NetworkBehaviour (Kad, Gossipsub, mDNS, Identify, RR)
+├── crypto/mod.rs        Key conversion helpers
+├── protocol/message.rs  ProtocolMessage envelope + MessageType enum
+├── storage/store.rs     SQLite: messages, contacts, channels
+└── gui/app.rs           Tauri stub (not yet wired)</code></pre>
+
+  <h3>Protocol Flow</h3>
+  <ol>
+    <li><strong>Bootstrap:</strong> On startup, load or generate an Ed25519 identity per profile.</li>
+    <li><strong>Listen:</strong> Open TCP + QUIC on a random port; advertise via mDNS.</li>
+    <li><strong>Discover:</strong> Peers on the LAN are found via mDNS; global peers via Kademlia DHT (once bootstrap nodes exist).</li>
+    <li><strong>Connect:</strong> Noise Protocol (ChaCha20-Poly1305) handshake, then Yamux stream multiplexing.</li>
+    <li><strong>Exchange:</strong> Direct DMs via request-response over CBOR; offline fallback via Gossipsub topic <code>/zerocenter/global</code>.</li>
+    <li><strong>Persist:</strong> Received and sent messages recorded in the per-profile SQLite database.</li>
+  </ol>
+</section>
+
+<section id="status">
+  <h2>Current Status</h2>
+
+  <div class="callout ok">
+    <strong>Phase 1 &amp; 2 Complete.</strong> A working CLI messenger that generates identities, discovers peers on LAN, connects, exchanges direct messages, and persists them locally. Release binary builds cleanly.
+  </div>
+
+  <h3>What Works</h3>
+  <table>
+    <thead><tr><th>Feature</th><th>Status</th><th>Notes</th></tr></thead>
+    <tbody>
+      <tr><td>Ed25519 identity + persistence</td><td><span class="status s-done">DONE</span></td><td>Saved to <code>identity.json</code>, Unix perms 0o600</td></tr>
+      <tr><td>Multi-profile support</td><td><span class="status s-done">DONE</span></td><td>Run <code>alice</code> and <code>bob</code> side-by-side</td></tr>
+      <tr><td>libp2p Swarm (TCP + QUIC)</td><td><span class="status s-done">DONE</span></td><td>Noise + Yamux</td></tr>
+      <tr><td>mDNS local discovery</td><td><span class="status s-done">DONE</span></td><td>Zero-config LAN</td></tr>
+      <tr><td>Kademlia DHT</td><td><span class="status s-wip">PARTIAL</span></td><td>Wired but no bootstrap nodes — inert</td></tr>
+      <tr><td>Gossipsub pubsub</td><td><span class="status s-done">DONE</span></td><td>Subscribed to <code>/zerocenter/global</code></td></tr>
+      <tr><td>Direct messaging (request-response)</td><td><span class="status s-done">DONE</span></td><td>CBOR-framed DMs</td></tr>
+      <tr><td>SQLite storage</td><td><span class="status s-done">DONE</span></td><td>messages, contacts, channels tables</td></tr>
+      <tr><td>CLI (help, connect, send, peers, history)</td><td><span class="status s-done">DONE</span></td><td>Interactive REPL</td></tr>
+      <tr><td>End-to-end encryption</td><td><span class="status s-todo">MISSING</span></td><td>Payloads are plaintext on the wire</td></tr>
+      <tr><td>Sender signature verification</td><td><span class="status s-todo">MISSING</span></td><td><code>proto_msg.from</code> trusted blindly</td></tr>
+      <tr><td>Obfuscated transport (Obfs4/Snowflake)</td><td><span class="status s-todo">MISSING</span></td><td>Raw TCP/QUIC is DPI-detectable</td></tr>
+      <tr><td>Tauri GUI</td><td><span class="status s-wip">STUB</span></td><td>Module exists, not wired into build</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section id="issues">
+  <h2>Critical Issues to Address</h2>
+
+  <div class="callout err">
+    <strong>Security gap.</strong> Despite the "zero-trust" framing, messages are currently sent in cleartext at the application layer. Noise only protects transport hops, not end-to-end. The SQLite column is named <code>ciphertext</code> but stores <code>content.as_bytes()</code>.
+  </div>
+
+  <h3>Security</h3>
+  <ul>
+    <li><span class="pri-crit">CRITICAL</span> — No E2EE. <code>x25519-dalek</code> is a declared dependency but unused. Need Double Ratchet or equivalent.</li>
+    <li><span class="pri-crit">CRITICAL</span> — Gossipsub fallback broadcasts DMs globally on <code>/zerocenter/global</code>. Any subscribed peer reads them. This fallback must be removed or replaced with an encrypted-envelope relay scheme.</li>
+    <li><span class="pri-high">HIGH</span> — No sender signature verification on incoming <code>ProtocolMessage</code>. Sender fields are attacker-controlled.</li>
+    <li><span class="pri-high">HIGH</span> — No replay protection, no per-message nonces, no forward secrecy.</li>
+    <li><span class="pri-med">MED</span> — Wire format is <code>serde_json</code>; should be CBOR (already a libp2p feature) or bincode for size and stricter parsing.</li>
+  </ul>
+
+  <h3>Correctness Bugs</h3>
+  <ul>
+    <li>mDNS discovery pre-populates <code>connected_peers</code> before any connection is established — <code>peers</code> command lies.</li>
+    <li><code>contacts</code> command ignores the <code>contacts</code> SQLite table and just lists connected peers.</li>
+    <li>Kademlia bootstrap list is empty — DHT cannot be used beyond the LAN.</li>
+    <li><code>chrono_format</code> computes time-of-day incorrectly and shows no date.</li>
+    <li>Dead code: <code>P2PNode::send_message</code> is unreachable after <code>run_with_commands</code> consumes <code>self</code>.</li>
+    <li>Docs drift: <code>DEV_CONTEXT.md</code> says Phase 1, <code>README.md</code> says Phase 2.</li>
+  </ul>
+
+  <h3>Code Hygiene</h3>
+  <ul>
+    <li>No tests anywhere — no <code>tests/</code> directory, no <code>#[cfg(test)]</code> modules.</li>
+    <li><code>components/</code> directory is empty.</li>
+    <li><code>gui</code> module is gated on a <code>gui</code> feature that isn't declared in <code>Cargo.toml</code>.</li>
+    <li>Unused imports / bindings (<code>peer</code>, <code>request_id</code>) will emit warnings on strict builds.</li>
+  </ul>
+</section>
+
+<section id="tasks">
+  <h2>Tasks — Prioritised Backlog</h2>
+
+  <h3>P0 — Must Fix Before Any Release</h3>
+  <table>
+    <thead><tr><th>#</th><th>Task</th><th>Effort</th></tr></thead>
+    <tbody>
+      <tr><td>1</td><td>Implement E2EE with Double Ratchet (X3DH handshake, per-message keys, forward secrecy)</td><td>~2 weeks</td></tr>
+      <tr><td>2</td><td>Remove or redesign gossipsub DM fallback (encrypted envelope only)</td><td>~2 days</td></tr>
+      <tr><td>3</td><td>Verify sender Ed25519 signature on every received <code>ProtocolMessage</code></td><td>~1 day</td></tr>
+      <tr><td>4</td><td>Replace JSON wire format with CBOR; define versioned schema</td><td>~1 day</td></tr>
+      <tr><td>5</td><td>Fix <code>connected_peers</code> to populate only on <code>ConnectionEstablished</code></td><td>~1 hour</td></tr>
+    </tbody>
+  </table>
+
+  <h3>P1 — Core Correctness</h3>
+  <table>
+    <thead><tr><th>#</th><th>Task</th><th>Effort</th></tr></thead>
+    <tbody>
+      <tr><td>6</td><td>Wire <code>contacts</code> CLI command to the SQLite <code>contacts</code> table + <code>addcontact</code> command</td><td>~1 day</td></tr>
+      <tr><td>7</td><td>Proper timestamp formatting (use <code>chrono</code> crate, ISO-8601)</td><td>~2 hours</td></tr>
+      <tr><td>8</td><td>Add Kademlia bootstrap config + at least one public bootstrap node</td><td>~1 day</td></tr>
+      <tr><td>9</td><td>Replay / nonce window per peer session</td><td>~2 days</td></tr>
+      <tr><td>10</td><td>Integration tests: spin up two nodes, exchange a message, assert delivery + persistence</td><td>~3 days</td></tr>
+      <tr><td>11</td><td>Reconcile <code>DEV_CONTEXT.md</code> and <code>README.md</code>; generate status from a single source</td><td>~1 hour</td></tr>
+    </tbody>
+  </table>
+
+  <h3>P2 — UX and Transport</h3>
+  <table>
+    <thead><tr><th>#</th><th>Task</th><th>Effort</th></tr></thead>
+    <tbody>
+      <tr><td>12</td><td>Tauri GUI: identity view, contact list, conversation pane, send box</td><td>~2 weeks</td></tr>
+      <tr><td>13</td><td>QR-code / short-link peer invite format</td><td>~2 days</td></tr>
+      <tr><td>14</td><td>Pluggable obfuscated transport (Obfs4 via libp2p transport adapter)</td><td>~2 weeks</td></tr>
+      <tr><td>15</td><td>Snowflake / WebRTC transport for NAT traversal</td><td>~3 weeks</td></tr>
+      <tr><td>16</td><td>Offline message relay: store-and-forward via trusted relays</td><td>~2 weeks</td></tr>
+    </tbody>
+  </table>
+
+  <h3>P3 — Future Features</h3>
+  <table>
+    <thead><tr><th>#</th><th>Task</th><th>Effort</th></tr></thead>
+    <tbody>
+      <tr><td>17</td><td>Group chat with MLS (Messaging Layer Security)</td><td>~4 weeks</td></tr>
+      <tr><td>18</td><td>File sharing via IPFS or libp2p bitswap</td><td>~3 weeks</td></tr>
+      <tr><td>19</td><td>Voice / video via WebRTC data channels</td><td>~4 weeks</td></tr>
+      <tr><td>20</td><td>Mobile clients (React Native or Tauri Mobile)</td><td>~6 weeks</td></tr>
+      <tr><td>21</td><td>Reproducible builds + signed release artifacts</td><td>~1 week</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section id="roadmap">
+  <h2>Roadmap</h2>
+
+  <div class="timeline">
+
+    <div class="phase done">
+      <span class="tag">Shipped · Mar 2026</span>
+      <h3>Phase 1 — P2P Foundation</h3>
+      <p>Identity, libp2p swarm, mDNS discovery, Kademlia wiring, CLI scaffold, SQLite storage.</p>
+    </div>
+
+    <div class="phase done">
+      <span class="tag">Shipped · Mar 2026</span>
+      <h3>Phase 2 — Direct Messaging</h3>
+      <p>Request-response protocol for DMs, gossipsub fallback, message persistence, peer / contact / history commands.</p>
+    </div>
+
+    <div class="phase wip">
+      <span class="tag">In Progress · Q2 2026</span>
+      <h3>Phase 3 — End-to-End Security</h3>
+      <p>Double Ratchet, X3DH, signature verification, CBOR wire format, replay protection. Remove plaintext DM fallback. Integration test suite.</p>
+    </div>
+
+    <div class="phase plan">
+      <span class="tag">Planned · Q3 2026</span>
+      <h3>Phase 4 — GUI &amp; Onboarding</h3>
+      <p>Tauri desktop app, QR-invite flow, contact management, conversation UI, cross-platform installers.</p>
+    </div>
+
+    <div class="phase plan">
+      <span class="tag">Planned · Q4 2026</span>
+      <h3>Phase 5 — Censorship Resistance</h3>
+      <p>Pluggable transports: Obfs4, Snowflake. Public bootstrap DHT. Offline relay protocol with encrypted envelopes.</p>
+    </div>
+
+    <div class="phase plan">
+      <span class="tag">Planned · 2027</span>
+      <h3>Phase 6 — Group &amp; Rich Media</h3>
+      <p>MLS group chat, file sharing (IPFS / bitswap), voice &amp; video via WebRTC, mobile clients.</p>
+    </div>
+
+    <div class="phase plan">
+      <span class="tag">Planned · 2027+</span>
+      <h3>Phase 7 — Production Hardening</h3>
+      <p>External security audit, reproducible builds, signed releases, public bug bounty, v1.0.</p>
+    </div>
+
+  </div>
+</section>
+
+<section id="quickstart">
+  <h2>Quick Start</h2>
+  <p>Two instances on the same machine:</p>
+<pre><code>cd C:\__Qwen1\ME55
+cargo build --release
+
+# Terminal 1
+set RUST_LOG=info
+target\release\zerocenter.exe --profile alice
+
+# Terminal 2
+set RUST_LOG=info
+target\release\zerocenter.exe --profile bob</code></pre>
+  <p>In each REPL: <kbd>help</kbd>, <kbd>peers</kbd>, <kbd>connect &lt;multiaddr&gt;</kbd>, <kbd>send &lt;peer_id&gt; &lt;msg&gt;</kbd>, <kbd>history</kbd>, <kbd>quit</kbd>.</p>
+</section>
+
+</main>
+
+<footer>
+  ZeroCenter Messenger · MIT License · Decentralized software for decentralized people.
+</footer>
+
+</body>
+</html>

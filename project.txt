@@ -1,0 +1,666 @@
+================================================================================
+                    ZEROCENTER MESSENGER - PROJECT ANALYSIS
+================================================================================
+
+Censorship-Resistant, Zero-Trust, Leaderless P2P Communication Platform
+Version: 0.1.0 (Phase 1 Complete)
+Generated: March 6, 2026
+License: MIT
+
+================================================================================
+                              EXECUTIVE SUMMARY
+================================================================================
+
+ZeroCenter Messenger is a decentralized peer-to-peer messaging platform built in
+Rust. It is designed to operate without any central infrastructure, making it
+resistant to censorship, server takedowns, and developer intervention. The
+project leverages libp2p for networking, Ed25519 for cryptographic identity,
+and SQLite for local message storage.
+
+MISSION: The network must survive destruction of all official servers, domain
+seizure, developer arrests, and app store removal. Every feature prioritizes
+antifragility over convenience.
+
+KEY METRICS:
+  - Language: Rust (Edition 2021)
+  - P2P Framework: libp2p 0.53
+  - Central Servers: 0
+  - Identity System: Ed25519
+  - Encryption: Noise Protocol (ChaCha20-Poly1305)
+  - Storage: SQLite (local, per-profile)
+
+================================================================================
+                              PROJECT STRUCTURE
+================================================================================
+
+ME55/
+├── Cargo.toml              # Dependencies (libp2p 0.53, tokio, ed25519-dalek)
+├── Cargo.lock              # Locked dependency versions
+├── README.md               # User documentation
+├── DEV_CONTEXT.md          # Developer notes and session context
+├── ME55AG.html             # Full roadmap & requirements (1597 lines)
+├── tauri.conf.json         # Future GUI configuration (Tauri)
+├── test.bat                # Quick test script (opens 2 console windows)
+├── project.html            # This HTML analysis document
+├── project.txt             # This text analysis document
+├── src/
+│   ├── main.rs             # Entry point with multi-profile support
+│   ├── lib.rs              # Library exports
+│   ├── cli.rs              # CLI interface (help, quit commands)
+│   ├── core/
+│   │   ├── mod.rs          # Core module exports
+│   │   ├── identity.rs     # Ed25519 identity management, persistence
+│   │   ├── config.rs       # Node configuration struct
+│   │   └── node.rs         # P2P node (Swarm, event loop, behaviours)
+│   ├── network/
+│   │   ├── mod.rs          # Network module exports
+│   │   └── behaviour.rs    # Combined NetworkBehaviour (Kad, Gossipsub, mDNS)
+│   ├── crypto/
+│   │   └── mod.rs          # Cryptographic utilities, key conversions
+│   ├── protocol/
+│   │   ├── mod.rs          # Protocol module exports
+│   │   └── message.rs      # ProtocolMessage struct, MessageType enum
+│   ├── storage/
+│   │   ├── mod.rs          # Storage module exports
+│   │   └── store.rs        # SQLite storage (messages, contacts, channels)
+│   └── gui/
+│       ├── mod.rs          # GUI module exports
+│       └── app.rs          # Tauri app stub (future implementation)
+└── dist/
+    └── index.html          # Frontend UI mockup (future Tauri frontend)
+
+================================================================================
+                              CORE COMPONENTS
+================================================================================
+
+1. IDENTITY MODULE (core/identity.rs)
+   ─────────────────────────────────
+   Manages Ed25519 cryptographic identity with persistent storage.
+
+   Structure:
+   - signing_key: SigningKey (32-byte private key, never transmitted)
+   - verifying_key: VerifyingKey (32-byte public key, shared with peers)
+   - peer_id: PeerId (derived from public key hash)
+   - keypair: Keypair (libp2p identity keypair)
+
+   Functions:
+   - generate() -> Self: Create new random identity
+   - load_or_create(data_dir) -> Result<Self>: Load from disk or create new
+   - save(data_dir) -> Result<()>: Persist identity to JSON file
+   - sign(data) -> Signature: Sign data with private key
+   - peer_id() -> PeerId: Get cached peer ID
+
+   Storage Location:
+   - Windows: %LOCALAPPDATA%\ZeroCenter\<profile>\identity.json
+   - Linux: ~/.local/share/ZeroCenter/<profile>/identity.json
+   - macOS: ~/Library/Application Support/ZeroCenter/<profile>/identity.json
+
+2. P2P NODE (core/node.rs)
+   ────────────────────────
+   Core networking engine built on libp2p Swarm.
+
+   Configuration:
+   - TCP with Nodelay and port reuse
+   - QUIC for UDP-based connections
+   - Noise Protocol for encrypted handshakes
+   - Yamux for stream multiplexing
+   - DNS resolution support
+
+   Functions:
+   - new(config, identity) -> Result<Self>: Create new node
+   - start() -> Result<()>: Begin listening on configured port
+   - run() -> Result<()>: Run event loop (async, background task)
+   - peer_id() -> PeerId: Get local peer ID
+   - handle_behaviour_event(): Process protocol events
+
+   Listen Address: /ip4/0.0.0.0/tcp/<port> (random port if 0)
+
+3. NETWORK BEHAVIOUR (network/behaviour.rs)
+   ─────────────────────────────────────────
+   Combined NetworkBehaviour aggregating all libp2p protocols.
+
+   Components:
+   ┌─────────────────────────────────────────────────────────────────────────┐
+   │ Behaviour                                                               │
+   ├─────────────────────────────────────────────────────────────────────────┤
+   │ • kademlia: kad::Behaviour<MemoryStore>                                 │
+   │   - DHT for peer discovery and content routing                          │
+   │   - Protocol: /zerocenter/kad/1.0.0                                     │
+   │   - Storage: In-memory (ephemeral)                                      │
+   │                                                                         │
+   │ • gossipsub: gossipsub::Behaviour                                       │
+   │   - Pubsub messaging with signed messages                               │
+   │   - Topic: /zerocenter/global                                           │
+   │   - Validation: Strict mode                                             │
+   │   - Heartbeat: 10 seconds                                               │
+   │                                                                         │
+   │ • mdns: mdns::tokio::Behaviour                                          │
+   │   - Local network auto-discovery                                        │
+   │   - No configuration required                                           │
+   │                                                                         │
+   │ • identify_behaviour: identify::Behaviour                               │
+   │   - Peer information exchange                                           │
+   │   - Protocol: /zerocenter/1.0.0                                         │
+   │   - Agent version: zerocenter/0.1.0                                     │
+   └─────────────────────────────────────────────────────────────────────────┘
+
+4. PROTOCOL MESSAGES (protocol/message.rs)
+   ────────────────────────────────────────
+   Message envelope structure for all communications.
+
+   pub struct ProtocolMessage {
+       pub to: Vec<u8>,           // Recipient identifier (hash of public key)
+       pub from: Vec<u8>,         // Sender identifier
+       pub payload: Vec<u8>,      // Encrypted payload
+       pub timestamp: i64,        // Unix timestamp (seconds since epoch)
+       pub ttl: i64,              // Time to live in seconds (default: 7 days)
+       pub msg_type: MessageType, // Direct, Group, File, Voice, Control
+   }
+
+   pub enum MessageType {
+       Direct = 0,    // One-to-one message
+       Group = 1,     // Group chat message
+       File = 2,      // File transfer
+       Voice = 3,     // Voice message
+       Control = 4,   // System/control message
+   }
+
+   Methods:
+   - new_direct(to, from, payload) -> Self: Create direct message
+   - is_expired() -> bool: Check if TTL has expired
+   - to_bytes() -> Result<Vec<u8>>: Serialize to JSON bytes
+   - from_bytes(data) -> Result<Self>: Deserialize from JSON bytes
+
+5. STORAGE (storage/store.rs)
+   ───────────────────────────
+   SQLite-based local storage for messages and contacts.
+
+   Database Tables:
+
+   messages:
+   ┌─────────────┬──────────────┬────────────┬─────────────┬───────────┬──────┐
+   │ id (PK)     │ sender (BLOB)│ recipient  │ ciphertext  │ timestamp │ ttl  │
+   │             │              │ (BLOB)     │ (BLOB)      │ (INTEGER) │      │
+   ├─────────────┼──────────────┼────────────┼─────────────┼───────────┼──────┤
+   │ Auto-increment│ Sender ID  │ Recipient  │ Encrypted   │ Unix time │ Secs │
+   │             │              │ ID         │ payload     │           │      │
+   └─────────────┴──────────────┴────────────┴─────────────┴───────────┴──────┘
+   Indexes: idx_recipient, idx_timestamp
+
+   contacts:
+   ┌─────────────┬──────────────┬──────────────┬───────────┬──────────────┐
+   │ id (PK)     │ peer_id      │ public_key   │ alias     │ created_at   │
+   │             │ (BLOB, UNIQUE)│ (BLOB)      │ (TEXT)    │ (INTEGER)    │
+   └─────────────┴──────────────┴──────────────┴───────────┴──────────────┘
+
+   channels:
+   ┌─────────────┬──────────────┬───────────┬──────────────┐
+   │ id (PK)     │ name (TEXT,  │ topic     │ created_at   │
+   │             │ UNIQUE)      │ (TEXT)    │ (INTEGER)    │
+   └─────────────┴──────────────┴───────────┴──────────────┘
+
+   Functions:
+   - open(data_dir) -> Result<Self>: Open/create database
+   - store_message(sender, recipient, ciphertext, ttl) -> Result<i64>: Insert
+   - get_messages(recipient) -> Result<Vec<StoredMessage>>: Query by recipient
+   - cleanup_expired() -> Result<usize>: Delete expired messages
+   - add_contact(peer_id, public_key, alias) -> Result<()>: Insert/update
+   - get_contacts() -> Result<Vec<(peer_id, public_key, alias)>>: List all
+
+================================================================================
+                              DEPENDENCIES
+================================================================================
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ DEPENDENCY         │ VERSION │ PURPOSE                                     │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ tokio              │ 1.35    │ Async runtime (full features)               │
+│ libp2p             │ 0.53    │ P2P networking framework                    │
+│                    │         │ Features: tokio, tcp, quic, noise, yamux,   │
+│                    │         │         kad, gossipsub, mdns, relay,        │
+│                    │         │         identify, dns, macros               │
+│ ed25519-dalek      │ 2.1     │ Ed25519 digital signatures                  │
+│                    │         │ Features: rand_core                         │
+│ x25519-dalek       │ 2.0     │ X25519 key exchange (Montgomery curve)      │
+│ rand               │ 0.8     │ Random number generation                    │
+│ serde              │ 1.0     │ Serialization framework                     │
+│                    │         │ Features: derive                            │
+│ serde_json         │ 1.0     │ JSON serialization                          │
+│ rusqlite           │ 0.30    │ SQLite bindings                             │
+│                    │         │ Features: bundled (no system SQLite needed) │
+│ tracing            │ 0.1     │ Async-aware logging                         │
+│ tracing-subscriber │ 0.3     │ Logging subscriber                          │
+│                    │         │ Features: env-filter                        │
+│ anyhow             │ 1.0     │ Error handling with context                 │
+│ thiserror          │ 1.0     │ Derive macro for custom error types         │
+│ dirs               │ 5.0     │ Platform-specific directories             │
+│ clap               │ 4.4     │ Command-line argument parser                │
+│                    │         │ Features: derive                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+================================================================================
+                           IMPLEMENTATION STATUS
+================================================================================
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ FEATURE                     │ STATUS      │ PRIORITY │ MODULE               │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Ed25519 Identity Generation │ ✅ Complete │ Core     │ core/identity.rs     │
+│ libp2p Integration (TCP)    │ ✅ Complete │ Core     │ core/node.rs         │
+│ libp2p Integration (QUIC)   │ ✅ Complete │ Core     │ core/node.rs         │
+│ Kademlia DHT Discovery      │ ✅ Complete │ Core     │ network/behaviour.rs │
+│ Noise Protocol Encryption   │ ✅ Complete │ Core     │ core/node.rs         │
+│ mDNS Local Discovery        │ ✅ Complete │ Core     │ network/behaviour.rs │
+│ Gossipsub PubSub            │ ✅ Complete │ Core     │ network/behaviour.rs │
+│ Multi-Profile Support       │ ✅ Complete │ High     │ main.rs, cli.rs      │
+│ SQLite Storage              │ ✅ Complete │ High     │ storage/store.rs     │
+│ Protocol Message Format     │ ✅ Complete │ High     │ protocol/message.rs  │
+│ Identify Protocol           │ ✅ Complete │ Medium   │ network/behaviour.rs │
+│ DNS Resolution              │ ✅ Complete │ Medium   │ core/node.rs         │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Direct Messaging            │ ❌ TODO     │ High     │ core/node.rs         │
+│ Contact Management          │ ❌ TODO     │ High     │ storage/store.rs     │
+│ E2EE (Double Ratchet)       │ ❌ TODO     │ Critical │ crypto/mod.rs        │
+│ GUI (Tauri)                 │ ⚠️ Stub    │ Medium   │ gui/app.rs           │
+│ Obfuscation (Obfs4)         │ ❌ TODO     │ High     │ network/             │
+│ Bootstrap Nodes             │ ❌ TODO     │ High     │ core/node.rs         │
+│ Message Encryption          │ ❌ TODO     │ Critical │ protocol/message.rs  │
+│ CLI Commands (send/connect) │ ❌ TODO     │ High     │ cli.rs               │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+================================================================================
+                              USAGE INSTRUCTIONS
+================================================================================
+
+BUILD COMMANDS:
+───────────────
+  # Development build
+  cargo build
+
+  # Release build (optimized with LTO)
+  cargo build --release
+
+  # Output: target\release\zerocenter.exe
+
+RUNNING MULTIPLE INSTANCES:
+───────────────────────────
+  # Terminal 1 - Alice
+  set RUST_LOG=info
+  target\release\zerocenter.exe --profile alice
+
+  # Terminal 2 - Bob
+  set RUST_LOG=info
+  target\release\zerocenter.exe --profile bob
+
+  # Quick test (opens 2 windows automatically)
+  test.bat
+
+CLI COMMANDS:
+─────────────
+  help / h     - Show available commands
+  quit / exit / q - Exit the application
+
+CLI ARGUMENTS:
+──────────────
+  --profile, -p <NAME>  - Profile name (default: "default")
+  --port, -P <PORT>     - Listen port (default: 0 = random)
+
+DATA STORAGE LOCATIONS:
+───────────────────────
+  Windows: %LOCALAPPDATA%\ZeroCenter\<profile>\
+  Linux:   ~/.local/share/ZeroCenter/<profile>/
+  macOS:   ~/Library/Application Support/ZeroCenter/<profile>/
+
+  Files per profile:
+  - identity.json  - Ed25519 keys (private, owner read/write only on Unix)
+  - messages.db    - SQLite message store
+
+================================================================================
+                           DEVELOPMENT ROADMAP
+================================================================================
+
+PHASE 1: FOUNDATION (Months 1-2) ──────────────────────────── ✅ COMPLETE
+  • Rust project scaffold with deterministic builds
+  • Ed25519 identity generation (no central registry)
+  • libp2p integration: QUIC + TCP transports
+  • Basic Kademlia DHT for peer discovery
+  • Noise Protocol for handshake encryption
+  • Local SQLite storage for messages
+  Survival Goal: Two peers can find each other and exchange encrypted
+                 messages without any server.
+
+PHASE 2: CENSORSHIP RESISTANCE (Months 3-4) ───────────────── ❌ TODO
+  • Obfs4 and Snowflake transport integration
+  • TLS 1.3 mimicry (domain fronting ready)
+  • BitTorrent Mainline DHT bootstrap
+  • Bitcoin blockchain anchoring for peer discovery
+  • Steganographic bootstrap (images, QR codes)
+  • Automatic transport fallback mechanism
+  Survival Goal: Network functions even if all domains blocked and all
+                 known IPs blacklisted.
+
+PHASE 3: ASYNC MESSAGING (Months 5-6) ─────────────────────── ❌ TODO
+  • Double Ratchet implementation (Signal Protocol)
+  • Store-and-forward via DHT (encrypted blobs)
+  • Friend-to-friend message caching
+  • Group chat with MLS (Message Layer Security)
+  • File sharing via IPFS integration
+  • Offline message queue with CRDT sync
+  Survival Goal: Messages deliver even if recipient offline for days,
+                 no central storage.
+
+PHASE 4: VOICE & VIDEO (Months 7-8) ───────────────────────── ❌ TODO
+  • WebRTC P2P calls (STUN/TURN via community)
+  • Adaptive bitrate for constrained networks
+  • Group calls with selective forwarding (SFU)
+  • Voice messages (Opus codec)
+  • Screen sharing
+  • Call obfuscation (mask as video streaming)
+  Survival Goal: Calls work through DPI, look like HTTPS or standard
+                 video traffic.
+
+PHASE 5: AUTONOMOUS DISTRIBUTION (Months 9-10) ────────────── ❌ TODO
+  • Reproducible builds (deterministic compilation)
+  • Multi-sig release signing (5+ developers)
+  • P2P auto-update via IPFS/BitTorrent
+  • Git-based update fallback
+  • Mobile clients (Tauri or React Native)
+  • F-Droid repository (self-hosted)
+  Survival Goal: Updates propagate even if GitHub blocked, no single
+                 point of distribution.
+
+PHASE 6: PRODUCTION HARDENING (Months 11-12) ──────────────── ❌ TODO
+  • Third-party security audit (cryptography)
+  • Formal verification for critical paths
+  • Chaos testing (random node failure)
+  • Community beta in high-censorship regions
+  • Documentation for self-compilation
+  • Anonymous bug bounty program
+  Survival Goal: Proven resilience through adversarial testing, community
+                 can maintain without original developers.
+
+================================================================================
+                           IMMEDIATE NEXT STEPS
+================================================================================
+
+MINIMUM VIABLE DEMO GOAL:
+  1. Start two instances (alice, bob)
+  2. Alice connects to Bob
+  3. Alice sends "Hello!"
+  4. Bob receives and displays it
+  5. Bob replies
+  6. Messages persist in SQLite
+
+IMPLEMENTATION TASKS:
+  1. Implement Peer Connection (cli.rs, core/node.rs)
+     - Add connect_to_peer(node, peer_id, address) function
+     - Parse multiaddr format
+     - Dial peer and wait for connection
+
+  2. Implement Message Sending (core/node.rs)
+     - Add send_message(&mut self, recipient: PeerId, content: &str)
+     - Encrypt payload (plaintext for now, E2EE later)
+     - Create ProtocolMessage
+     - Send via gossipsub or direct connection
+
+  3. Implement Message Reception (core/node.rs)
+     - Handle BehaviourEvent::Gossipsub(Message)
+     - Decrypt payload
+     - Store in SQLite via MessageStore
+     - Display to user
+
+  4. Add CLI Commands (cli.rs)
+     - connect <peer_id> <address>
+     - send <peer_id> <message>
+     - list <peer_id>
+     - contacts
+
+  5. Implement E2EE (crypto/mod.rs)
+     - Double Ratchet protocol
+     - X25519 key exchange
+     - AES-GCM or ChaCha20-Poly1305 encryption
+
+================================================================================
+                              KNOWN ISSUES
+================================================================================
+
+  1. CLI stdin handling
+     Status: Works in interactive mode, not with pipes
+     Impact: Cannot script commands or pipe input
+     Fix: Implement proper async stdin handling
+
+  2. No bootstrap nodes
+     Status: Peers can only find each other via mDNS (local network)
+     Impact: No internet-wide peer discovery
+     Fix: Add known bootstrap node addresses or DHT bootstrap
+
+  3. No message encryption
+     Status: Payloads are plaintext
+     Impact: Messages visible to network observers
+     Fix: Implement Double Ratchet E2EE
+
+  4. Memory-based Kademlia store
+     Status: DHT entries lost on restart
+     Impact: Must rediscover peers on each startup
+     Fix: Persist DHT state to disk
+
+  5. No peer connection management
+     Status: Cannot manually connect to specific peers
+     Impact: Relies solely on mDNS discovery
+     Fix: Implement dial functionality in CLI
+
+================================================================================
+                           ARCHITECTURE DIAGRAM
+================================================================================
+
+  ┌───────────────────────────────────────────────────────────────────────────┐
+  │                           ZeroCenter Architecture                         │
+  └───────────────────────────────────────────────────────────────────────────┘
+
+  ┌───────────────────────────────────────────────────────────────────────────┐
+  │  APPLICATION LAYER                                                        │
+  │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐      │
+  │  │   CLI       │  │   GUI       │  │  Protocol   │  │    Config   │      │
+  │  │  (cli.rs)   │  │ (gui/app.rs)│  │ (message.rs)│  │ (config.rs) │      │
+  │  └─────────────┘  └─────────────┘  └─────────────┘  └─────────────┘      │
+  └───────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+  ┌───────────────────────────────────────────────────────────────────────────┐
+  │  CORE LAYER                                                               │
+  │  ┌─────────────────────────────────────────────────────────────────────┐  │
+  │  │                      P2PNode (node.rs)                              │  │
+  │  │  ┌───────────────────────────────────────────────────────────────┐  │  │
+  │  │  │                    libp2p Swarm                               │  │  │
+  │  │  │  ┌─────────────┐ ┌─────────────┐ ┌─────────────┐ ┌─────────┐  │  │  │
+  │  │  │  │  Kademlia   │ │  Gossipsub  │ │    mDNS     │ │ Identify│  │  │  │
+  │  │  │  │    (DHT)    │ │  (PubSub)   │ │  (Discovery)│ │ (Info)  │  │  │  │
+  │  │  │  └─────────────┘ └─────────────┘ └─────────────┘ └─────────┘  │  │  │
+  │  │  └───────────────────────────────────────────────────────────────┘  │  │
+  │  └─────────────────────────────────────────────────────────────────────┘  │
+  │  ┌─────────────┐  ┌─────────────┐                                         │
+  │  │  Identity   │  │   Crypto    │                                         │
+  │  │ (Ed25519)   │  │  Utilities  │                                         │
+  │  └─────────────┘  └─────────────┘                                         │
+  └───────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+  ┌───────────────────────────────────────────────────────────────────────────┐
+  │  TRANSPORT LAYER (libp2p)                                                 │
+  │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐      │
+  │  │     TCP     │  │    QUIC     │  │    Noise    │  │    Yamux    │      │
+  │  │  (stream)   │  │  (datagram) │  │  (encrypt)  │  │ (multiplex) │      │
+  │  └─────────────┘  └─────────────┘  └─────────────┘  └─────────────┘      │
+  └───────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+  ┌───────────────────────────────────────────────────────────────────────────┐
+  │  STORAGE LAYER                                                            │
+  │  ┌─────────────────────────────────────────────────────────────────────┐  │
+  │  │                   SQLite (storage/store.rs)                         │  │
+  │  │  ┌──────────┐  ┌──────────┐  ┌──────────┐                          │  │
+  │  │  │ messages │  │ contacts │  │ channels │                          │  │
+  │  │  └──────────┘  └──────────┘  └──────────┘                          │  │
+  │  └─────────────────────────────────────────────────────────────────────┘  │
+  └───────────────────────────────────────────────────────────────────────────┘
+
+================================================================================
+                              NETWORK FLOW
+================================================================================
+
+  PEER A (Alice)                              PEER B (Bob)
+  ────────────                                ───────────
+  1. Generate/Load Identity
+     ↓
+  2. Create Swarm with Behaviour
+     ↓
+  3. Listen on 0.0.0.0:<port>
+     ↓                                       ↓
+  4. mDNS Broadcast                    mDNS Broadcast
+     "Alice @ 192.168.1.10:45678"         "Bob @ 192.168.1.20:54321"
+     ↓                                       ↓
+  5. Receive Bob's mDNS               Receive Alice's mDNS
+     ↓                                       ↓
+  6. Dial Bob                          Dial Alice
+     ↓                                       ↓
+  7. Noise Handshake ←────────────────→ Noise Handshake
+     (encrypted channel established)
+     ↓                                       ↓
+  8. Identify Exchange ←──────────────→ Identify Exchange
+     (swap PeerId, agent version)
+     ↓                                       ↓
+  9. Kademlia Add Peer ←──────────────→ Kademlia Add Peer
+     ↓                                       ↓
+  10. Gossipsub Subscribe ←───────────→ Gossipsub Subscribe
+      /zerocenter/global                   /zerocenter/global
+      ↓                                       ↓
+  11. Send Message (future) ──────────→ Receive Message (future)
+      - Create ProtocolMessage
+      - Encrypt payload (TODO)
+      - Publish to topic
+
+================================================================================
+                              BUILD CONFIGURATION
+================================================================================
+
+Cargo.toml Profile: Release
+────────────────────────────
+  [profile.release]
+  lto = true              # Link-Time Optimization (smaller binary)
+  codegen-units = 1       # Single codegen unit (better optimization)
+  strip = true            # Strip debug symbols (smaller binary)
+
+Expected Release Binary Size: ~5-10 MB (stripped, LTO optimized)
+
+Target Platforms:
+  - Windows: x86_64-pc-windows-msvc
+  - Linux: x86_64-unknown-linux-gnu
+  - macOS: x86_64-apple-darwin, aarch64-apple-darwin
+
+================================================================================
+                              SECURITY CONSIDERATIONS
+================================================================================
+
+CURRENT SECURITY MEASURES:
+  ✓ Ed25519 cryptographic identity (industry standard)
+  ✓ Noise Protocol for transport encryption (ChaCha20-Poly1305)
+  ✓ PeerId derived from public key (cryptographic hash)
+  ✓ Identity file permissions (owner read/write only on Unix)
+  ✓ Gossipsub message signing (authenticated messages)
+
+MISSING SECURITY MEASURES:
+  ✗ End-to-end encryption for message payloads
+  ✗ Forward secrecy (Double Ratchet)
+  ✗ Contact verification (fingerprint comparison)
+  ✗ Message authentication codes
+  ✗ Replay attack prevention
+  ✗ Metadata protection (traffic analysis resistance)
+  ✗ Obfuscation (DPI evasion)
+
+RECOMMENDED PRIORITY:
+  1. Implement Double Ratchet E2EE (Critical)
+  2. Add contact fingerprint verification (High)
+  3. Implement obfs4/Snowflake transport (High)
+  4. Add replay attack prevention (Medium)
+  5. Metadata protection research (Medium)
+
+================================================================================
+                              TESTING STRATEGY
+================================================================================
+
+MANUAL TESTING (Current):
+  1. Build release: cargo build --release
+  2. Run test.bat (opens 2 console windows)
+  3. Verify both instances start with unique PeerIds
+  4. Check mDNS discovery (should see each other on local network)
+  5. Monitor logs with RUST_LOG=debug
+
+AUTOMATED TESTING (Future):
+  - Unit tests for identity generation
+  - Unit tests for message serialization
+  - Integration tests for P2P connection
+  - Integration tests for message exchange
+  - Chaos testing (random node failure)
+
+BENCHMARKS (Future):
+  - Connection establishment time
+  - Message latency (local network)
+  - Message latency (internet)
+  - DHT lookup performance
+  - Memory usage per connection
+
+================================================================================
+                              CONTRIBUTION GUIDELINES
+================================================================================
+
+CODE STYLE:
+  - Follow Rust idioms and conventions
+  - Use Result<T, anyhow::Error> for application-level errors
+  - Use thiserror for library-level error types
+  - Add tracing::info!/debug! for important operations
+  - Keep functions small and focused
+
+COMMIT MESSAGE FORMAT:
+  - feat: Add new feature
+  - fix: Fix bug
+  - docs: Update documentation
+  - refactor: Code refactoring
+  - test: Add tests
+  - chore: Maintenance tasks
+
+BRANCHING:
+  - main: Stable releases
+  - develop: Active development
+  - feature/*: New features
+  - fix/*: Bug fixes
+
+================================================================================
+                              REFERENCES
+================================================================================
+
+Documentation:
+  - README.md: User-facing documentation
+  - DEV_CONTEXT.md: Developer session notes
+  - ME55AG.html: Complete roadmap and requirements (1597 lines)
+  - https://docs.rs/libp2p/0.53.2/libp2p/: libp2p API documentation
+
+External Resources:
+  - libp2p: https://libp2p.io/
+  - Noise Protocol: https://noiseprotocol.org/
+  - Ed25519: https://ed25519.cr.yp.to/
+  - Double Ratchet: https://signal.org/docs/specifications/doubleratchet/
+  - MLS: https://messaginglayersecurity.rocks/
+
+================================================================================
+                              CONTACT & LICENSE
+================================================================================
+
+Authors: ZeroCenter Team
+License: MIT
+Description: Censorship-Resistant, Zero-Trust, Leaderless P2P Messenger
+
+"Decentralized software for decentralized people"
+
+================================================================================
+                              END OF DOCUMENT
+================================================================================
