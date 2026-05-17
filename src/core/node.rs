@@ -153,17 +153,65 @@ impl P2PNode {
 
         // Build the swarm
         let keypair = self.identity.keypair().clone();
+        let obfs_key = self.config.obfs_key;
+
+        if obfs_key.is_some() {
+            info!(
+                "ScrambleStream active: TCP traffic XOR'd with ChaCha20 keystream before Noise"
+            );
+        }
 
         // NOTE: .with_quic() is disabled while the "quic" libp2p feature is off
         // (see Cargo.toml). TCP+Noise+Yamux is enough for LAN testing. Restore
         // both when the local toolchain can build `ring` again.
+        //
+        // We bypass `.with_tcp(...)` and assemble the transport manually via
+        // `.with_other_transport(...)` so we can splice the optional
+        // `ScrambleStream` obfuscation layer in BETWEEN raw TCP and the Noise
+        // XX upgrade. Without that injection point, DPI boxes can still
+        // recognise the Noise handshake signature. See `audit/INVARIANTS.md`
+        // §17 (Phase 4b).
         let mut swarm = SwarmBuilder::with_existing_identity(keypair)
             .with_tokio()
-            .with_tcp(
-                tcp::Config::default().port_reuse(true).nodelay(true),
-                noise::Config::new,
-                yamux::Config::default,
-            )?
+            .with_other_transport(|kp| -> Result<_, Box<dyn std::error::Error + Send + Sync>> {
+                use libp2p::core::muxing::StreamMuxerBox;
+                use libp2p::core::transport::Transport as _;
+                use libp2p::core::upgrade::Version;
+                use libp2p::core::ConnectedPoint;
+                use crate::network::{scramble_handshake, MaybeScrambled};
+
+                let tcp_cfg = tcp::Config::default().port_reuse(true).nodelay(true);
+                let base = libp2p::tcp::tokio::Transport::new(tcp_cfg);
+
+                // Always go through the same `.and_then` so the Output
+                // type is uniformly `MaybeScrambled<TcpStream>` — without
+                // the enum the if/else branches produce different
+                // concrete types and the upgrade chain can't be applied.
+                let inner = base.and_then(move |stream, endpoint| {
+                    // Listener vs Dialer determines who picks the nonce
+                    // (dialer) and who reads it (listener).
+                    let is_dialer = matches!(endpoint, ConnectedPoint::Dialer { .. });
+                    let key = obfs_key;
+                    async move {
+                        match key {
+                            Some(k) => scramble_handshake(stream, &k, is_dialer)
+                                .await
+                                .map(MaybeScrambled::Scrambled),
+                            None => Ok(MaybeScrambled::Plain(stream)),
+                        }
+                    }
+                });
+
+                // Standard Noise XX → Yamux upgrade chain, identical to what
+                // `with_tcp` would have produced — just sitting on top of an
+                // optionally-scrambled TCP stream rather than raw TCP.
+                let noise_cfg = noise::Config::new(kp)?;
+                Ok(inner
+                    .upgrade(Version::V1Lazy)
+                    .authenticate(noise_cfg)
+                    .multiplex(yamux::Config::default())
+                    .map(|(p, c), _| (p, StreamMuxerBox::new(c))))
+            })?
             .with_dns()?
             .with_behaviour(|_| behaviour)?
             .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(60)))

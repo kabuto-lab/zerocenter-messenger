@@ -39,9 +39,11 @@ async fn main() -> Result<()> {
     let obfs_key = match cli.obfs_key.as_deref() {
         Some(s) => match zerocenter_messenger::network::scramble::parse_obfs_key(s) {
             Ok(k) => {
-                tracing::warn!(
-                    "--obfs-key supplied: stored, but transport wiring is Phase 4b — \
-                     no on-wire obfuscation yet. See plans/phase4-obfs4.md."
+                // Phase 4b shipped: the key is now actually wired into the
+                // transport stack. P2PNode::start emits the corresponding
+                // "ScrambleStream active" line right before binding.
+                info!(
+                    "--obfs-key supplied (32 bytes); both peers must share this key for the wire format to negotiate."
                 );
                 Some(k)
             }

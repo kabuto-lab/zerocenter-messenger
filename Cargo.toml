@@ -98,6 +98,10 @@ gui = []
 [dev-dependencies]
 # Temp dirs for identity/load-roundtrip tests.
 tempfile = "3"
+# `compat` feature lets us bridge `tokio::io::duplex` (the natural way
+# to spin up an in-memory paired stream) into the `futures::io` traits
+# `ScrambleStream` is implemented over.
+tokio-util = { version = "0.7", features = ["compat"] }
 
 [[bin]]
 name = "zerocenter"

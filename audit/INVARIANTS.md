@@ -206,11 +206,28 @@ A corollary: if the local DEK is compromised, queued-but-not-yet-sent messages a
 
 ---
 
-## §17. ScrambleStream is not wired into the libp2p transport
+## §17. ScrambleStream wiring (Phase 4b — shipped)
 
-**Statement.** The `--obfs-key` CLI flag is parsed and stored on Config. **It does not affect on-wire bytes.** `src/network/scramble.rs::ScrambleStream` exists with passing unit tests but is not used by `P2PNode::start`'s swarm builder.
+**Statement.** When `--obfs-key <32-byte hex>` is supplied, every byte on the TCP socket — *including* the libp2p Noise XX handshake — is XOR'd with a ChaCha20 keystream before it leaves the host, and inverted on receipt. The 32-byte key is pre-shared out of band; both peers must use the same one.
 
-**Why documented here.** A reviewer must NOT believe Phase 4a hardens the wire format yet. Phase 4b ships that.
+**Per-connection nonce.** On connection open, the dialer generates 12 random bytes, writes them in the clear, and starts the ChaCha20 keystream. The listener reads 12 bytes from the wire and starts the matching keystream. After that point, every subsequent byte is scrambled — Noise's XX handshake, Yamux frames, request-response payloads.
+
+**Enforced at.**
+- `src/network/scramble.rs::scramble_handshake` — nonce exchange + wrap.
+- `src/network/scramble.rs::ScrambleStream` — `futures::io::AsyncRead+AsyncWrite` impls that apply / invert the keystream.
+- `src/network/scramble.rs::MaybeScrambled` — enum that lets the transport builder unify the with-obfs and without-obfs branches into one concrete Output type.
+- `src/core/node.rs::P2PNode::start` — `.with_other_transport(|kp| ...)` replaces the previous `.with_tcp(...)` builder so the obfuscation `.and_then(...)` injection point sits BETWEEN `libp2p_tcp::tokio::Transport::new` and the `.upgrade().authenticate(noise).multiplex(yamux)` chain.
+
+**What this defeats.** A DPI box that fingerprints libp2p (e.g. by matching the Noise XX handshake pattern, by yamux frame headers, or by libp2p protocol-negotiation strings) sees only pseudo-random bytes once the obfs key is in play. The 12-byte in-clear nonce header is the only structural artefact left — it looks like 12 random bytes followed by more random bytes.
+
+**Known limitations (Phase 4c candidates).**
+- The 12-byte nonce header is in the clear. Real Obfs4 derives the nonce from an NTOR-like handshake so there is no plaintext prefix.
+- No length padding, no inter-arrival-time jitter — statistical traffic analysis can still distinguish ZeroCenter traffic from cover noise.
+- `ScrambleStream::poll_write` keystream-advances by the full buffer length even when the inner transport reports a short write. In practice this never fires for back-pressure-respecting transports, but is fragile — a small write-buffer with a pre-cipher cursor would fix it.
+
+**Suggested attack.** Capture two connection openings between the same peer pair. The 12-byte prefixes will differ (random) but byte 13 onward XOR'd against bytes from the same handshake position should yield XOR-of-keystreams = `0` if the same nonce was reused (it isn't — fresh per connection). Confirm via the integration smoke `tests/scripts/two_peer_obfs.sh` (TODO: lift the ad-hoc smoke we ran into a versioned test).
+
+**Suggested attack.** Connect to a peer WITHOUT `--obfs-key` while they have one configured (or vice versa). The Noise XX handshake should fail because one side's "first 12 bytes" become randomized keystream the other side wasn't expecting. Verify the failure mode is a clean Noise timeout, not a hang.
 
 ---
 

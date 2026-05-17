@@ -5,10 +5,14 @@
 //!
 //! Every byte written goes through `byte ^ keystream`. Every byte read
 //! goes through the inverse. Both peers use the same 32-byte key
-//! (distributed out of band via the `--obfs-key` flag) and the same
-//! starting nonce. The result: bytes on the wire look random to a
-//! passive DPI box that knows the libp2p / Noise XX handshake pattern
-//! but doesn't know the key.
+//! (distributed out of band via the `--obfs-key` flag). Each new
+//! connection negotiates a fresh 12-byte ChaCha20 nonce via a tiny
+//! in-clear handshake (see [`scramble_handshake`]): the dialer picks
+//! random bytes and writes them, the listener reads them, then both
+//! sides wrap the rest of the byte stream with matching `ScrambleStream`
+//! instances. The result: from the second-handshake-byte onward, what
+//! a DPI box sees on the wire is indistinguishable from random bytes
+//! — the libp2p Noise XX handshake pattern is no longer recognisable.
 //!
 //! ## What this is NOT
 //!
@@ -20,6 +24,11 @@
 //!   network-layer metadata (IPs, timing) is fully visible.
 //! - **Not** authenticated. The key is used for obfuscation only — Noise
 //!   on top of the scrambled transport is what authenticates peers.
+//! - **Not** nonce-hidden. The 12-byte nonce prefix on each connection
+//!   is sent in the clear. A passive observer who knows the protocol
+//!   exists can see "12 random bytes then more random bytes." Real
+//!   Obfs4 derives the nonce from the handshake. Listed as a Phase 4c
+//!   improvement.
 //!
 //! ## Why ChaCha20
 //!
@@ -28,29 +37,79 @@
 //! - Fast enough that the per-message overhead is dominated by AEAD
 //!   (which Noise already does).
 //!
-//! ## Wiring status (Phase 4a)
+//! ## Trait flavour
 //!
-//! This module ships with its core transformation logic + tests. The
-//! integration into libp2p's `Transport` stack is deferred to Phase 4b
-//! because doing it right requires bypassing `SwarmBuilder::with_tcp`
-//! and using the lower-level `Transport::and_then` API — risky to do
-//! without `cargo check` available. See `plans/phase4-obfs4.md`.
+//! The impls are over **`futures::io::AsyncRead + AsyncWrite`** (NOT
+//! tokio's variants). libp2p 0.53's upgrade pipeline operates on
+//! futures-io, so the wrap sits naturally between `libp2p_tcp::tokio::
+//! Transport` and the Noise upgrade. Tests use `tokio::io::duplex`
+//! plus `tokio_util::compat` to bridge.
 
-use chacha20poly1305::ChaCha20Poly1305; // re-exports `chacha20` cipher
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
-// ChaCha20 keystream implementation. We use the underlying `chacha20`
-// crate via re-export through `chacha20poly1305`.
 use chacha20::cipher::{KeyIvInit, StreamCipher};
 use chacha20::ChaCha20;
+use futures::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use rand::RngCore;
 
-/// Suppress unused import warning for `ChaCha20Poly1305` when the
-/// `chacha20` re-export path is the one we actually use.
-const _: () = {
-    let _ = std::mem::size_of::<ChaCha20Poly1305>();
-};
+/// Either a raw stream or a `ScrambleStream`-wrapped one, behind a
+/// single concrete type. Lets the transport builder pick at runtime
+/// whether the obfuscation layer is in play without paying for dynamic
+/// dispatch — the libp2p `.and_then(...)` slot wants ONE concrete
+/// Output type, so we unify here via an enum.
+pub enum MaybeScrambled<S> {
+    Plain(S),
+    Scrambled(ScrambleStream<S>),
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for MaybeScrambled<S> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut [u8],
+    ) -> Poll<std::io::Result<usize>> {
+        let this = unsafe { self.get_unchecked_mut() };
+        match this {
+            MaybeScrambled::Plain(s) => Pin::new(s).poll_read(cx, buf),
+            MaybeScrambled::Scrambled(s) => Pin::new(s).poll_read(cx, buf),
+        }
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for MaybeScrambled<S> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        let this = unsafe { self.get_unchecked_mut() };
+        match this {
+            MaybeScrambled::Plain(s) => Pin::new(s).poll_write(cx, buf),
+            MaybeScrambled::Scrambled(s) => Pin::new(s).poll_write(cx, buf),
+        }
+    }
+    fn poll_flush(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let this = unsafe { self.get_unchecked_mut() };
+        match this {
+            MaybeScrambled::Plain(s) => Pin::new(s).poll_flush(cx),
+            MaybeScrambled::Scrambled(s) => Pin::new(s).poll_flush(cx),
+        }
+    }
+    fn poll_close(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let this = unsafe { self.get_unchecked_mut() };
+        match this {
+            MaybeScrambled::Plain(s) => Pin::new(s).poll_close(cx),
+            MaybeScrambled::Scrambled(s) => Pin::new(s).poll_close(cx),
+        }
+    }
+}
 
 /// Symmetric obfuscation wrapper. Holds two independent ChaCha20
 /// instances (one per direction) so reads and writes can advance their
@@ -65,11 +124,7 @@ pub struct ScrambleStream<S> {
 
 impl<S> ScrambleStream<S> {
     /// Wrap `inner`. `key` is shared between both peers; `nonce` must
-    /// be agreed (typically: initiator picks at random and sends in the
-    /// clear as the first 12 bytes of the connection, responder reads
-    /// them and derives matching ciphers). For the v0 implementation we
-    /// take both as parameters — the actual nonce-exchange handshake is
-    /// Phase 4b's job.
+    /// be agreed (typically via [`scramble_handshake`]).
     pub fn new(inner: S, key: &[u8; 32], nonce: &[u8; 12]) -> Self {
         let out_cipher = ChaCha20::new(key.into(), nonce.into());
         let in_cipher = ChaCha20::new(key.into(), nonce.into());
@@ -85,16 +140,15 @@ impl<S: AsyncRead + Unpin> AsyncRead for ScrambleStream<S> {
     fn poll_read(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<std::io::Result<()>> {
+        buf: &mut [u8],
+    ) -> Poll<std::io::Result<usize>> {
         // SAFETY: we project Pin to each field manually since we don't
-        // use pin-project for this small module.
+        // use pin-project for this small module. `inner` is the only
+        // field we re-pin; `in_cipher` is `Unpin`.
         let this = unsafe { self.get_unchecked_mut() };
-        let filled_before = buf.filled().len();
         let res = Pin::new(&mut this.inner).poll_read(cx, buf);
-        if let Poll::Ready(Ok(())) = res {
-            let new_bytes = &mut buf.filled_mut()[filled_before..];
-            this.in_cipher.apply_keystream(new_bytes);
+        if let Poll::Ready(Ok(n)) = res {
+            this.in_cipher.apply_keystream(&mut buf[..n]);
         }
         res
     }
@@ -119,11 +173,11 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for ScrambleStream<S> {
         let res = Pin::new(&mut this.inner).poll_write(cx, &scratch);
         // NOTE: if poll_write returns `Ready(Ok(n))` with `n < scratch.len()`,
         // we've already advanced the keystream past the byte boundary,
-        // which is incorrect. tokio's AsyncWrite contract does allow
-        // partial writes, but for any wrapped transport that respects
-        // back-pressure this is essentially never short. The "proper"
-        // fix is a small write-buffer that holds the scratch and a
-        // pre-cipher cursor. Listed as Phase 4b polish.
+        // which is incorrect. The futures `AsyncWrite` contract does
+        // allow partial writes, but for any wrapped transport that
+        // respects back-pressure this is essentially never short. The
+        // "proper" fix is a small write-buffer that holds the scratch
+        // and a pre-cipher cursor. Listed as Phase 4c polish.
         res
     }
 
@@ -135,13 +189,47 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for ScrambleStream<S> {
         Pin::new(&mut this.inner).poll_flush(cx)
     }
 
-    fn poll_shutdown(
+    fn poll_close(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<std::io::Result<()>> {
         let this = unsafe { self.get_unchecked_mut() };
-        Pin::new(&mut this.inner).poll_shutdown(cx)
+        Pin::new(&mut this.inner).poll_close(cx)
     }
+}
+
+/// Perform the connection-opening nonce exchange and wrap the stream.
+///
+/// Dialer: generates 12 random bytes, writes them as plaintext, then
+/// wraps the rest of the byte stream with `ScrambleStream(key, nonce)`.
+/// Listener: reads 12 bytes from the wire, then wraps with the matching
+/// `ScrambleStream(key, nonce)`. Both sides are now in lock-step on
+/// the same keystream and can pass the wrapped stream up to the next
+/// transport upgrade (Noise XX in our case).
+///
+/// Any I/O error before the 12 bytes are exchanged surfaces as an
+/// `Err` and the connection is dropped — the upgrade pipeline above
+/// us interprets it as a normal connection failure.
+pub async fn scramble_handshake<S>(
+    mut stream: S,
+    key: &[u8; 32],
+    is_dialer: bool,
+) -> std::io::Result<ScrambleStream<S>>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let nonce: [u8; 12] = if is_dialer {
+        let mut n = [0u8; 12];
+        rand::rngs::OsRng.fill_bytes(&mut n);
+        stream.write_all(&n).await?;
+        stream.flush().await?;
+        n
+    } else {
+        let mut n = [0u8; 12];
+        stream.read_exact(&mut n).await?;
+        n
+    };
+    Ok(ScrambleStream::new(stream, key, &nonce))
 }
 
 /// Parse a 64-character hex string into a 32-byte key. Returns Err with
@@ -162,18 +250,19 @@ pub fn parse_obfs_key(s: &str) -> Result<[u8; 32], String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio_util::compat::TokioAsyncReadCompatExt;
 
     #[tokio::test]
     async fn roundtrip_in_memory() {
-        // Use a duplex pair so we can scramble one end and unscramble
-        // on the other.
+        // tokio::io::duplex gives a tokio-flavoured pair; `.compat()`
+        // adapts each half to the `futures::io` traits ScrambleStream
+        // operates on.
         let (a, b) = tokio::io::duplex(4096);
         let key = [7u8; 32];
         let nonce = [3u8; 12];
 
-        let mut writer = ScrambleStream::new(a, &key, &nonce);
-        let mut reader = ScrambleStream::new(b, &key, &nonce);
+        let mut writer = ScrambleStream::new(a.compat(), &key, &nonce);
+        let mut reader = ScrambleStream::new(b.compat(), &key, &nonce);
 
         let msg = b"hello obfuscation world, this is libp2p Noise XX-like bytes";
         writer.write_all(msg).await.unwrap();
@@ -188,16 +277,17 @@ mod tests {
     async fn wire_bytes_are_not_plaintext() {
         // Confirm that a passive observer in the middle sees random
         // bytes, not our plaintext.
-        let (a, mut middle_observer) = tokio::io::duplex(4096);
-        let mut writer = ScrambleStream::new(a, &[1u8; 32], &[2u8; 12]);
+        let (a, middle_observer) = tokio::io::duplex(4096);
+        let mut writer = ScrambleStream::new(a.compat(), &[1u8; 32], &[2u8; 12]);
 
         let needle = b"PLAINTEXT_MARKER_QQ123";
         writer.write_all(needle).await.unwrap();
         writer.flush().await.unwrap();
         drop(writer);
 
+        let mut middle = middle_observer.compat();
         let mut wire = Vec::new();
-        middle_observer.read_to_end(&mut wire).await.unwrap();
+        middle.read_to_end(&mut wire).await.unwrap();
         assert_eq!(wire.len(), needle.len());
         assert_ne!(wire, needle, "the marker leaked through unscrambled");
     }
@@ -209,8 +299,8 @@ mod tests {
         let key_b = [2u8; 32]; // wrong
         let nonce = [0u8; 12];
 
-        let mut writer = ScrambleStream::new(a, &key_a, &nonce);
-        let mut reader = ScrambleStream::new(b, &key_b, &nonce);
+        let mut writer = ScrambleStream::new(a.compat(), &key_a, &nonce);
+        let mut reader = ScrambleStream::new(b.compat(), &key_b, &nonce);
 
         let msg = b"hello";
         writer.write_all(msg).await.unwrap();
@@ -218,6 +308,29 @@ mod tests {
         let mut got = vec![0u8; msg.len()];
         reader.read_exact(&mut got).await.unwrap();
         assert_ne!(got, msg);
+    }
+
+    #[tokio::test]
+    async fn handshake_exchanges_nonce_and_roundtrips() {
+        // Spin up a paired duplex; one side runs as dialer, the other
+        // as listener. Both invoke scramble_handshake. After the
+        // 12-byte nonce exchange the wrapped streams must roundtrip.
+        let (a, b) = tokio::io::duplex(4096);
+        let key = [9u8; 32];
+
+        let dialer_fut = scramble_handshake(a.compat(), &key, /* is_dialer */ true);
+        let listener_fut = scramble_handshake(b.compat(), &key, /* is_dialer */ false);
+
+        let (dialer_res, listener_res) = futures::join!(dialer_fut, listener_fut);
+        let mut d = dialer_res.expect("dialer handshake");
+        let mut l = listener_res.expect("listener handshake");
+
+        let msg = b"obfuscated payload after the in-clear nonce";
+        d.write_all(msg).await.unwrap();
+        d.flush().await.unwrap();
+        let mut got = vec![0u8; msg.len()];
+        l.read_exact(&mut got).await.unwrap();
+        assert_eq!(got, msg);
     }
 
     #[test]
