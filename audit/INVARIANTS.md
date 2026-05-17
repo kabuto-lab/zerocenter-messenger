@@ -224,13 +224,20 @@ A corollary: if the local DEK is compromised, queued-but-not-yet-sent messages a
 
 ## §19. Tracing logs may contain sensitive material
 
-**Statement.** `tracing::info!` / `warn!` log lines include peer IDs, message previews (e.g. `decrypt_first_message` logs the plaintext), and outbox events.
+**Statement.** `tracing::info!` / `warn!` log lines include peer IDs, error context, and outbox events — but NOT message plaintext at `info` or above.
 
-**Why this matters.** If logs are sent to a remote aggregator, the aggregator sees plaintext. For local-only logs this matches the "user trusts their own machine" threat model.
+**History.** Earlier revisions emitted plaintext at `info!` in three sites
+(`Send requested to ...: <msg>`, `Decrypted first DM from ...: <pt>`,
+`Decrypted DM from ...: <pt>`). These were downgraded to `debug!`; the
+plaintext still reaches the user via `println!` to stdout (intentional
+terminal output), but no longer rides the `tracing` info channel where
+it could land in a remote log aggregator.
 
-**Suggested attack / finding.** If you find `info!` or higher logging full plaintext, that's a debug log that should be downgraded to `debug!` before any production deployment.
+**Why this matters.** If logs are sent to a remote aggregator, the aggregator must not see plaintext. For local-only logs this matches the "user trusts their own machine" threat model.
 
-**Where to start grepping.** `src/core/node.rs` — search for `String::from_utf8_lossy` and trace what's logged.
+**How to verify.** Grep `src/core/node.rs` for `info!` and `warn!`; only PeerIds, error strings, and counts should appear in the format args — never `&plaintext`, `text` (`String::from_utf8_lossy(&plaintext)`), or `message` (the `String` carried by `NodeCommand::Send`). The `println!` lines that render `🔓 {}: {}` are deliberate UI output and out of scope.
+
+**Future risk.** Any new path that handles plaintext bytes is a candidate for the same bug. A reviewer adding a new log line should default to `debug!` for anything that touched decrypted content.
 
 ---
 

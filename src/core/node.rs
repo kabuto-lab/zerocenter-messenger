@@ -9,7 +9,7 @@ use libp2p::futures::StreamExt;
 use std::time::Duration;
 use std::collections::{HashMap, HashSet};
 use tokio::sync::mpsc;
-use tracing::{info, warn, error};
+use tracing::{debug, info, warn, error};
 
 use crate::core::{Config, Identity};
 use crate::core::identity::prekey_signing_bytes;
@@ -288,7 +288,10 @@ impl P2PNode {
                             }
                         }
                         Some(NodeCommand::Send(peer_id, message)) => {
-                            info!("Send requested to {}: {}", peer_id, message);
+                            // `message` is plaintext — keep at debug so it
+                            // doesn't end up in a remote log aggregator's
+                            // info stream. INVARIANTS §19.
+                            debug!("Send requested to {}: {}", peer_id, message);
                             self.try_send_or_queue(&mut swarm, peer_id, message);
                         }
                         Some(NodeCommand::ListPeers) => {
@@ -1126,7 +1129,9 @@ impl P2PNode {
         self.persist_session(&peer);
 
         let text = String::from_utf8_lossy(&plaintext);
-        info!("Decrypted first DM from {}: {}", peer, text);
+        // Plaintext stays at debug; the println! below is the user-facing
+        // terminal output. INVARIANTS §19.
+        debug!("Decrypted first DM from {}: {}", peer, text);
         println!("\n🔓 {}: {}", peer, text);
         println!("> ");
         true
@@ -1178,7 +1183,9 @@ impl P2PNode {
         self.persist_session(&peer);
 
         let text = String::from_utf8_lossy(&plaintext);
-        info!("Decrypted DM from {}: {}", peer, text);
+        // Plaintext stays at debug; the println! below is the user-facing
+        // terminal output. INVARIANTS §19.
+        debug!("Decrypted DM from {}: {}", peer, text);
         println!("\n🔓 {}: {}", peer, text);
         println!("> ");
     }
