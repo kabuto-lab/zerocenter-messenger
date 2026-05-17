@@ -120,6 +120,13 @@ pub struct ScrambleStream<S> {
     out_cipher: ChaCha20,
     /// Cipher applied to bytes we *read*.
     in_cipher: ChaCha20,
+    /// Scrambled bytes the keystream has already been advanced past
+    /// but the inner writer hasn't fully accepted yet. Lives across
+    /// `poll_write` calls: short inner writes parked the tail here
+    /// rather than re-scrambling next time (ChaCha20 can't be rewound).
+    /// Drained FIRST on every `poll_write` / `poll_flush` / `poll_close`
+    /// before accepting new caller bytes.
+    pending: Vec<u8>,
 }
 
 impl<S> ScrambleStream<S> {
@@ -132,6 +139,7 @@ impl<S> ScrambleStream<S> {
             inner,
             out_cipher,
             in_cipher,
+            pending: Vec::new(),
         }
     }
 }
@@ -161,24 +169,49 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for ScrambleStream<S> {
         buf: &[u8],
     ) -> Poll<std::io::Result<usize>> {
         let this = unsafe { self.get_unchecked_mut() };
-        // We cannot mutate the caller's buffer. Make a scratch copy,
-        // apply the keystream, hand the scrambled bytes to the inner
-        // writer. The keystream advances by exactly the number of bytes
-        // we hand off (returned by poll_write) — anything less means we
-        // have to "rewind" the cipher next call, which ChaCha20 doesn't
-        // support. To dodge this we write in one shot and report partial
-        // writes by truncating the keystream advance.
+
+        // Drain any scrambled bytes left from a previous short inner
+        // write before accepting new caller bytes. The keystream has
+        // already been advanced past `pending` and we can't intermix
+        // freshly-scrambled bytes ahead of it.
+        match drain_pending(&mut this.inner, &mut this.pending, cx) {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+            Poll::Ready(Ok(())) => {}
+        }
+
+        // Pending is now empty. Scramble the caller's buf and try to
+        // hand it to the inner writer in one shot. Any tail the inner
+        // didn't accept is parked in `pending` for the next drain.
         let mut scratch = buf.to_vec();
         this.out_cipher.apply_keystream(&mut scratch);
-        let res = Pin::new(&mut this.inner).poll_write(cx, &scratch);
-        // NOTE: if poll_write returns `Ready(Ok(n))` with `n < scratch.len()`,
-        // we've already advanced the keystream past the byte boundary,
-        // which is incorrect. The futures `AsyncWrite` contract does
-        // allow partial writes, but for any wrapped transport that
-        // respects back-pressure this is essentially never short. The
-        // "proper" fix is a small write-buffer that holds the scratch
-        // and a pre-cipher cursor. Listed as Phase 4c polish.
-        res
+
+        match Pin::new(&mut this.inner).poll_write(cx, &scratch) {
+            Poll::Ready(Ok(n)) => {
+                if n < scratch.len() {
+                    this.pending.extend_from_slice(&scratch[n..]);
+                }
+                // We've committed to all of `buf` either way — flushed
+                // bytes are in the inner pipeline, the rest sits in
+                // `pending` until the next poll drains it. The caller
+                // owns no further responsibility for these bytes.
+                Poll::Ready(Ok(buf.len()))
+            }
+            Poll::Ready(Err(e)) => {
+                // Cipher has been advanced past these bytes already and
+                // they never made it onto the wire. Connection's write
+                // half is permanently desynced — surface the error so
+                // the upper layer drops the connection.
+                Poll::Ready(Err(e))
+            }
+            Poll::Pending => {
+                // Inner not ready yet. Park the scrambled bytes; the
+                // caller will see Ok(buf.len()) once they retry after
+                // their waker fires, and the next call will drain.
+                this.pending.extend_from_slice(&scratch);
+                Poll::Ready(Ok(buf.len()))
+            }
+        }
     }
 
     fn poll_flush(
@@ -186,6 +219,13 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for ScrambleStream<S> {
         cx: &mut Context<'_>,
     ) -> Poll<std::io::Result<()>> {
         let this = unsafe { self.get_unchecked_mut() };
+        // Push everything we've already scrambled out before asking the
+        // inner to flush — otherwise the caller-visible flush would lie.
+        match drain_pending(&mut this.inner, &mut this.pending, cx) {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+            Poll::Ready(Ok(())) => {}
+        }
         Pin::new(&mut this.inner).poll_flush(cx)
     }
 
@@ -194,8 +234,41 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for ScrambleStream<S> {
         cx: &mut Context<'_>,
     ) -> Poll<std::io::Result<()>> {
         let this = unsafe { self.get_unchecked_mut() };
+        match drain_pending(&mut this.inner, &mut this.pending, cx) {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+            Poll::Ready(Ok(())) => {}
+        }
         Pin::new(&mut this.inner).poll_close(cx)
     }
+}
+
+/// Repeatedly try to hand `pending` bytes to `inner` until either the
+/// buffer empties (`Ready(Ok(()))`), the inner stalls (`Pending`), or
+/// errors out. Loops because a single `poll_write` may accept only a
+/// prefix and immediately be ready to accept more — useful when the
+/// inner is a small in-memory pipe.
+///
+/// `Ok(0)` from the inner means "I will never accept these bytes" — we
+/// translate to `WriteZero` since otherwise we'd spin forever.
+fn drain_pending<S: AsyncWrite + Unpin>(
+    inner: &mut S,
+    pending: &mut Vec<u8>,
+    cx: &mut Context<'_>,
+) -> Poll<std::io::Result<()>> {
+    while !pending.is_empty() {
+        match Pin::new(&mut *inner).poll_write(cx, pending) {
+            Poll::Ready(Ok(0)) => {
+                return Poll::Ready(Err(std::io::ErrorKind::WriteZero.into()));
+            }
+            Poll::Ready(Ok(n)) => {
+                pending.drain(..n);
+            }
+            Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+            Poll::Pending => return Poll::Pending,
+        }
+    }
+    Poll::Ready(Ok(()))
 }
 
 /// Perform the connection-opening nonce exchange and wrap the stream.
@@ -308,6 +381,39 @@ mod tests {
         let mut got = vec![0u8; msg.len()];
         reader.read_exact(&mut got).await.unwrap();
         assert_ne!(got, msg);
+    }
+
+    #[tokio::test]
+    async fn short_inner_writes_dont_desync_keystream() {
+        // 16-byte inner duplex forces many short writes for a 1000-byte
+        // message: every poll_write that hits the cap returns Ok(16) and
+        // the rest of the scrambled tail goes into `pending`. Without
+        // the drain-first / pending-buffer fix the keystream would
+        // advance past bytes that never went on the wire, and the
+        // reader's descrambling would diverge after the first 16 bytes.
+        let (a, b) = tokio::io::duplex(16);
+        let key = [42u8; 32];
+        let nonce = [9u8; 12];
+
+        let mut writer = ScrambleStream::new(a.compat(), &key, &nonce);
+        let mut reader = ScrambleStream::new(b.compat(), &key, &nonce);
+
+        // 1000 bytes with a recognizable pattern so an off-by-one
+        // keystream offset would produce a glaringly wrong read.
+        let msg: Vec<u8> = (0..1000u32).map(|i| (i % 251) as u8).collect();
+
+        let write_fut = async {
+            writer.write_all(&msg).await.unwrap();
+            writer.flush().await.unwrap();
+            writer.close().await.unwrap();
+        };
+        let read_fut = async {
+            let mut got = vec![0u8; 1000];
+            reader.read_exact(&mut got).await.unwrap();
+            got
+        };
+        let (_, got) = futures::join!(write_fut, read_fut);
+        assert_eq!(got, msg, "1000-byte message must survive many short writes");
     }
 
     #[tokio::test]

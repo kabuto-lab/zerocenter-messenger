@@ -223,7 +223,8 @@ A corollary: if the local DEK is compromised, queued-but-not-yet-sent messages a
 **Known limitations (Phase 4c candidates).**
 - The 12-byte nonce header is in the clear. Real Obfs4 derives the nonce from an NTOR-like handshake so there is no plaintext prefix.
 - No length padding, no inter-arrival-time jitter — statistical traffic analysis can still distinguish ZeroCenter traffic from cover noise.
-- `ScrambleStream::poll_write` keystream-advances by the full buffer length even when the inner transport reports a short write. In practice this never fires for back-pressure-respecting transports, but is fragile — a small write-buffer with a pre-cipher cursor would fix it.
+
+**Short-inner-write resilience (fixed).** `ScrambleStream` carries a `pending: Vec<u8>` of scrambled-but-not-yet-handed-off bytes. On every `poll_write`/`poll_flush`/`poll_close` we drain `pending` BEFORE accepting new caller bytes via `drain_pending(...)`. The keystream is advanced exactly once per byte (at scramble time) and never re-advanced if the inner returns a short write — the un-accepted tail of `scratch` is parked in `pending` and re-tried later. The unit test `short_inner_writes_dont_desync_keystream` exercises this with a 16-byte inner duplex against a 1000-byte message.
 
 **Suggested attack.** Capture two connection openings between the same peer pair. The 12-byte prefixes will differ (random) but byte 13 onward XOR'd against bytes from the same handshake position should yield XOR-of-keystreams = `0` if the same nonce was reused (it isn't — fresh per connection). Confirm via the integration smoke `tests/scripts/two_peer_obfs.sh` (TODO: lift the ad-hoc smoke we ran into a versioned test).
 
