@@ -1,3 +1,3 @@
 mod message;
 
-pub use message::ProtocolMessage;
+pub use message::{EncryptedPayload, ProtocolMessage};

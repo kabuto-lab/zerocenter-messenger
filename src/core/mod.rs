@@ -1,6 +1,6 @@
 mod config;
 mod node;
-mod identity;
+pub mod identity;
 
 pub use config::Config;
 pub use node::{P2PNode, NodeCommand};

@@ -32,8 +32,31 @@ libp2p = { version = "0.53", features = [
 
 # Cryptography
 ed25519-dalek = { version = "2.1", features = ["rand_core"] }
-x25519-dalek = "2.0"
+# `static_secrets` enables `StaticSecret` (long-term X25519 key we can
+# serialize). Required for the Phase 3 signed prekey on Identity.
+x25519-dalek = { version = "2.0", features = ["static_secrets"] }
 rand = "0.8"
+# Phase 3 — Double Ratchet primitives. All five crates are already in
+# Cargo.lock (pulled transitively by libp2p / ed25519-dalek), so listing
+# them here adds nothing to the dep graph; we just need direct visibility.
+chacha20poly1305 = "0.10"
+hkdf = "0.12"
+sha2 = "0.10"
+hmac = "0.12"
+zeroize = { version = "1", features = ["derive"] }
+
+# Phase 3.5 — at-rest hardening.
+# `keyring` is the new dep; it brings OS-native secret storage
+# (Windows Credential Manager / macOS Keychain / Linux secret-service).
+# `hex` is already in Cargo.lock transitively — used to encode the
+# data-encryption key as a printable string for the keyring API.
+keyring = "3"
+hex = "0.4"
+
+# Phase 4a — obfuscation transport (ScrambleStream).
+# `chacha20` is the raw stream cipher (transitively in lock already via
+# `chacha20poly1305`). Direct dep needed to import the cipher type.
+chacha20 = "0.9"
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -59,6 +82,22 @@ futures = "0.3"
 
 # Base58 encoding for peer IDs
 bs58 = "0.5"
+
+[features]
+# Tauri webview UI. Off by default — enabling it pulls Tauri 2.x with
+# its ~100-crate dep tree and a build script. The `gui` module's
+# implementation is gated on this feature so the default CLI build
+# stays slim.
+#
+# To actually build the GUI, this is not yet enough — `Cargo.toml`
+# also needs the `tauri` / `tauri-build` deps, a top-level `build.rs`,
+# and a `tauri.conf.json` migrated to the 2.x schema. See
+# `plans/phase4-gui.md` for the integration checklist.
+gui = []
+
+[dev-dependencies]
+# Temp dirs for identity/load-roundtrip tests.
+tempfile = "3"
 
 [[bin]]
 name = "zerocenter"

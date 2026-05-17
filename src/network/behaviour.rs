@@ -17,6 +17,44 @@ pub struct DirectMessageRequest(pub Vec<u8>);
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DirectMessageResponse(pub bool);
 
+/// Request the responder's signed X25519 prekey. The request carries no
+/// data — the responder already knows which prekey is "theirs".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrekeyRequest;
+
+/// Signed prekey bundle returned by the responder. The Ed25519 signature
+/// is over `prekey_signing_bytes(x25519_public)` (see core::identity) and
+/// must be verified against the responder's PeerId-embedded Ed25519 pubkey
+/// before the prekey is trusted.
+///
+/// Optionally also carries a **one-time prekey** (OTPK) bundle. When
+/// present, the initiator uses the 3-DH variant of X3DH (additional
+/// DH between initiator's ephemeral and this OTPK) for stronger forward
+/// secrecy on the very first message. Each OTPK is consumed by the
+/// responder after a single successful handshake.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrekeyResponse {
+    pub x25519_public: [u8; 32],
+    #[serde(with = "crate::serde_helpers::serde_arr64")]
+    pub signature: [u8; 64],
+
+    /// Optional OTPK bundle. Old responders (pre-3.5) omit this; old
+    /// initiators ignore it (default-None on deserialize).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub otpk: Option<OneTimePrekey>,
+}
+
+/// One-time prekey bundle. `id` is the responder's local row id — the
+/// initiator echoes it back in the first message header so the responder
+/// can look up the matching private bytes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OneTimePrekey {
+    pub id: i64,
+    pub x25519_public: [u8; 32],
+    #[serde(with = "crate::serde_helpers::serde_arr64")]
+    pub signature: [u8; 64],
+}
+
 /// Combined network behaviour for the P2P node
 #[derive(NetworkBehaviour)]
 pub struct Behaviour {
@@ -34,6 +72,12 @@ pub struct Behaviour {
 
     /// Request-Response for direct messaging
     pub request_response: request_response::cbor::Behaviour<DirectMessageRequest, DirectMessageResponse>,
+
+    /// Request-Response for fetching peer prekeys. Kept on a separate
+    /// protocol from DMs so a peer that only wants to look up keys doesn't
+    /// have to advertise full DM support, and so the two flows can evolve
+    /// their wire formats independently.
+    pub prekey: request_response::cbor::Behaviour<PrekeyRequest, PrekeyResponse>,
 }
 
 impl Behaviour {
@@ -93,9 +137,22 @@ impl Behaviour {
 
         // Request-Response configuration for direct messaging
         let request_response_config = request_response::Config::default();
+        // Phase 3 wire format (EncryptedPayload inside ProtocolMessage.payload)
+        // — bumped from 1.0.0 so peers still on the old plaintext format
+        // fail the libp2p protocol negotiation cleanly instead of silently
+        // sending plaintext into a node expecting ciphertext.
         let request_response = request_response::cbor::Behaviour::new(
             [(
-                StreamProtocol::new("/zerocenter/direct-message/1.0.0"),
+                StreamProtocol::new("/zerocenter/direct-message/2.0.0"),
+                request_response::ProtocolSupport::Full,
+            )],
+            request_response_config.clone(),
+        );
+
+        // Separate request-response instance for the prekey-fetch protocol.
+        let prekey = request_response::cbor::Behaviour::new(
+            [(
+                StreamProtocol::new("/zerocenter/prekey/1.0.0"),
                 request_response::ProtocolSupport::Full,
             )],
             request_response_config,
@@ -107,6 +164,7 @@ impl Behaviour {
             mdns,
             identify_behaviour,
             request_response,
+            prekey,
         })
     }
 }

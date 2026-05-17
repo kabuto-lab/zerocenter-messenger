@@ -4,6 +4,7 @@ use tokio::sync::mpsc;
 use tracing::{info, error};
 use zerocenter_messenger::core::{Config, Identity, P2PNode, NodeCommand};
 use zerocenter_messenger::cli::Cli;
+use zerocenter_messenger::crypto::keyring as zc_keyring;
 use libp2p::{PeerId, Multiaddr};
 
 #[tokio::main]
@@ -27,6 +28,30 @@ async fn main() -> Result<()> {
     let identity = Identity::load_or_create(&profile_dir)?;
     let peer_id = identity.peer_id();
 
+    // Look up (or generate) the at-rest data-encryption key in the OS
+    // keyring. Falls back to an ephemeral DEK with a loud warning if the
+    // keyring is unreachable — see `keyring::load_or_create_dek` docs.
+    let dek = zc_keyring::load_or_create_dek(&cli.profile)?;
+
+    // Parse the optional obfuscation key. Stored on Config for the
+    // future transport wrapper; for now it's a no-op on the wire and
+    // we warn loudly so nobody assumes traffic is obfuscated yet.
+    let obfs_key = match cli.obfs_key.as_deref() {
+        Some(s) => match zerocenter_messenger::network::scramble::parse_obfs_key(s) {
+            Ok(k) => {
+                tracing::warn!(
+                    "--obfs-key supplied: stored, but transport wiring is Phase 4b — \
+                     no on-wire obfuscation yet. See plans/phase4-obfs4.md."
+                );
+                Some(k)
+            }
+            Err(e) => {
+                anyhow::bail!("--obfs-key invalid: {}", e);
+            }
+        },
+        None => None,
+    };
+
     info!("Peer ID: {}", peer_id);
     println!("\n📡 ZeroCenter Messenger");
     println!("══════════════════════════════════════");
@@ -39,11 +64,12 @@ async fn main() -> Result<()> {
         profile: cli.profile.clone(),
         data_dir: profile_dir,
         listen_port: cli.port,
-        bootstrap_nodes: vec![],
+        bootstrap_nodes: cli.bootstrap.clone(),
+        obfs_key,
     };
 
     // Initialize P2P node
-    let mut node = P2PNode::new(config, identity).await?;
+    let mut node = P2PNode::new(config, identity, dek).await?;
 
     // Start listening
     node.start().await?;
@@ -57,6 +83,7 @@ async fn main() -> Result<()> {
     let cmd_tx_for_peers = cmd_tx.clone();
     let cmd_tx_for_contacts = cmd_tx.clone();
     let cmd_tx_for_history = cmd_tx.clone();
+    let cmd_tx_for_addr = cmd_tx.clone();
 
     // Build command handlers
     let mut handlers: std::collections::HashMap<String, zerocenter_messenger::cli::CommandHandler> = 
@@ -114,6 +141,72 @@ async fn main() -> Result<()> {
         Ok(())
     }));
 
+    // whoami handler — local-only, just prints our PeerId.
+    handlers.insert("whoami".to_string(), Box::new(move |_: &str| -> Result<()> {
+        println!("\nYour Peer ID:");
+        println!("  {}\n", peer_id);
+        Ok(())
+    }));
+
+    // addr handler — round-trips through the node loop, which has the
+    // live list of listen addresses from `NewListenAddr` events.
+    handlers.insert("addr".to_string(), Box::new(move |_: &str| -> Result<()> {
+        futures::executor::block_on(cmd_tx_for_addr.send(NodeCommand::ListAddrs))
+            .map_err(|e| anyhow::anyhow!("Failed to send command: {}", e))?;
+        Ok(())
+    }));
+
+    // Safety-number handler. Computed locally — no need to round-trip
+    // through the node loop. The fingerprint is a SHA-256 over the two
+    // PeerIds in sorted order, so both sides print the SAME string
+    // regardless of who runs the command. If they don't match, there's
+    // a MITM on the (Ed25519 identity) layer.
+    let my_pid_bytes = peer_id.to_bytes();
+    handlers.insert("safety".to_string(), Box::new(move |peer_str: &str| -> Result<()> {
+        let their_pid: PeerId = peer_str.trim().parse()
+            .map_err(|e| anyhow::anyhow!("Invalid peer ID '{}': {}", peer_str, e))?;
+        let their_bytes = their_pid.to_bytes();
+
+        // Order-independent: sort the two byte strings before hashing so
+        // Alice and Bob both compute the same fingerprint.
+        let (a, b) = if my_pid_bytes <= their_bytes {
+            (&my_pid_bytes[..], &their_bytes[..])
+        } else {
+            (&their_bytes[..], &my_pid_bytes[..])
+        };
+
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        h.update(b"zerocenter-safety-v1");
+        h.update(&(a.len() as u32).to_be_bytes());
+        h.update(a);
+        h.update(&(b.len() as u32).to_be_bytes());
+        h.update(b);
+        let digest = h.finalize();
+
+        // First 20 bytes → 40 hex chars → 8 groups of 5. Plenty of bits
+        // (160) to be unforgeable by an attacker on the channel.
+        let hex_str: String = digest[..20]
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect();
+        let groups: Vec<String> = hex_str
+            .as_bytes()
+            .chunks(5)
+            .map(|c| std::str::from_utf8(c).unwrap().to_string())
+            .collect();
+
+        println!("\n🔐 Safety number for {}", their_pid);
+        println!("    {}", groups.join(" "));
+        println!(
+            "\nCompare with the output of `safety {}` on the peer's device —",
+            peer_id
+        );
+        println!("out of band (voice, video, in person). If they match, the X25519");
+        println!("prekey exchange was not intercepted by a MITM.\n");
+        Ok(())
+    }));
+
     // Start the node in background with command receiver
     let node_handle = tokio::spawn(async move {
         if let Err(e) = P2PNode::run_with_commands(node, cmd_rx).await {
@@ -121,9 +214,14 @@ async fn main() -> Result<()> {
         }
     });
 
-    // Run CLI interface with handlers
-    if let Err(e) = zerocenter_messenger::cli::run_cli_with_handlers(handlers).await {
-        error!("CLI error: {}", e);
+    // Foreground UI — either the legacy line-reader CLI or the Tauri
+    // webview, depending on `--gui`.
+    if cli.gui {
+        run_gui(cmd_tx).await?;
+    } else {
+        if let Err(e) = zerocenter_messenger::cli::run_cli_with_handlers(handlers).await {
+            error!("CLI error: {}", e);
+        }
     }
 
     node_handle.abort();
@@ -131,6 +229,26 @@ async fn main() -> Result<()> {
     info!("Shutdown complete");
 
     Ok(())
+}
+
+/// Tauri webview launcher.
+///
+/// Two cfg arms: when the crate is built with `--features gui`, this
+/// delegates to `gui::run`. Without the feature, it prints a clear
+/// "rebuild with --features gui" error and exits so the user isn't
+/// left guessing why their flag did nothing.
+#[cfg(feature = "gui")]
+async fn run_gui(cmd_tx: tokio::sync::mpsc::Sender<NodeCommand>) -> Result<()> {
+    zerocenter_messenger::gui::run(cmd_tx).await
+}
+
+#[cfg(not(feature = "gui"))]
+async fn run_gui(_cmd_tx: tokio::sync::mpsc::Sender<NodeCommand>) -> Result<()> {
+    anyhow::bail!(
+        "--gui was passed but this binary was built without the `gui` feature. \
+         Rebuild with: cargo build --release --features gui \
+         (and see plans/phase4-gui.md for the Tauri integration checklist)."
+    )
 }
 
 fn get_profile_dir(profile: &str) -> Result<PathBuf> {

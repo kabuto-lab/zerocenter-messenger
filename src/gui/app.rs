@@ -1,76 +1,151 @@
+//! Tauri 2.x webview frontend.
+//!
+//! This module is gated on the `gui` Cargo feature. Enabling the
+//! feature alone is **not enough** to build the GUI — `Cargo.toml`
+//! also needs the `tauri` / `tauri-build` deps, a top-level
+//! `build.rs`, and a `tauri.conf.json` migrated to the 2.x schema.
+//! See `plans/phase4-gui.md` for the full integration checklist.
+//!
+//! ## Architecture
+//!
+//! - `main.rs` builds the node and gets back a `mpsc::Sender<NodeCommand>`.
+//! - With `--gui`, instead of running the line-reader CLI, `main.rs`
+//!   calls [`run`] (this file), handing over that sender.
+//! - Tauri commands wrap each call as `NodeCommand::Query*` carrying
+//!   a `oneshot::Sender` for the reply. The node loop processes the
+//!   command, fills the reply channel, the Tauri command awaits the
+//!   receiver and returns the result to the webview's `invoke()`.
+//!
+//! This avoids any direct sharing of mutable node state with Tauri —
+//! all interaction goes through the existing async command channel.
+
 use anyhow::Result;
-use tauri::{Manager, Window};
+use libp2p::PeerId;
+use tauri::Manager;
+use tokio::sync::{mpsc, oneshot};
 
-use crate::core::P2PNode;
+use crate::core::NodeCommand;
 
-/// Run the Tauri GUI application
-pub async fn run(node: P2PNode) -> Result<()> {
-    // Store node in app state
-    let app_state = AppState { node };
+/// State held by Tauri and made available to every `#[tauri::command]`.
+struct AppState {
+    cmd_tx: mpsc::Sender<NodeCommand>,
+}
+
+/// Launch the Tauri application. Returns when the webview window is
+/// closed by the user. `cmd_tx` is the same channel `main.rs` would
+/// otherwise hand to `run_cli_with_handlers`.
+pub async fn run(cmd_tx: mpsc::Sender<NodeCommand>) -> Result<()> {
+    let state = AppState { cmd_tx };
 
     tauri::Builder::default()
-        .manage(app_state)
+        .manage(state)
         .invoke_handler(tauri::generate_handler![
-            commands::get_peer_id,
-            commands::send_message,
-            commands::get_messages,
-            commands::add_contact,
-            commands::get_contacts,
+            cmd::get_peer_id,
+            cmd::get_contacts,
+            cmd::get_messages,
+            cmd::send_message,
+            cmd::add_contact,
         ])
+        .setup(|app| {
+            // Ensure the main window is visible on startup. Tauri 2.x
+            // sometimes defers showing if the dev tools attached.
+            if let Some(win) = app.get_webview_window("main") {
+                let _ = win.show();
+            }
+            Ok(())
+        })
         .run(tauri::generate_context!())
-        .expect("Error running Tauri app");
+        .map_err(|e| anyhow::anyhow!("tauri runtime error: {}", e))?;
 
     Ok(())
 }
 
-/// Application state shared with frontend
-pub struct AppState {
-    node: P2PNode,
-}
+mod cmd {
+    //! Tauri command handlers. Each one constructs a oneshot channel,
+    //! sends the matching `NodeCommand::Query*` to the node loop, and
+    //! awaits the reply.
 
-/// Tauri commands (called from frontend)
-mod commands {
     use super::*;
 
-    #[tauri::command]
-    fn get_peer_id(state: tauri::State<AppState>) -> String {
-        state.node.peer_id().to_string()
+    /// Convert any error type into the `String` Tauri expects in
+    /// command error returns. We don't propagate structured errors to
+    /// the webview yet — strings render fine in JS catches.
+    fn err<E: std::fmt::Display>(e: E) -> String {
+        e.to_string()
+    }
+
+    /// Send a command and await a oneshot reply. Centralizes the
+    /// boilerplate so each command handler stays a 3-liner.
+    async fn round_trip<T, F>(
+        state: &AppState,
+        build: F,
+    ) -> Result<T, String>
+    where
+        F: FnOnce(oneshot::Sender<T>) -> NodeCommand,
+    {
+        let (tx, rx) = oneshot::channel();
+        state.cmd_tx.send(build(tx)).await.map_err(err)?;
+        rx.await.map_err(err)
     }
 
     #[tauri::command]
-    async fn send_message(
-        _state: tauri::State<'_, AppState>,
-        _recipient: String,
-        _content: String,
+    pub async fn get_peer_id(state: tauri::State<'_, AppState>) -> Result<String, String> {
+        round_trip(&state, NodeCommand::QueryPeerId).await
+    }
+
+    #[tauri::command]
+    pub async fn get_contacts(
+        state: tauri::State<'_, AppState>,
+    ) -> Result<Vec<crate::core::ContactDto>, String> {
+        round_trip(&state, NodeCommand::QueryContacts).await
+    }
+
+    #[tauri::command]
+    pub async fn get_messages(
+        state: tauri::State<'_, AppState>,
+        contact: String,
+    ) -> Result<Vec<crate::core::MessageDto>, String> {
+        let peer = contact.parse::<PeerId>().map_err(err)?;
+        round_trip(&state, |reply| NodeCommand::QueryMessages(peer, reply)).await
+    }
+
+    #[tauri::command]
+    pub async fn send_message(
+        state: tauri::State<'_, AppState>,
+        recipient: String,
+        content: String,
     ) -> Result<(), String> {
-        // TODO: Implement message sending
-        Ok(())
+        let peer = recipient.parse::<PeerId>().map_err(err)?;
+        // `Send` is fire-and-forget on the CLI path; for the GUI we
+        // mirror that for now and rely on a follow-up Query to refresh
+        // the conversation. A more responsive design would emit a
+        // Tauri event from the node once the message is actually on
+        // the wire — Phase 4 GUI v1.
+        state
+            .cmd_tx
+            .send(NodeCommand::Send(peer, content))
+            .await
+            .map_err(err)
     }
 
     #[tauri::command]
-    async fn get_messages(
-        _state: tauri::State<'_, AppState>,
-        _contact: String,
-    ) -> Result<Vec<serde_json::Value>, String> {
-        // TODO: Implement message retrieval
-        Ok(vec![])
-    }
-
-    #[tauri::command]
-    async fn add_contact(
-        _state: tauri::State<'_, AppState>,
-        _peer_id: String,
-        _alias: String,
+    pub async fn add_contact(
+        state: tauri::State<'_, AppState>,
+        peer_id: String,
+        alias: String,
     ) -> Result<(), String> {
-        // TODO: Implement contact management
-        Ok(())
-    }
-
-    #[tauri::command]
-    async fn get_contacts(
-        _state: tauri::State<'_, AppState>,
-    ) -> Result<Vec<serde_json::Value>, String> {
-        // TODO: Implement contact list
-        Ok(vec![])
+        let peer = peer_id.parse::<PeerId>().map_err(err)?;
+        let alias = if alias.trim().is_empty() {
+            None
+        } else {
+            Some(alias.trim().to_string())
+        };
+        let result: Result<(), String> = round_trip(&state, |reply| NodeCommand::AddContact {
+            peer_id: peer,
+            alias,
+            reply,
+        })
+        .await?;
+        result
     }
 }

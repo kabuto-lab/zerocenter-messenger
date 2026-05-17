@@ -6,20 +6,31 @@ Censorship-Resistant, Zero-Trust, Leaderless P2P Communication Platform
 
 ### Phase 1 Complete
 - ✅ Ed25519 identity generation
-- ✅ libp2p integration (TCP, QUIC)
+- ✅ libp2p integration (TCP + Noise + Yamux). QUIC is temporarily disabled — see the comment in `Cargo.toml`.
 - ✅ Kademlia DHT for peer discovery
-- ✅ Noise Protocol encryption
+- ✅ Noise Protocol encryption (hop-level)
 - ✅ mDNS local network discovery
-- ✅ Gossipsub pubsub messaging
+- ✅ Gossipsub (kept for future public channels; **not** used for DMs)
 - ✅ Multi-profile support (run multiple instances)
 - ✅ SQLite local storage
 
-### Phase 2 Complete (New!)
-- ✅ Direct messaging via gossipsub
-- ✅ Message storage in SQLite
-- ✅ Peer connection via multiaddr
-- ✅ Connected peers listing
-- ✅ Contact listing
+### Phase 2 Complete
+- ✅ Direct messaging over a dedicated request-response protocol. DMs require a live connection; there is intentionally **no** gossipsub fallback (it leaked plaintext to every subscriber).
+- ✅ Application-layer signed envelope (Ed25519 over a domain-separated canonical byte layout) with transport-peer ↔ signed-sender cross-check on receive.
+- ✅ Message storage in SQLite (`messages.db`) with periodic TTL sweep.
+- ✅ Peer connection via multiaddr.
+- ✅ Connected peers listing.
+- ⚠️ Contact persistence: peers are auto-saved when their first verified DM arrives. Aliases / manual add / removal aren't wired up yet.
+
+### Phase 3 Complete (New!)
+- ✅ **End-to-end encryption** via Double Ratchet (per Signal spec). ChaCha20-Poly1305 AEAD, HKDF-SHA256 root-key KDF, HMAC-SHA256 chain-key KDF, per-session forward secrecy + post-compromise security.
+- ✅ **X3DH-lite handshake** (two-DH variant): initiator's ephemeral + responder's signed prekey derive the initial root key. The signed prekey is Ed25519-signed by the responder's long-term identity key.
+- ✅ **Signed prekey on Identity** — `identity.json` carries an X25519 prekey alongside the Ed25519 identity, with the Ed25519 signature over it.
+- ✅ **Prekey-fetch protocol** `/zerocenter/prekey/1.0.0` — peers exchange signed prekeys on demand; cached in `prekeys_seen` SQLite table.
+- ✅ **Wire format** bumped to `/zerocenter/direct-message/2.0.0`. `ProtocolMessage.payload` is now a serialized `EncryptedPayload { dh, pn, n, ct, x3dh_eph? }`. The outer Ed25519 envelope signature now authenticates the ciphertext.
+- ✅ **Session persistence** — ratchet state survives restart (`ratchet_sessions` table, JSON blob, saved after every encrypt/decrypt). See threat model: **state is plaintext at rest** until Phase 3.5.
+- ✅ **Out-of-order delivery** tolerated up to `MAX_SKIP=1000` skipped keys per session; oldest-first eviction beyond.
+- ✅ **Pending send/recv queues** — if the peer's prekey isn't cached, the message is queued and a prekey fetch is fired; drained on response.
 
 ## 🚀 Quick Start
 
@@ -31,14 +42,14 @@ Open two terminal windows:
 
 **Window 1 (Alice):**
 ```bash
-cd C:\__Qwen1\ME55
+cd F:\__Qwen1\ME55
 set RUST_LOG=info
 target\release\zerocenter.exe --profile alice
 ```
 
 **Window 2 (Bob):**
 ```bash
-cd C:\__Qwen1\ME55
+cd F:\__Qwen1\ME55
 set RUST_LOG=info
 target\release\zerocenter.exe --profile bob
 ```
@@ -76,17 +87,19 @@ ME55/
 │   ├── main.rs          # Entry point with multi-profile support
 │   ├── lib.rs           # Library exports
 │   ├── core/
-│   │   ├── identity.rs  # Ed25519 identity management
+│   │   ├── identity.rs  # Ed25519 identity + signed X25519 prekey, lazy migration
 │   │   ├── config.rs    # Configuration
-│   │   └── node.rs      # P2P node (libp2p)
+│   │   └── node.rs      # P2P node + event loop (swarm, DM ratchet send/recv, TTL sweep, session persistence)
 │   ├── network/
-│   │   └── behaviour.rs # libp2p behaviours (Kademlia, Gossipsub, mDNS)
+│   │   └── behaviour.rs # libp2p behaviours (Kademlia, Gossipsub, mDNS, Identify, DM, prekey)
 │   ├── crypto/
-│   │   └── mod.rs       # Cryptographic utilities
+│   │   ├── mod.rs       # Re-exports
+│   │   ├── x3dh.rs      # X3DH-lite initial key agreement
+│   │   └── ratchet.rs   # Double Ratchet (state, KDFs, AEAD, skipped-key cache, JSON persistence)
 │   ├── protocol/
-│   │   └── message.rs   # Protocol message format
+│   │   └── message.rs   # Signed DM envelope + EncryptedPayload
 │   ├── storage/
-│   │   └── store.rs     # SQLite storage
+│   │   └── store.rs     # SQLite storage (messages, contacts, channels, prekeys_seen, ratchet_sessions)
 │   └── cli.rs           # CLI interface
 └── dist/
     └── index.html       # Future GUI (Tauri)
@@ -121,7 +134,8 @@ cargo run -- --profile alice
 | `connect` | `c`   | Connect to a peer by multiaddr |
 | `send`  | `s`     | Send a direct message to a peer |
 | `peers` | `p`     | List connected peers |
-| `contacts` | `co` | List contacts |
+| `contacts` | `co` | List stored contacts (auto-populated on first DM) |
+| `history` | `hi`, `hist` | Show last N messages from local store (default 20) |
 
 ### Command Examples
 
@@ -139,6 +153,10 @@ peers
 contacts
 ```
 
+### First-message latency
+
+The **first** DM to a new peer triggers a prekey fetch + X3DH handshake under the hood. You'll see a short delay (one RTT for the prekey, one for the DM). The CLI shows `📤 Encrypted message sent to <peer>` once the message goes out. Subsequent DMs in the same session are immediate — the ratchet state is cached in memory and persisted to `messages.db` so it survives restart.
+
 ## 💾 Data Storage
 
 - **Windows:** `%LOCALAPPDATA%\ZeroCenter\<profile>\`
@@ -146,28 +164,81 @@ contacts
 - **macOS:** `~/Library/Application Support/ZeroCenter/<profile>/`
 
 Files per profile:
-- `identity.json` - Ed25519 keys (private)
-- `messages.db` - SQLite message store (future)
+- `identity.json` — Ed25519 identity keys + X25519 signed prekey + the Ed25519 signature over the prekey. **Private — never transmitted.** On unix the file is `chmod 0600`; on Windows it falls back to default ACL (a Phase 3.5 task).
+- `messages.db` — SQLite store. Tables:
+  - `messages` — local view of conversation history (plaintext on your machine; on the wire it was ciphertext).
+  - `contacts` — auto-populated from first verified DM.
+  - `channels` — placeholder for future public channels.
+  - `prekeys_seen` — verified X25519 prekeys of peers you've talked to.
+  - `ratchet_sessions` — per-peer Double Ratchet state, JSON-serialized. **Plaintext at rest until Phase 3.5 adds OS-keyring integration.**
 
 ## 🔐 Security
 
-- **Identity:** Ed25519 keys generated on first run
-- **Transport:** Noise Protocol (ChaCha20-Poly1305)
-- **Peer ID:** Derived from public key (cryptographic hash)
+### Cryptography in use
+- **Identity:** Ed25519 long-term key, generated on first run.
+- **Signed prekey:** X25519 long-term prekey, Ed25519-signed by the identity key (domain `zerocenter-prekey-v1`).
+- **Transport (hop-level):** libp2p Noise Protocol (ChaCha20-Poly1305).
+- **Peer ID:** Ed25519 inline-pubkey multihash (code = 0). Recipients can verify signatures against keys extracted directly from the PeerId — no out-of-band key distribution.
+- **Application-layer authentication:** Every DM is Ed25519-signed over a domain-separated, length-prefixed canonical byte layout (`zerocenter-dm-v1`). Receivers verify the signature *and* check that the transport peer matches the signed sender.
+- **End-to-end confidentiality:** Double Ratchet (per Signal spec).
+  - Initial key agreement: X3DH-lite (two-DH: initiator-ephemeral × responder-prekey, initiator-identity × responder-prekey). HKDF-SHA256 with domain `zerocenter-x3dh-v1`.
+  - Root-key KDF: HKDF-SHA256 with domain `zerocenter-rk-v1`.
+  - Chain-key KDF: HMAC-SHA256 with one-byte constants per Signal spec.
+  - Per-message AEAD: ChaCha20-Poly1305 with zero nonce (safe: each message key is one-shot).
+  - Associated data: length-prefixed `sender_pid || recipient_pid` + the ratchet header bytes.
+- **Skipped-message-key cache:** `MAX_SKIP = 1000` keys per session; oldest-first eviction beyond.
+
+## 🛡️ Threat Model
+
+### What an attacker on the wire cannot do
+- **Forge messages** as another peer — the application-layer Ed25519 signature is bound to the sender's PeerId.
+- **Replay messages across sessions** — the ratchet AEAD's associated data includes both PeerIds, and the per-message key changes every step.
+- **Decrypt past traffic after compromising a session key** — forward secrecy via the symmetric chain ratchet.
+- **Decrypt indefinitely after one-time compromise** — post-compromise security recovers on the next DH ratchet step.
+- **Substitute their own prekey via MITM** — the prekey is Ed25519-signed by the long-term identity key; recipients verify the signature before use.
+
+### What an attacker can still do (intentional or known gaps)
+- **Initial-DM MITM (limited):** because there is no out-of-band identity verification (no safety-number UI yet), a network attacker who can intercept the **first ever connection** between two peers AND substitute *both* sides' PeerIds in libp2p's identify exchange could theoretically run a relay. This is mitigated only by the fact that the Ed25519 key inside a PeerId is the *whole* identity — substituting it changes the PeerId the user typed. **Verify PeerIds out of band** for high-stakes contacts.
+- **Asynchronous first-message delivery is not supported.** Without one-time prekeys (Phase 3.5), the responder must be reachable when the initiator does the first send.
+- **No deniability.** The per-message Ed25519 signature on the envelope provides cryptographic proof of authorship — by design, for now, to keep verification simple. This is the opposite of Signal's deniability property.
+- **Traffic analysis.** Message size, timing, sender/recipient PeerIds, and the existence of the conversation are visible to any on-path observer. Mitigation requires Obfs4 + cover traffic (Phase 4).
+- **Metadata in the DHT.** Kademlia lookups reveal who you're trying to find.
+
+### What an attacker with local file access can do
+- **Read all your conversation history.** `messages.db` stores local plaintext for your own view.
+- **Read your private identity key.** `identity.json` is plaintext (`chmod 0600` on unix; default ACL on Windows).
+- **Read your ratchet session state.** `ratchet_sessions.state_blob` is plaintext JSON — they can decrypt all future messages from peers whose sessions you have, and forge messages to those peers as you.
+- **All three of these become opt-in encrypted-at-rest in Phase 3.5** via OS keyring integration (Windows DPAPI / macOS Keychain / Linux secret-service).
+
+### Gap to "Signal-equivalent"
+Phase 3 lands the cryptographic core. To reach parity with Signal:
+- One-time prekeys (asynchronous first-message delivery).
+- Encrypted state at rest (Phase 3.5).
+- Deniability (use a deniable AKE instead of long-term Ed25519 signatures, e.g. SPK signature plus per-conversation MAC).
+- Sealed sender / metadata privacy.
+- Safety-number UI for out-of-band identity verification.
+- Tested implementations vetted by external review. **This codebase has not been audited.**
 
 ## 📋 Next Steps (To Implement)
 
 | Feature | Status | Priority |
-|---------|--------|----------|
-| Identity generation | ✅ Done | — |
+|---|---|---|
+| Identity generation (Ed25519 + signed X25519 prekey) | ✅ Done | — |
 | P2P listening | ✅ Done | — |
-| Peer discovery (mDNS/DHT) | ✅ Done | — |
-| Direct messaging | ✅ Done | — |
-| Contact management | ✅ Done | — |
-| Message storage | ✅ Done | — |
-| E2EE (Double Ratchet) | ❌ TODO | Critical |
+| Peer discovery (mDNS / Kad DHT) | ✅ Done | — |
+| Direct messaging (signed, request-response, E2EE) | ✅ Done | — |
+| Contact management (auto-persist; no alias/remove) | ⚠️ Partial | Medium |
+| Message storage + TTL sweep | ✅ Done | — |
+| E2EE Double Ratchet + X3DH-lite | ✅ Done | — |
+| Session persistence (plaintext at rest) | ✅ Done | — |
+| Encrypt state at rest (OS keyring) | ❌ TODO | High (Phase 3.5) |
+| One-time prekeys (async first message) | ❌ TODO | High (Phase 3.5) |
+| Offline delivery / store-and-forward | ❌ TODO | Medium (Phase 4) |
+| Bootstrap-node CLI flag (cold-start DHT beyond LAN) | ❌ TODO | Medium |
+| Obfuscation (Obfs4 / pluggable transports) | ❌ TODO | High (Phase 4) |
 | GUI (Tauri) | ⚠️ Stub | Medium |
-| Obfuscation (Obfs4) | ❌ TODO | High |
+| Group chats (Megolm-style) | ❌ TODO | Low |
+| External security audit | ❌ TODO | **Required before serious use** |
 
 ## 🐛 Troubleshooting
 

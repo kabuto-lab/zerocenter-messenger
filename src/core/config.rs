@@ -6,15 +6,20 @@ use std::path::PathBuf;
 pub struct Config {
     /// Profile name (e.g., "alice", "bob")
     pub profile: String,
-    
+
     /// Data directory for this profile
     pub data_dir: PathBuf,
-    
+
     /// Port to listen on (0 = random)
     pub listen_port: u16,
-    
+
     /// Bootstrap nodes to connect to
     pub bootstrap_nodes: Vec<String>,
+
+    /// Optional 32-byte obfuscation key. When set, the TCP transport
+    /// will be wrapped with `ScrambleStream` (Phase 4b — wiring pending).
+    /// Both peers in a conversation must share this key out of band.
+    pub obfs_key: Option<[u8; 32]>,
 }
 
 impl Default for Config {
@@ -24,6 +29,7 @@ impl Default for Config {
             data_dir: PathBuf::from("./data"),
             listen_port: 0, // Random port
             bootstrap_nodes: vec![],
+            obfs_key: None,
         }
     }
 }

@@ -4,10 +4,13 @@ pub mod network;
 pub mod storage;
 pub mod protocol;
 pub mod cli;
+pub(crate) mod serde_helpers;
 
-// The `gui` module is a Tauri stub that will be wired up in Phase 4.
-// Until then it is disabled unconditionally — reintroduce it behind a real
-// `gui` feature in Cargo.toml when we start integrating the desktop shell.
+// Tauri webview frontend. Gated on the `gui` Cargo feature; see
+// `plans/phase4-gui.md` for the integration plan. The default CLI
+// build does not pull Tauri.
+#[cfg(feature = "gui")]
+pub mod gui;
 
 pub use core::{Config, P2PNode, Identity, NodeCommand};
 pub use cli::CommandHandler;

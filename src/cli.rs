@@ -2,7 +2,6 @@ use anyhow::Result;
 use clap::Parser;
 use tracing::info;
 use std::io::{self, BufRead};
-use libp2p::{PeerId, Multiaddr};
 
 /// ZeroCenter Messenger - Censorship-Resistant P2P Communication
 #[derive(Parser, Debug)]
@@ -16,6 +15,34 @@ pub struct Cli {
     /// Port to listen on (0 = random)
     #[arg(short = 'P', long, default_value_t = 0)]
     pub port: u16,
+
+    /// Bootstrap node multiaddr (repeatable). Each address must include
+    /// the peer's `/p2p/<PeerId>` suffix so we can seed the Kademlia
+    /// routing table. Without a bootstrap node the DHT is reachable
+    /// only via mDNS on the local network.
+    ///
+    /// Example: --bootstrap /ip4/198.51.100.1/tcp/4001/p2p/12D3KooW...
+    #[arg(short = 'B', long = "bootstrap", value_name = "MULTIADDR")]
+    pub bootstrap: Vec<String>,
+
+    /// 32-byte shared obfuscation key (64 hex chars). When set, the TCP
+    /// transport is wrapped with a ChaCha20-keystream XOR layer so the
+    /// libp2p Noise handshake no longer matches DPI signatures. Both
+    /// peers must use the **same** key. Without this flag, traffic is
+    /// vanilla libp2p.
+    ///
+    /// **NOTE (Phase 4a):** the key is parsed and stored on Config but
+    /// the actual transport wiring is deferred to Phase 4b — see
+    /// `plans/phase4-obfs4.md`. Setting this flag today is a no-op on
+    /// the wire; the value is logged as a warning so you know.
+    #[arg(long = "obfs-key", value_name = "HEX64")]
+    pub obfs_key: Option<String>,
+
+    /// Launch the Tauri webview UI instead of the CLI. Requires the
+    /// crate to be built with the `gui` feature enabled. Without it,
+    /// passing this flag prints a helpful error and exits.
+    #[arg(long = "gui")]
+    pub gui: bool,
 }
 
 impl Cli {
@@ -132,6 +159,36 @@ pub async fn run_cli_with_handlers(
                     println!("History handler not available");
                 }
             }
+            "safety" | "verify" | "sn" => {
+                if parts.len() < 2 {
+                    println!("Usage: safety <peer_id>");
+                    println!("Prints a short fingerprint you can compare with the peer");
+                    println!("out of band (voice/video) to detect a MITM on first contact.");
+                    continue;
+                }
+                if let Some(handler) = handlers.get("safety") {
+                    match handler(parts[1]) {
+                        Ok(_) => {}
+                        Err(e) => println!("Error: {}", e),
+                    }
+                } else {
+                    println!("Safety handler not available");
+                }
+            }
+            "whoami" | "me" => {
+                if let Some(handler) = handlers.get("whoami") {
+                    let _ = handler("");
+                } else {
+                    println!("whoami handler not available");
+                }
+            }
+            "addr" | "addrs" | "a" => {
+                if let Some(handler) = handlers.get("addr") {
+                    let _ = handler("");
+                } else {
+                    println!("addr handler not available");
+                }
+            }
             _ => {
                 println!("Unknown command: {}. Type 'help' for commands.", cmd);
             }
@@ -151,52 +208,9 @@ fn print_help() {
     println!("  peers, p               - List connected peers");
     println!("  contacts, co           - List contacts");
     println!("  history, hi [n]        - Show last n messages (default: 20)");
+    println!("  safety, sn <peer>      - Print fingerprint to compare with peer (anti-MITM)");
+    println!("  whoami, me             - Print your own PeerId");
+    println!("  addr, addrs, a         - Print your shareable multiaddrs");
     println!();
 }
 
-/// Run the basic CLI interface (legacy, for backward compatibility)
-pub async fn run_cli() -> Result<()> {
-    info!("Running in CLI mode");
-    info!("");
-    info!("Commands:");
-    info!("  quit - Exit the application");
-    info!("  help - Show this help");
-    info!("");
-
-    let stdin = io::stdin();
-
-    for line in stdin.lock().lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => break,
-        };
-
-        match line.trim() {
-            "quit" | "exit" | "q" => {
-                info!("Shutting down...");
-                break;
-            }
-            "help" | "h" => {
-                println!("Commands: quit, exit, q, help");
-            }
-            "" => {}
-            cmd => {
-                println!("Unknown command: {}. Type 'help' for commands.", cmd);
-            }
-        }
-    }
-
-    Ok(())
-}
-
-/// Parse a peer ID from string
-pub fn parse_peer_id(s: &str) -> Result<PeerId> {
-    PeerId::from_bytes(&bs58::decode(s).into_vec()?)
-        .map_err(|e| anyhow::anyhow!("Invalid peer ID: {}", e))
-}
-
-/// Parse a multiaddr from string
-pub fn parse_multiaddr(s: &str) -> Result<Multiaddr> {
-    s.parse()
-        .map_err(|e| anyhow::anyhow!("Invalid multiaddr: {}", e))
-}
