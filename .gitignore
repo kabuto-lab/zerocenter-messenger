@@ -8,6 +8,13 @@ icons/*.svg
 icons/*.png
 icons/*.icns
 icons/*.ico
+# …but keep the placeholder ICO so `cargo build --features gui` succeeds
+# on a fresh clone. Replace with a real branded icon if you ship a build.
+!icons/icon.ico
+
+# Tauri build script writes generated capability schemas here; regenerated
+# on every build with `--features gui` and not meant to be committed.
+gen/
 
 # Development
 *.log

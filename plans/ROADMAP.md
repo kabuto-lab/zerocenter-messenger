@@ -18,13 +18,13 @@ Living document tracking what's done, what's in flight, and what's queued. Last 
 | `--obfs-jitter-ms` opt-in IAT jitter (Phase 4c.2′) | ✅ |
 | NTOR-style hidden-nonce handshake via elligator2 (Phase 4c.1) | ✅ |
 | QUIC | ⏸ disabled (see `[[project-quic-disabled]]`; revisit when ring-on-MSVC settles) |
-| GUI (Tauri 2.x) | 🟡 handlers scaffolded; deps + build.rs + tauri.conf.json 2.x migration TODO |
+| GUI (Tauri 2.x) | ✅ (build wired; basic chat UI; UX polish like push-style refresh deferred to v1) |
 | DHT mailbox store-and-forward | ✅ (v0 — no ACK; sealed-sender deferred to Phase 5) |
 | External security audit | ❌ not started; `audit/` pack ready for reviewer |
 | Group chats (Megolm-style) | ❌ |
 | Deniability | ❌ (intentional non-deniability for v1) |
 
-Build: rustc 1.95 / cargo 1.95 / VS Build Tools. `cargo test --lib`: 63/63 (56 after pending-bound + 7 new `network::mailbox::tests::*` unit tests for slot/key derivation). `target/release/zerocenter.exe` is ~9.24 MB and tracked in-tree.
+Build: rustc 1.95 / cargo 1.95 / VS Build Tools. `cargo test --lib`: 63/63 on both default and `--features gui`. `cargo build --release` (default, headless CLI) produces a 9.24 MB `zerocenter.exe`; `cargo build --release --features gui` additionally pulls Tauri 2.x and its webview2 toolchain (Windows). The tracked in-tree `zerocenter.exe` is the default build — the GUI artefact is significantly larger and isn't checked in.
 
 ## Done — chronological commits
 
@@ -64,12 +64,15 @@ _None._ Phase 4c is complete: 4b (XOR + ScrambleStream wired into transport) + 4
 
 ### Phase 4 — non-obfs threads
 
-- **GUI (Tauri 2.x) actual build.** `src/gui/app.rs` has all `#[tauri::command]` handlers wired through `NodeCommand::Query*` with oneshot replies. To make `cargo build --features gui` succeed:
-  1. Add `tauri = "2"` and `tauri-build = "2"` (build-dep) to `Cargo.toml`.
-  2. Add a top-level `build.rs` calling `tauri_build::build()`.
-  3. Migrate `tauri.conf.json` from 1.x schema to 2.x (the existing file is from the original scaffolding; expect breaking-schema changes).
-  4. Verify the webview launches and the `invoke()` round-trip hits the node loop. Test on Windows first since that's the toolchain in use.
-  5. Sketch a minimal `dist/index.html` UI to actually exercise the commands.
+- **GUI (Tauri 2.x) — ✅ build wired.** `cargo build --release --features gui` produces a working `zerocenter --gui` binary. Pieces in place:
+  - `Cargo.toml`: `tauri = "2"` + `tauri-build = "2"` both `optional = true`, gated by `gui = ["dep:tauri", "dep:tauri-build"]`. Default headless CLI build pulls neither.
+  - `build.rs` at the repo root: feature-gated `tauri_build::build()` call. Default builds skip it.
+  - `tauri.conf.json` migrated to v2 schema: top-level `productName`/`version`/`identifier`, `build.frontendDist`/`devUrl`, `app.windows` + `app.security`, `bundle.active = false` (we don't run the bundler in v0; `cargo build` only).
+  - `capabilities/default.json` grants the `main` window the `core:default` + `core:window:default` permission sets. Our `#[tauri::command]` invokes don't require explicit allowlist entries in v2; the core permission set is sufficient.
+  - `icons/icon.ico` placeholder (1150-byte 16×16 grey square) keeps `tauri-build` happy on Windows. Replace with a real branded icon before shipping.
+  - `src/core/mod.rs` re-exports `ContactDto`/`MessageDto` so `src/gui/app.rs` can name them from outside the `core::node` private module.
+  - `dist/index.html` is the existing scaffolding from the original Tauri 1.x sketch — contacts list + chat pane + add-contact modal, calls our `invoke()` handlers verbatim. Functional but the v0 UI doesn't push-refresh on inbound messages; the user has to re-open the chat to see new ones. v1: emit a Tauri event from the node loop on `process_incoming_dm` success and wire `listen()` on the frontend.
+  - `gen/` (Tauri-emitted capability schemas) is gitignored; regenerated on every `--features gui` build.
 
 - **DHT mailbox network layer — ✅ v0 shipped.** Module `src/network/mailbox.rs` exposes `slot_id_for(unix_seconds)` (1-hour buckets), `slot_kad_key(recipient, slot)`, `drop_kad_key(recipient, sender, slot)` — both keyed by SHA-256 with distinct domain separators. `src/core/node.rs::publish_mailbox_drop` triggers on the offline branch of `try_send_or_queue` in addition to `outbox_add`; uses the new `ratchet_encrypt_and_wrap` helper (factored out of `encrypt_and_send_existing`) to produce the same `ProtocolMessage` wire bytes the direct-DM path would, then `put_record(drop_kad_key)` + `start_providing(slot_kad_key)`. Republish tick (every 600s) re-puts rows older than 1800s; poll tick (every 600s) queries `get_providers` for slot range `last_polled..now_slot` (capped at last 24 slots), and for each returned provider issues `get_record(drop_kad_key(self, provider, slot))`. Fetched bytes route through the same `process_incoming_dm` pipeline as direct DMs (signature verification, transport-peer ↔ signed-sender cross-check, ratchet decrypt, ratchet dedup). See `audit/INVARIANTS.md` §21 for the security story. Remaining v1 work: ACK flow (storage scaffolding exists; sender-side republish doesn't currently observe recipient ACKs); sealed-sender to plug the providers DHT metadata leak (Phase 5).
 

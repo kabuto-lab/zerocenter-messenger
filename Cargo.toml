@@ -94,17 +94,27 @@ futures = "0.3"
 # Base58 encoding for peer IDs
 bs58 = "0.5"
 
+# Phase 4 — Tauri 2.x webview frontend. Optional; pulled in only by
+# the `gui` feature so the default headless CLI build stays slim.
+tauri = { version = "2", optional = true }
+
+[build-dependencies]
+# `tauri-build` runs at build time when `gui` is on; it parses
+# `tauri.conf.json`, generates an embedded Context for the runtime,
+# and validates capabilities. The build script (`build.rs`) gates the
+# call behind the same feature so default builds skip it.
+tauri-build = { version = "2", optional = true }
+
 [features]
 # Tauri webview UI. Off by default — enabling it pulls Tauri 2.x with
 # its ~100-crate dep tree and a build script. The `gui` module's
 # implementation is gated on this feature so the default CLI build
 # stays slim.
 #
-# To actually build the GUI, this is not yet enough — `Cargo.toml`
-# also needs the `tauri` / `tauri-build` deps, a top-level `build.rs`,
-# and a `tauri.conf.json` migrated to the 2.x schema. See
-# `plans/phase4-gui.md` for the integration checklist.
-gui = []
+# Build: `cargo build --release --features gui`. Run: `zerocenter --gui`.
+# The Tauri runtime + build script are pulled in only when this is on,
+# courtesy of the `optional = true` flags on the deps below.
+gui = ["dep:tauri", "dep:tauri-build"]
 
 [dev-dependencies]
 # Temp dirs for identity/load-roundtrip tests.
