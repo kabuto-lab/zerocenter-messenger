@@ -61,6 +61,24 @@ async fn main() -> Result<()> {
     println!("Peer ID: {}", peer_id);
     println!("\nType 'help' for commands, 'quit' to exit.\n");
 
+    // Surface jitter intent to the operator. The flag has no effect
+    // without `--obfs-key`; we warn rather than error so users testing
+    // baseline-vs-obfs behaviour can keep the flag in their command
+    // history.
+    if let Some(j) = cli.obfs_jitter_ms {
+        if obfs_key.is_some() {
+            info!(
+                "--obfs-jitter-ms = {} ms: per-frame uniform jitter active",
+                j
+            );
+        } else {
+            tracing::warn!(
+                "--obfs-jitter-ms = {} given without --obfs-key; jitter is ignored (no scramble layer to gate).",
+                j
+            );
+        }
+    }
+
     // Create configuration
     let config = Config {
         profile: cli.profile.clone(),
@@ -68,6 +86,7 @@ async fn main() -> Result<()> {
         listen_port: cli.port,
         bootstrap_nodes: cli.bootstrap.clone(),
         obfs_key,
+        obfs_jitter_ms: cli.obfs_jitter_ms,
     };
 
     // Initialize P2P node

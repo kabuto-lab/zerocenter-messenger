@@ -55,13 +55,15 @@
 //! Transport` and the Noise upgrade. Tests use `tokio::io::duplex`
 //! plus `tokio_util::compat` to bridge.
 
+use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use chacha20::cipher::{KeyIvInit, StreamCipher};
 use chacha20::ChaCha20;
 use futures::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use rand::RngCore;
+use rand::{Rng, RngCore};
 
 /// Either a raw stream or a `ScrambleStream`-wrapped one, behind a
 /// single concrete type. Lets the transport builder pick at runtime
@@ -176,12 +178,33 @@ pub struct ScrambleStream<S> {
     /// `poll_read` calls so a frame straddling many polls reassembles
     /// correctly.
     read_state: ReadState,
+    /// Phase 4c.2′ — per-frame inter-arrival-time jitter cap, ms.
+    /// `None` (or `Some(0)`) means no jitter. When set, every `poll_write`
+    /// that's about to emit a NEW frame first waits a `uniform(0..=max)`
+    /// ms delay so the wire-level timing pattern of libp2p / Noise /
+    /// yamux frames is randomised within that window.
+    jitter_max_ms: Option<u32>,
+    /// An in-progress jitter sleep, if any. `tokio::time::Sleep` is
+    /// `!Unpin`, so we box-pin it; the box itself is `Unpin`.
+    pending_sleep: Option<Pin<Box<tokio::time::Sleep>>>,
 }
 
 impl<S> ScrambleStream<S> {
     /// Wrap `inner`. `key` is shared between both peers; `nonce` must
-    /// be agreed (typically via [`scramble_handshake`]).
+    /// be agreed (typically via [`scramble_handshake`]). No jitter.
     pub fn new(inner: S, key: &[u8; 32], nonce: &[u8; 12]) -> Self {
+        Self::with_jitter(inner, key, nonce, None)
+    }
+
+    /// Like [`ScrambleStream::new`] but with a per-frame jitter cap.
+    /// `jitter_max_ms = Some(n)` makes every new frame wait `uniform(0..=n)`
+    /// ms before emission. `None` or `Some(0)` is the no-jitter path.
+    pub fn with_jitter(
+        inner: S,
+        key: &[u8; 32],
+        nonce: &[u8; 12],
+        jitter_max_ms: Option<u32>,
+    ) -> Self {
         let out_cipher = ChaCha20::new(key.into(), nonce.into());
         let in_cipher = ChaCha20::new(key.into(), nonce.into());
         Self {
@@ -190,6 +213,8 @@ impl<S> ScrambleStream<S> {
             in_cipher,
             pending: Vec::new(),
             read_state: ReadState::default(),
+            jitter_max_ms,
+            pending_sleep: None,
         }
     }
 }
@@ -318,6 +343,48 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for ScrambleStream<S> {
             Poll::Ready(Ok(())) => {}
         }
 
+        // Phase 4c.2′ — gate the next frame's emission behind a uniform
+        // random jitter sleep. Three phases:
+        //
+        //   1. If a sleep is in progress, poll it. Ready → drop the
+        //      future and fall through; Pending → return Pending so the
+        //      executor wakes us when the timer fires.
+        //   2. If no sleep is in progress and jitter is configured, roll
+        //      a fresh `uniform(0..=max)` delay. Zero or unset → skip.
+        //   3. After both phases, we're cleared to scramble + write.
+        //
+        // The jitter applies only to NEW frames, not to draining pending
+        // (which happens before this step and represents bytes already
+        // scrambled in a previous call). flush/close also skip jitter —
+        // they shouldn't delay bytes that are already on the wire path.
+        if let Some(sleep) = this.pending_sleep.as_mut() {
+            match sleep.as_mut().poll(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(()) => {
+                    this.pending_sleep = None;
+                }
+            }
+        } else if let Some(max) = this.jitter_max_ms {
+            if max > 0 {
+                let dur_ms = rand::thread_rng().gen_range(0..=max);
+                if dur_ms > 0 {
+                    let mut sleep =
+                        Box::pin(tokio::time::sleep(Duration::from_millis(dur_ms as u64)));
+                    match sleep.as_mut().poll(cx) {
+                        Poll::Pending => {
+                            this.pending_sleep = Some(sleep);
+                            return Poll::Pending;
+                        }
+                        Poll::Ready(()) => {
+                            // Timer fired in-line (Sleep is sometimes
+                            // immediately Ready for sub-tick durations);
+                            // fall through to frame emission.
+                        }
+                    }
+                }
+            }
+        }
+
         // Build one frame containing up to MAX_PAYLOAD_PER_FRAME bytes
         // of `buf`. Frame layout:
         //   [u16-be: payload_len] [payload_len bytes] [pad to FRAME_QUANTUM-multiple]
@@ -426,6 +493,9 @@ fn drain_pending<S: AsyncWrite + Unpin>(
 /// the same keystream and can pass the wrapped stream up to the next
 /// transport upgrade (Noise XX in our case).
 ///
+/// `jitter_max_ms` is forwarded to the resulting [`ScrambleStream`];
+/// `None` (or `Some(0)`) disables per-frame jitter.
+///
 /// Any I/O error before the 12 bytes are exchanged surfaces as an
 /// `Err` and the connection is dropped — the upgrade pipeline above
 /// us interprets it as a normal connection failure.
@@ -433,6 +503,7 @@ pub async fn scramble_handshake<S>(
     mut stream: S,
     key: &[u8; 32],
     is_dialer: bool,
+    jitter_max_ms: Option<u32>,
 ) -> std::io::Result<ScrambleStream<S>>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -448,7 +519,7 @@ where
         stream.read_exact(&mut n).await?;
         n
     };
-    Ok(ScrambleStream::new(stream, key, &nonce))
+    Ok(ScrambleStream::with_jitter(stream, key, &nonce, jitter_max_ms))
 }
 
 /// Parse a 64-character hex string into a 32-byte key. Returns Err with
@@ -633,6 +704,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn jitter_roundtrips_three_frames() {
+        // Small jitter cap (3 ms) keeps test wall time bounded; the test
+        // run is still negligible (≤ ~9 ms total even worst-case).
+        // Confirms (a) the sleep future is correctly polled into Ready
+        // and (b) the byte stream still roundtrips bit-for-bit with
+        // jitter wired in.
+        let (a, b) = tokio::io::duplex(4096);
+        let key = [11u8; 32];
+        let nonce = [22u8; 12];
+
+        let mut writer =
+            ScrambleStream::with_jitter(a.compat(), &key, &nonce, Some(3));
+        let mut reader = ScrambleStream::with_jitter(b.compat(), &key, &nonce, None);
+
+        let write_fut = async {
+            // Three separate frames so the jitter path is exercised
+            // three times, not just once.
+            writer.write_all(b"frame-one-").await.unwrap();
+            writer.write_all(b"frame-two-").await.unwrap();
+            writer.write_all(b"frame-three").await.unwrap();
+            writer.flush().await.unwrap();
+            writer.close().await.unwrap();
+        };
+        let read_fut = async {
+            let mut got = Vec::new();
+            reader.read_to_end(&mut got).await.unwrap();
+            got
+        };
+        let (_, got) = futures::join!(write_fut, read_fut);
+        assert_eq!(got, b"frame-one-frame-two-frame-three");
+    }
+
+    #[tokio::test]
+    async fn jitter_zero_is_a_noop() {
+        // `Some(0)` should be indistinguishable from `None` — no sleep
+        // created, no scheduler interaction beyond the existing path.
+        let (a, b) = tokio::io::duplex(4096);
+        let key = [13u8; 32];
+        let nonce = [21u8; 12];
+
+        let mut writer =
+            ScrambleStream::with_jitter(a.compat(), &key, &nonce, Some(0));
+        let mut reader = ScrambleStream::new(b.compat(), &key, &nonce);
+
+        let msg = b"hello with zero-jitter";
+        writer.write_all(msg).await.unwrap();
+        writer.flush().await.unwrap();
+
+        let mut got = vec![0u8; msg.len()];
+        reader.read_exact(&mut got).await.unwrap();
+        assert_eq!(got, msg);
+    }
+
+    #[tokio::test]
     async fn handshake_exchanges_nonce_and_roundtrips() {
         // Spin up a paired duplex; one side runs as dialer, the other
         // as listener. Both invoke scramble_handshake. After the
@@ -640,8 +765,10 @@ mod tests {
         let (a, b) = tokio::io::duplex(4096);
         let key = [9u8; 32];
 
-        let dialer_fut = scramble_handshake(a.compat(), &key, /* is_dialer */ true);
-        let listener_fut = scramble_handshake(b.compat(), &key, /* is_dialer */ false);
+        let dialer_fut =
+            scramble_handshake(a.compat(), &key, /* is_dialer */ true, /* jitter */ None);
+        let listener_fut =
+            scramble_handshake(b.compat(), &key, /* is_dialer */ false, /* jitter */ None);
 
         let (dialer_res, listener_res) = futures::join!(dialer_fut, listener_fut);
         let mut d = dialer_res.expect("dialer handshake");

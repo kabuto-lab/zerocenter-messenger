@@ -30,13 +30,17 @@ pub struct Cli {
     /// libp2p Noise handshake no longer matches DPI signatures. Both
     /// peers must use the **same** key. Without this flag, traffic is
     /// vanilla libp2p.
-    ///
-    /// **NOTE (Phase 4a):** the key is parsed and stored on Config but
-    /// the actual transport wiring is deferred to Phase 4b — see
-    /// `plans/phase4-obfs4.md`. Setting this flag today is a no-op on
-    /// the wire; the value is logged as a warning so you know.
     #[arg(long = "obfs-key", value_name = "HEX64")]
     pub obfs_key: Option<String>,
+
+    /// Inter-arrival-time jitter cap (milliseconds). When set together
+    /// with `--obfs-key`, ScrambleStream waits a uniform-random delay in
+    /// `[0, max]` before emitting each new frame, hiding the natural
+    /// burst-pattern of libp2p traffic from statistical-timing analysis.
+    /// Cost: up to `max` ms of added per-frame latency. Has no effect
+    /// without `--obfs-key` (no scramble layer to gate). Off by default.
+    #[arg(long = "obfs-jitter-ms", value_name = "MAX_MS")]
+    pub obfs_jitter_ms: Option<u32>,
 
     /// Launch the Tauri webview UI instead of the CLI. Requires the
     /// crate to be built with the `gui` feature enabled. Without it,

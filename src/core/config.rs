@@ -20,6 +20,11 @@ pub struct Config {
     /// will be wrapped with `ScrambleStream` (Phase 4b — wiring pending).
     /// Both peers in a conversation must share this key out of band.
     pub obfs_key: Option<[u8; 32]>,
+
+    /// Optional inter-arrival-time jitter cap, in milliseconds. Only
+    /// effective when `obfs_key` is also set; the ScrambleStream waits
+    /// `uniform(0..=obfs_jitter_ms)` ms before emitting each new frame.
+    pub obfs_jitter_ms: Option<u32>,
 }
 
 impl Default for Config {
@@ -30,6 +35,7 @@ impl Default for Config {
             listen_port: 0, // Random port
             bootstrap_nodes: vec![],
             obfs_key: None,
+            obfs_jitter_ms: None,
         }
     }
 }

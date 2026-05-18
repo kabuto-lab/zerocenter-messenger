@@ -154,11 +154,20 @@ impl P2PNode {
         // Build the swarm
         let keypair = self.identity.keypair().clone();
         let obfs_key = self.config.obfs_key;
+        let obfs_jitter_ms = self.config.obfs_jitter_ms;
 
         if obfs_key.is_some() {
             info!(
                 "ScrambleStream active: TCP traffic XOR'd with ChaCha20 keystream before Noise"
             );
+            if let Some(j) = obfs_jitter_ms {
+                if j > 0 {
+                    info!(
+                        "ScrambleStream jitter active: per-frame uniform delay in [0, {}] ms",
+                        j
+                    );
+                }
+            }
         }
 
         // NOTE: .with_quic() is disabled while the "quic" libp2p feature is off
@@ -192,9 +201,10 @@ impl P2PNode {
                     // (dialer) and who reads it (listener).
                     let is_dialer = matches!(endpoint, ConnectedPoint::Dialer { .. });
                     let key = obfs_key;
+                    let jitter = obfs_jitter_ms;
                     async move {
                         match key {
-                            Some(k) => scramble_handshake(stream, &k, is_dialer)
+                            Some(k) => scramble_handshake(stream, &k, is_dialer, jitter)
                                 .await
                                 .map(MaybeScrambled::Scrambled),
                             None => Ok(MaybeScrambled::Plain(stream)),
