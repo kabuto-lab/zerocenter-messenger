@@ -80,6 +80,7 @@ pub const POLL_TICK_SECS: u64 = 600;
 
 const SLOT_KEY_DOMAIN: &[u8] = b"zerocenter-mailbox-v1";
 const DROP_KEY_DOMAIN: &[u8] = b"zerocenter-mailbox-drop-v1";
+const ACK_KEY_DOMAIN: &[u8] = b"zerocenter-mailbox-ack-v1";
 
 /// Compute the slot id for a given unix timestamp (seconds). `slot_id`
 /// is shared by every drop targeted at any recipient during this hour.
@@ -104,6 +105,22 @@ pub fn slot_kad_key(recipient_pid: &[u8], slot_id: i64) -> RecordKey {
 pub fn drop_kad_key(recipient_pid: &[u8], sender_pid: &[u8], slot_id: i64) -> RecordKey {
     let mut h = Sha256::new();
     h.update(DROP_KEY_DOMAIN);
+    h.update(recipient_pid);
+    h.update(sender_pid);
+    h.update(slot_id.to_be_bytes());
+    RecordKey::new(&h.finalize().as_slice())
+}
+
+/// Phase 5 ACK key. After the recipient successfully fetches and
+/// decrypts a drop at `drop_kad_key(recipient, sender, slot)`, they
+/// publish an empty record at this matching ACK key. The sender's
+/// republish loop checks for the ACK before each `put_record` and
+/// stops republishing once it lands. Distinct domain separator
+/// (`"zerocenter-mailbox-ack-v1"`) keeps it disjoint from the drop /
+/// slot namespaces.
+pub fn ack_kad_key(recipient_pid: &[u8], sender_pid: &[u8], slot_id: i64) -> RecordKey {
+    let mut h = Sha256::new();
+    h.update(ACK_KEY_DOMAIN);
     h.update(recipient_pid);
     h.update(sender_pid);
     h.update(slot_id.to_be_bytes());
@@ -183,6 +200,26 @@ mod tests {
             drop_kad_key(pid, pid, slot),
             "domain separators must keep the two namespaces disjoint"
         );
+    }
+
+    #[test]
+    fn ack_key_is_distinct_from_drop_and_slot_keys() {
+        // Phase 5 ACK keys live in their own namespace — sender's
+        // republish poll on the ACK key must NEVER collide with the
+        // drop or slot keys (which carry actual ciphertext / providers).
+        let recip = b"some-recipient-pid";
+        let sender = b"some-sender-pid";
+        let slot = 99;
+        let slot_k = slot_kad_key(recip, slot);
+        let drop_k = drop_kad_key(recip, sender, slot);
+        let ack_k = ack_kad_key(recip, sender, slot);
+        assert_ne!(ack_k, slot_k);
+        assert_ne!(ack_k, drop_k);
+
+        // Determinism + sensitivity to inputs.
+        assert_eq!(ack_k, ack_kad_key(recip, sender, slot));
+        assert_ne!(ack_k, ack_kad_key(recip, sender, slot + 1));
+        assert_ne!(ack_k, ack_kad_key(recip, b"other-sender", slot));
     }
 
     #[test]

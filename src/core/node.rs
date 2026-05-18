@@ -62,6 +62,13 @@ pub struct P2PNode {
     /// the Kademlia QueryId. The value is `(slot_id, sender_pid)` so
     /// we can verify decryption attribution.
     pending_record_queries: HashMap<kad::QueryId, (i64, PeerId)>,
+    /// Phase-5-mailbox-ACK: Kad `get_record` queries against the ACK
+    /// namespace (`ack_kad_key`). Value is the local `mailbox_drops.id`
+    /// so we can call `mailbox_drop_ack` on FoundRecord and skip
+    /// future republishes of that drop. Distinct map from
+    /// `pending_record_queries` because the GetRecord result handler
+    /// branches on which side fired the query.
+    pending_ack_queries: HashMap<kad::QueryId, i64>,
 }
 
 /// Inputs that travel only on the first message of a fresh session:
@@ -152,6 +159,7 @@ impl P2PNode {
             listen_addrs: Vec::new(),
             pending_provider_queries: HashMap::new(),
             pending_record_queries: HashMap::new(),
+            pending_ack_queries: HashMap::new(),
         })
     }
 
@@ -1263,6 +1271,18 @@ impl P2PNode {
         for (id, recipient_pid, slot, wire_bytes) in due {
             let slot_key = mailbox::slot_kad_key(&recipient_pid, slot);
             let drop_key = mailbox::drop_kad_key(&recipient_pid, &my_pid_bytes, slot);
+            let ack_key = mailbox::ack_kad_key(&recipient_pid, &my_pid_bytes, slot);
+
+            // Phase 5 mailbox ACK polling. Issue a `get_record` against
+            // the recipient's ACK key for this drop. If they've already
+            // ingested + ACK'd, the response handler will call
+            // `mailbox_drop_ack(id)` and the next republish tick skips
+            // this row entirely. We still issue the put_record below
+            // optimistically — one wasted republish per drop after the
+            // ACK lands but before our query sees it is acceptable.
+            let ack_qid = swarm.behaviour_mut().kademlia.get_record(ack_key);
+            self.pending_ack_queries.insert(ack_qid, id);
+
             if let Err(e) = swarm.behaviour_mut().kademlia.start_providing(slot_key) {
                 warn!("Republish start_providing failed for id={}: {:?}", id, e);
             }
@@ -1354,10 +1374,22 @@ impl P2PNode {
                 }
             }
             kad::QueryResult::GetRecord(Ok(ok)) => {
-                self.handle_mailbox_record_result(swarm, id, ok);
+                // Phase 5: GetRecord results come from two distinct
+                // query sources — the recipient-side drop fetch
+                // (`pending_record_queries`) and the sender-side ACK
+                // poll (`pending_ack_queries`). Dispatch by which map
+                // owns the QueryId. We check ACK first because it has
+                // simpler semantics (no decrypt path).
+                if self.pending_ack_queries.contains_key(&id) {
+                    self.handle_mailbox_ack_result(id, ok);
+                } else {
+                    self.handle_mailbox_record_result(swarm, id, ok);
+                }
             }
             kad::QueryResult::GetRecord(Err(e)) => {
-                if let Some((slot, sender)) = self.pending_record_queries.remove(&id) {
+                if let Some(drop_id) = self.pending_ack_queries.remove(&id) {
+                    debug!("Mailbox ACK get_record for drop_id={} failed: {:?}", drop_id, e);
+                } else if let Some((slot, sender)) = self.pending_record_queries.remove(&id) {
                     debug!("Mailbox get_record for slot {} sender {} failed: {:?}",
                         slot, sender, e);
                 }
@@ -1442,10 +1474,95 @@ impl P2PNode {
                 // this value (INVARIANTS §2). A mailbox drop is
                 // legitimate iff the signed envelope's `from` equals
                 // the provider PeerId we fetched it from.
-                self.process_incoming_dm(swarm, sender, &bytes);
+                let ingested = self.process_incoming_dm(swarm, sender, &bytes);
+
+                // Phase 5 ACK loop. If ingestion succeeded, publish an
+                // empty record at `ack_kad_key(self, sender, slot)`
+                // so the sender's republish loop sees the ACK and
+                // stops re-putting this drop. If ingestion FAILED
+                // (envelope-verify mismatch, signature mismatch,
+                // §2 cross-check failure, ratchet-decrypt failure),
+                // we DON'T ACK — that tells the sender to keep
+                // republishing, which is the right behaviour for a
+                // legitimately-broken delivery attempt.
+                if ingested {
+                    self.publish_mailbox_ack(swarm, sender, slot);
+                }
             }
             kad::GetRecordOk::FinishedWithNoAdditionalRecord { .. } => {
                 self.pending_record_queries.remove(&id);
+            }
+        }
+    }
+
+    /// Phase 5 ACK consumer (sender side). A previously-issued
+    /// `get_record(ack_kad_key)` returned a record — that means the
+    /// recipient has fetched + ingested the drop we published. Call
+    /// `mailbox_drop_ack(id)` so the storage row marks
+    /// `acknowledged_at`; the next `mailbox_drops_due_for_republish`
+    /// scan will skip it, and the next cleanup tick will GC it after
+    /// the 24-hour ACK retention window.
+    ///
+    /// We don't validate the record VALUE — the v0 ACK record carries
+    /// the recipient's PeerId for debuggability but it's not
+    /// cryptographically authenticated. A malicious third party
+    /// publishing a fake ACK only DoSes the sender (stops republish);
+    /// the actual recipient's eventual re-poll would still surface
+    /// the drop on any DHT node that hasn't expired it yet.
+    fn handle_mailbox_ack_result(&mut self, id: kad::QueryId, ok: kad::GetRecordOk) {
+        let Some(drop_id) = self.pending_ack_queries.remove(&id) else {
+            return;
+        };
+        if let kad::GetRecordOk::FoundRecord(_) = ok {
+            debug!("Mailbox ACK observed for drop_id={}", drop_id);
+            if let Some(ref store) = self.message_store {
+                if let Err(e) = store.mailbox_drop_ack(drop_id) {
+                    warn!("mailbox_drop_ack({}) failed: {}", drop_id, e);
+                }
+            }
+        }
+    }
+
+    /// Phase 5 ACK publisher. After successfully ingesting a mailbox-
+    /// fetched drop from `sender` at `slot`, publish a tiny presence
+    /// record at `ack_kad_key(self, sender, slot)`. The value is just
+    /// the recipient's PeerId bytes (for debuggability — the sender
+    /// can confirm the ACK came from the right peer); it's not
+    /// cryptographically authenticated because the obfs envelope
+    /// already authenticates the underlying message and the sender
+    /// only needs to know SOMEONE retrieved their drop. A malicious
+    /// third party publishing a fake ACK would only DoS the sender
+    /// (they'd stop republishing legitimate drops); the legitimate
+    /// recipient's eventual re-poll would still surface the drop
+    /// from any DHT node that hasn't expired it yet.
+    fn publish_mailbox_ack(
+        &mut self,
+        swarm: &mut Swarm<Behaviour>,
+        sender: PeerId,
+        slot: i64,
+    ) {
+        let my_pid_bytes = self.identity.peer_id().to_bytes();
+        let sender_bytes = sender.to_bytes();
+        let ack_key = mailbox::ack_kad_key(&my_pid_bytes, &sender_bytes, slot);
+        let record = kad::Record {
+            key: ack_key,
+            value: my_pid_bytes.clone(),
+            publisher: None,
+            expires: None,
+        };
+        match swarm
+            .behaviour_mut()
+            .kademlia
+            .put_record(record, kad::Quorum::One)
+        {
+            Ok(_qid) => {
+                debug!("Mailbox ACK published for sender {} at slot {}", sender, slot);
+            }
+            Err(e) => {
+                warn!(
+                    "Mailbox ACK put_record failed for sender {} at slot {}: {:?}",
+                    sender, slot, e
+                );
             }
         }
     }
@@ -1454,18 +1571,27 @@ impl P2PNode {
     // Ratchet integration: receive path
     // ============================================================
 
+    /// Returns `true` iff the inbound message was successfully
+    /// decrypted and stored. Used by the mailbox path to decide
+    /// whether to publish an ACK (Phase 5). The boolean is `false` on
+    /// any failure path (parse / signature / cross-check / expiry /
+    /// payload-parse / decrypt) AND on the "queued waiting for prekey
+    /// fetch" path — that case may eventually become a success but
+    /// the caller can't know yet, and the sender should keep
+    /// republishing until it does. The non-mailbox call-site
+    /// (request-response Request handler) ignores the return value.
     fn process_incoming_dm(
         &mut self,
         swarm: &mut Swarm<Behaviour>,
         transport_peer: PeerId,
         request_bytes: &[u8],
-    ) {
+    ) -> bool {
         // Step 1: parse the outer envelope.
         let proto_msg = match ProtocolMessage::from_bytes(request_bytes) {
             Ok(m) => m,
             Err(e) => {
                 warn!("Failed to parse DM from {}: {}", transport_peer, e);
-                return;
+                return false;
             }
         };
 
@@ -1477,7 +1603,7 @@ impl P2PNode {
                     "Dropping DM from transport peer {}: signature verification failed ({})",
                     transport_peer, e
                 );
-                return;
+                return false;
             }
         };
 
@@ -1487,21 +1613,17 @@ impl P2PNode {
                 "Dropping DM: transport peer {} != signed sender {}",
                 transport_peer, verified_sender
             );
-            return;
+            return false;
         }
 
         // Step 3.5 (audit F5): drop expired envelopes BEFORE doing any
-        // state-modifying work. Stale drops fished out of the DHT
-        // mailbox (where records can survive up to Kad TTL even after
-        // our local 7-day expiry) shouldn't drive responder bootstrap
-        // or advance the ratchet. Direct-DM envelopes from a peer with
-        // skewed clock also bail out here cleanly.
+        // state-modifying work.
         if proto_msg.is_expired() {
             debug!(
                 "Dropping stale DM from {}: envelope past its TTL",
                 verified_sender
             );
-            return;
+            return false;
         }
 
         // Step 4: parse the encrypted payload.
@@ -1509,14 +1631,13 @@ impl P2PNode {
             Ok(p) => p,
             Err(e) => {
                 warn!("Malformed EncryptedPayload from {}: {}", verified_sender, e);
-                return;
+                return false;
             }
         };
 
         // Step 5: route to the right decrypt path.
         if self.restore_session_if_persisted(&verified_sender) {
-            self.decrypt_and_store(verified_sender, &payload);
-            return;
+            return self.decrypt_and_store(verified_sender, &payload);
         }
 
         // No session yet — need responder bootstrap. We need both the
@@ -1527,7 +1648,7 @@ impl P2PNode {
                 "Dropping DM from {}: no session and no x3dh_eph in payload",
                 verified_sender
             );
-            return;
+            return false;
         };
 
         if let Some(initiator_x25519) = self.cached_prekey(&verified_sender) {
@@ -1536,9 +1657,9 @@ impl P2PNode {
                 eph_bytes,
                 initiator_x25519,
                 &payload,
-            );
+            )
         } else {
-            // Queue and fetch.
+            // Queue and fetch. Caller treats this as a non-ACK case.
             self.pending_recvs
                 .entry(verified_sender)
                 .or_default()
@@ -1553,16 +1674,20 @@ impl P2PNode {
                     .prekey
                     .send_request(&verified_sender, PrekeyRequest);
             }
+            false
         }
     }
 
+    /// Returns `true` iff bootstrap succeeded AND first-message decrypt
+    /// succeeded. Used by `process_incoming_dm` to propagate
+    /// success/fail up to the Phase 5 mailbox ACK loop.
     fn bootstrap_responder_and_decrypt(
         &mut self,
         peer: PeerId,
         eph_bytes: [u8; 32],
         initiator_x25519: X25519Pub,
         payload: &EncryptedPayload,
-    ) {
+    ) -> bool {
         let eph_pub = X25519Pub::from(eph_bytes);
 
         // 3-DH path if the initiator says they consumed an OTPK. We
@@ -1582,7 +1707,7 @@ impl P2PNode {
                         "Dropping first DM from {}: OTPK id={} not found in our store",
                         peer, otpk_id
                     );
-                    return;
+                    return false;
                 }
             };
             let otpk_secret = x25519_dalek::StaticSecret::from(otpk_priv_bytes);
@@ -1607,17 +1732,12 @@ impl P2PNode {
         let session = RatchetState::new_responder(sk, my_spk_clone);
 
         // Audit F9: install the session ONLY if first-message decrypt
-        // succeeds. Previously we inserted unconditionally and the
-        // broken session stuck around on AEAD failure, wedging every
-        // subsequent legitimate message under that same session
-        // record. Now: stash the session, attempt decrypt, then
-        // commit (or drop and leave the slot empty so the next
-        // legitimate first-message can re-bootstrap cleanly).
+        // succeeds.
         self.sessions.insert(peer, session);
         let decrypted_ok = self.decrypt_first_message(peer, payload);
         if !decrypted_ok {
             self.sessions.remove(&peer);
-            return;
+            return false;
         }
 
         // Success path: delete the consumed OTPK row so it can't be
@@ -1632,6 +1752,7 @@ impl P2PNode {
                 warn!("Failed to delete consumed OTPK id={}: {}", id, e);
             }
         }
+        true
     }
 
     /// Variant of `decrypt_and_store` that returns a bool — used by the
@@ -1679,7 +1800,9 @@ impl P2PNode {
         true
     }
 
-    fn decrypt_and_store(&mut self, peer: PeerId, payload: &EncryptedPayload) {
+    /// Returns `true` iff the message was successfully ratchet-
+    /// decrypted and stored. Phase 5 mailbox ACK path uses this signal.
+    fn decrypt_and_store(&mut self, peer: PeerId, payload: &EncryptedPayload) -> bool {
         let ad = Self::ratchet_ad(&peer, &self.identity.peer_id());
 
         let ratchet_msg = crate::crypto::ratchet::RatchetMessage {
@@ -1696,14 +1819,14 @@ impl P2PNode {
                 Some(s) => s,
                 None => {
                     error!("decrypt_and_store: no session for {}", peer);
-                    return;
+                    return false;
                 }
             };
             match session.decrypt(&ratchet_msg, &ad) {
                 Ok(pt) => pt,
                 Err(e) => {
                     warn!("Ratchet decrypt failed from {}: {}", peer, e);
-                    return;
+                    return false;
                 }
             }
         };
@@ -1730,6 +1853,7 @@ impl P2PNode {
         debug!("Decrypted DM from {}: {}", peer, text);
         println!("\n🔓 {}: {}", peer, text);
         println!("> ");
+        true
     }
 
     /// Drain any queued sends / recvs that were waiting on this prekey.
