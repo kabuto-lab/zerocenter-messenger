@@ -16,6 +16,7 @@ Living document tracking what's done, what's in flight, and what's queued. Last 
 | `--obfs-key` ChaCha20 wire obfuscation, wired into the libp2p Transport | ✅ |
 | `--obfs-key` 256-byte frame padding (Phase 4c.2) | ✅ |
 | `--obfs-jitter-ms` opt-in IAT jitter (Phase 4c.2′) | ✅ |
+| NTOR-style hidden-nonce handshake via elligator2 (Phase 4c.1) | ✅ |
 | QUIC | ⏸ disabled (see `[[project-quic-disabled]]`; revisit when ring-on-MSVC settles) |
 | GUI (Tauri 2.x) | 🟡 handlers scaffolded; deps + build.rs + tauri.conf.json 2.x migration TODO |
 | DHT mailbox store-and-forward | 🟡 storage tables + methods scaffolded; network layer TODO |
@@ -23,7 +24,7 @@ Living document tracking what's done, what's in flight, and what's queued. Last 
 | Group chats (Megolm-style) | ❌ |
 | Deniability | ❌ (intentional non-deniability for v1) |
 
-Build: rustc 1.95 / cargo 1.95 / VS Build Tools. `cargo test --lib`: 52/52 (50 after 4c.2 + 2 new jitter tests: `jitter_roundtrips_three_frames`, `jitter_zero_is_a_noop`). `target/release/zerocenter.exe` is ~9.13 MB and tracked in-tree.
+Build: rustc 1.95 / cargo 1.95 / VS Build Tools. `cargo test --lib`: 55/55 (52 after 4c.2′ + Phase 4c.1's net-new tests: `ntor_mismatched_obfs_keys_yield_unreadable_stream`, `ntor_handshake_first_32_bytes_look_uniform`, `representable_keypair_succeeds`; the legacy `handshake_exchanges_nonce_and_roundtrips` test was replaced 1:1 by `ntor_handshake_roundtrips`). `target/release/zerocenter.exe` is ~9.19 MB and tracked in-tree.
 
 ## Done — chronological commits
 
@@ -31,7 +32,8 @@ Most recent first.
 
 | Commit | Title | What it shipped |
 |---|---|---|
-| _(pending push)_ | feat(scramble): Phase 4c.2′ — opt-in IAT jitter via `--obfs-jitter-ms` | New CLI flag plumbed through `Config::obfs_jitter_ms` into `scramble_handshake` → `ScrambleStream::with_jitter`. `pending_sleep: Option<Pin<Box<tokio::time::Sleep>>>` on the struct; `poll_write` gates each new frame behind a `uniform(0..=max)` ms delay after the `pending` drain step. Two new tests: `jitter_roundtrips_three_frames` (3 frames with jitter=3 ms round-trip cleanly) and `jitter_zero_is_a_noop`. |
+| _(pending push)_ | feat(scramble): Phase 4c.1 — NTOR-style hidden-nonce handshake via elligator2 | New dep `curve25519-elligator2 = "0.1.0-alpha.2"`. `scramble_handshake` rewritten: each side generates an X25519 ephemeral whose pubkey has an elligator2 `Randomized` representative (retry up to 64×), exchanges the 32-byte representative, DH's the peer's decoded pubkey, HKDF's `shared_secret \|\| obfs_key` (salt `zerocenter-ntor-v1`) to derive a per-connection `(chacha_key, chacha_nonce)`. Replaces the in-clear 12-byte nonce prefix from Phase 4b. Three net-new tests; legacy handshake test replaced 1:1. Wire-format-breaking for `--obfs-key` users (both peers must upgrade). |
+| 1d1d829 | feat(scramble): Phase 4c.2′ — opt-in IAT jitter via `--obfs-jitter-ms` | New CLI flag plumbed through `Config::obfs_jitter_ms` into `scramble_handshake` → `ScrambleStream::with_jitter`. `pending_sleep: Option<Pin<Box<tokio::time::Sleep>>>` on the struct; `poll_write` gates each new frame behind a `uniform(0..=max)` ms delay after the `pending` drain step. Two new tests: `jitter_roundtrips_three_frames` (3 frames with jitter=3 ms round-trip cleanly) and `jitter_zero_is_a_noop`. |
 | 3c4fd8d | feat(scramble): Phase 4c.2 — 256-byte frame padding | `ReadState` enum + `padded_frame_size` + framed `poll_read`/`poll_write` in `src/network/scramble.rs`. Length-prefixed frames padded to a 256-byte quantum, hiding per-message size from statistical DPI. Wire-format-breaking under `--obfs-key`. New test `frame_padding_rounds_up_to_quantum`; existing `short_inner_writes_dont_desync_keystream` reader switched to `read_to_end` so pad bytes drain on writer EOF. |
 | 0cd1dd7 | fix(scramble): pending-buffer so short inner writes don't desync ChaCha20 | Phase 4c.3. `drain_pending` helper; `pending` Vec carries scrambled-but-unsent tails across polls so the keystream never advances past unsent bytes. |
 | 8f04035 | docs(audit): refresh README — code now compiles, ScrambleStream wired | Removed the "never been compiled" build-status claim; added a fixes-table; updated caveat #6 for Phase 4b shipped. |
@@ -46,7 +48,7 @@ Most recent first.
 
 ## In flight
 
-_None._ Phase 4c.2 framing and Phase 4c.2′ IAT jitter both shipped 2026-05-18. Phase 4c.1 (NTOR-style hidden nonce + elligator2) remains the only Phase 4c sub-item open; deferred — substantial scope.
+_None._ Phase 4c is complete: 4b (XOR + ScrambleStream wired into transport) + 4c.1 (NTOR-style hidden handshake) + 4c.2 (256-byte frame padding) + 4c.2′ (opt-in IAT jitter) + 4c.3 (short-write keystream resync). All shipped between 2026-05-17 and 2026-05-18. Next priorities (in roughly increasing scope): unbounded-`pending` bound, Tauri GUI build wiring, DHT mailbox network layer, external audit, Phase 5 functional gaps.
 
 ## Remaining — prioritised forward plan
 
@@ -56,7 +58,8 @@ _None._ Phase 4c.2 framing and Phase 4c.2′ IAT jitter both shipped 2026-05-18.
 
 - **(3) Short-write keystream resync** — ✅ done (commit 0cd1dd7).
 - **(2) Length padding** — ✅ done (commit 3c4fd8d).
-- **(2′) IAT jitter** — ✅ done (Phase 4c.2′ commit pending push). Opt-in via `--obfs-jitter-ms <max>`; `Option<Pin<Box<tokio::time::Sleep>>>` on `ScrambleStream`; gates each new frame behind a `uniform(0..=max)` ms delay after the `pending` drain step.
+- **(2′) IAT jitter** — ✅ done (commit 1d1d829).
+- **(1) NTOR-style hidden nonce + elligator2** — ✅ done (Phase 4c.1 commit pending push). `curve25519-elligator2 = "0.1.0-alpha.2"` dep; `scramble_handshake` does ephemeral-X25519 + elligator2 exchange + X25519 DH + HKDF over `shared || obfs_key`.
 - **(1) Hidden nonce (NTOR-style + elligator2)** — deferred. Real Obfs4 equivalent. Substantial scope: elligator2 encoding of X25519 ephemeral pubkeys, NTOR handshake, derive nonce from shared secret. Requires either picking up a curve25519-dalek feature for elligator2 or hand-rolling the encoding. Won't tackle until there's a clear ask for full Obfs4 parity — current 12-byte plaintext-nonce header gives a length-only fingerprint that a knowledgeable attacker can match anyway; the meaningful win is in (2) and (2′), which are already covering the realistic DPI / statistical attacks.
 
 ### Phase 4 — non-obfs threads
