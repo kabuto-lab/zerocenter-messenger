@@ -286,6 +286,32 @@ it could land in a remote log aggregator.
 
 ---
 
+## §21. DHT mailbox is encrypted, signed, and dedups via the ratchet
+
+**Statement.** When a sender publishes an offline-delivery drop to the DHT, the value at the Kad record is the SAME `ProtocolMessage` bytes that would have gone over the direct `request-response` channel — a signed envelope wrapping a Double-Ratchet `EncryptedPayload`. The recipient's ingestion pipeline (`process_incoming_dm`) is invoked identically for mailbox-fetched drops and for direct DMs: signature verification, transport-peer ↔ signed-sender cross-check (§2), AAD-bound ratchet decrypt (§6), and skipped-key cache (§5). A drop received twice (once via outbox-drain, once via mailbox-fetch) is silently deduped by the ratchet's `try_skipped` cache — the second attempt encounters an already-consumed message-key entry and returns the same plaintext, then a no-op store.
+
+**Why.** The mailbox layer must not introduce a parallel decryption path with different invariants. Reusing the exact `process_incoming_dm` entry-point keeps the security surface flat. The §2 cross-check still holds because the recipient verifies the `from` field of the signed envelope against the PeerId of the provider that fronted the Kad record (the `sender` argument passed into `process_incoming_dm`).
+
+**Enforced at.**
+- `src/network/mailbox.rs` — slot/key derivation; `slot_kad_key` and `drop_kad_key` use distinct domain separators (`"zerocenter-mailbox-v1"` vs `"zerocenter-mailbox-drop-v1"`) so the namespaces are disjoint.
+- `src/core/node.rs::publish_mailbox_drop` — sender side; calls `ratchet_encrypt_and_wrap` for the same bytes the request-response path would have sent, then `put_record` + `start_providing`.
+- `src/core/node.rs::handle_mailbox_record_result` — recipient side; routes fetched bytes through `process_incoming_dm` with the provider's PeerId as the transport-attribution argument.
+- `src/core/node.rs::poll_mailbox_slots` — periodic recipient scan; caps fan-out at 24 slots (one day) per poll regardless of how long the recipient has been offline, so a fresh install doesn't blast the DHT.
+- `src/core/node.rs::republish_mailbox_drops` — sender-side republish loop; reads `mailbox_drops_due_for_republish(REPUBLISH_AFTER_SECS=1800)` and re-puts each. Sender's own `mailbox_drops` row tracks `expires_at` (default 7 days) so unack'd drops self-prune.
+
+**Known limitations.**
+- **Metadata leak.** A passive observer of the providers DHT can correlate `(sender_pid, slot_kad_key(recipient_pid, slot))` and infer that `sender → recipient` traffic happened at some point during that hour. This is no worse than the direct-DM path (which exposes `from`/`to` in the unencrypted envelope) but is more durable: providers records persist in the DHT until Kad TTL expires. Phase 5 sealed-sender / onion routing addresses both paths.
+- **No ACK in v0.** Storage scaffolding (`mailbox_drop_ack`) is unused; senders republish until 7-day `expires_at` even after the recipient successfully fetched. A future ACK can be carried out-of-band (a DM when next online) or as a separate Kad record at a derived key.
+- **First-message-to-stranger can't use the mailbox.** Publishing requires either an existing ratchet session or a cached responder prekey to encrypt. Brand-new contacts whose prekey we've never fetched still fall back to the outbox-only path; the recipient must come online to us directly for the first message.
+
+**Suggested attack.** Construct two mailbox drops at the same `(recipient, slot)` from two distinct senders. The recipient should fetch and decrypt both — the providers DHT must enumerate both senders, and each `drop_kad_key(recipient, sender, slot)` is distinct so the records don't overwrite.
+
+**Suggested attack.** Tamper with a fetched `ProtocolMessage` value mid-DHT — flip a single bit in `record.value`. The recipient's `process_incoming_dm` invokes `ProtocolMessage::verify` first, which checks the Ed25519 signature; tamper detection is the same as for direct DMs. Mailbox storage does NOT add a separate integrity layer; the envelope signature suffices.
+
+**Suggested attack.** Drop a `ProtocolMessage` whose `from` field does NOT match the provider PeerId fronting the record. The `process_incoming_dm` cross-check (§2 step 2) rejects it; the inconsistency between transport-attribution and signed-sender is enough to drop the message before any state change.
+
+---
+
 ## End of invariants
 
 This list is not exhaustive — it captures what the implementers consider load-bearing. A reviewer should treat anything *not* listed here as also potentially load-bearing and dig in.

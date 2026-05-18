@@ -19,12 +19,12 @@ Living document tracking what's done, what's in flight, and what's queued. Last 
 | NTOR-style hidden-nonce handshake via elligator2 (Phase 4c.1) | ✅ |
 | QUIC | ⏸ disabled (see `[[project-quic-disabled]]`; revisit when ring-on-MSVC settles) |
 | GUI (Tauri 2.x) | 🟡 handlers scaffolded; deps + build.rs + tauri.conf.json 2.x migration TODO |
-| DHT mailbox store-and-forward | 🟡 storage tables + methods scaffolded; network layer TODO |
+| DHT mailbox store-and-forward | ✅ (v0 — no ACK; sealed-sender deferred to Phase 5) |
 | External security audit | ❌ not started; `audit/` pack ready for reviewer |
 | Group chats (Megolm-style) | ❌ |
 | Deniability | ❌ (intentional non-deniability for v1) |
 
-Build: rustc 1.95 / cargo 1.95 / VS Build Tools. `cargo test --lib`: 56/56 (55 after 4c.1 + the new `large_payload_respects_pending_bound` test added when the pending buffer was hard-bounded). `target/release/zerocenter.exe` is ~9.19 MB and tracked in-tree.
+Build: rustc 1.95 / cargo 1.95 / VS Build Tools. `cargo test --lib`: 63/63 (56 after pending-bound + 7 new `network::mailbox::tests::*` unit tests for slot/key derivation). `target/release/zerocenter.exe` is ~9.24 MB and tracked in-tree.
 
 ## Done — chronological commits
 
@@ -71,12 +71,7 @@ _None._ Phase 4c is complete: 4b (XOR + ScrambleStream wired into transport) + 4
   4. Verify the webview launches and the `invoke()` round-trip hits the node loop. Test on Windows first since that's the toolchain in use.
   5. Sketch a minimal `dist/index.html` UI to actually exercise the commands.
 
-- **DHT mailbox network layer.** Storage scaffolding (tables, methods) is in `src/storage/store.rs::mailbox_drop_*`. Missing pieces:
-  1. Republish loop: periodic task that reads `mailbox_drops_due_for_republish(threshold)` and re-puts each row to Kademlia.
-  2. Slot-derivation: `slot_id = floor(unix_ts / SLOT_SECONDS)` → Kad key. Pick SLOT_SECONDS (probably 3600 — 1-hour buckets).
-  3. Recipient-side polling: at startup and on a timer, query Kad keys for `mailbox_last_polled_slot()..now_slot`, decrypt any drops addressed to us, append to local message store, ACK back to sender (which causes `mailbox_drop_ack` and republish loop drops the row).
-  4. Drop format: serialized `EncryptedPayload` (already Double-Ratchet'd), addressed to a Kad key derived from `recipient_pid + slot_id` so multiple peers can drop without colliding.
-  5. Hardest sub-problem: keeping `(recipient_pid, slot_id) → kad_key` consistent without leaking the recipient. Use HMAC over an out-of-band shared secret? Simplest v0: just public key — accept the metadata leak as a documented limitation, fix in Phase 5.
+- **DHT mailbox network layer — ✅ v0 shipped.** Module `src/network/mailbox.rs` exposes `slot_id_for(unix_seconds)` (1-hour buckets), `slot_kad_key(recipient, slot)`, `drop_kad_key(recipient, sender, slot)` — both keyed by SHA-256 with distinct domain separators. `src/core/node.rs::publish_mailbox_drop` triggers on the offline branch of `try_send_or_queue` in addition to `outbox_add`; uses the new `ratchet_encrypt_and_wrap` helper (factored out of `encrypt_and_send_existing`) to produce the same `ProtocolMessage` wire bytes the direct-DM path would, then `put_record(drop_kad_key)` + `start_providing(slot_kad_key)`. Republish tick (every 600s) re-puts rows older than 1800s; poll tick (every 600s) queries `get_providers` for slot range `last_polled..now_slot` (capped at last 24 slots), and for each returned provider issues `get_record(drop_kad_key(self, provider, slot))`. Fetched bytes route through the same `process_incoming_dm` pipeline as direct DMs (signature verification, transport-peer ↔ signed-sender cross-check, ratchet decrypt, ratchet dedup). See `audit/INVARIANTS.md` §21 for the security story. Remaining v1 work: ACK flow (storage scaffolding exists; sender-side republish doesn't currently observe recipient ACKs); sealed-sender to plug the providers DHT metadata leak (Phase 5).
 
 ### Phase 5 — security & functional gaps
 

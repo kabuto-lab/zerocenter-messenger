@@ -1,5 +1,6 @@
 use anyhow::Result;
 use libp2p::{
+    kad,
     noise,
     swarm::Swarm,
     tcp, yamux, PeerId, SwarmBuilder, Multiaddr,
@@ -15,7 +16,7 @@ use crate::core::{Config, Identity};
 use crate::core::identity::prekey_signing_bytes;
 use crate::crypto::{ratchet::RatchetState, x3dh};
 use crate::network::{
-    Behaviour, DirectMessageRequest, OneTimePrekey, PrekeyRequest, PrekeyResponse,
+    mailbox, Behaviour, DirectMessageRequest, OneTimePrekey, PrekeyRequest, PrekeyResponse,
 };
 use crate::protocol::{EncryptedPayload, ProtocolMessage};
 use crate::storage::MessageStore;
@@ -52,6 +53,15 @@ pub struct P2PNode {
     /// Our own listen addresses, tracked from `NewListenAddr` events
     /// so the `addr` CLI command can print shareable multiaddrs.
     listen_addrs: Vec<Multiaddr>,
+    /// Phase-4-mailbox: Kad `get_providers` queries we issued, keyed by
+    /// the Kademlia QueryId so we can correlate the result back to the
+    /// slot we polled. On result we kick off `get_record` for each
+    /// provider, tracked in `pending_record_queries`.
+    pending_provider_queries: HashMap<kad::QueryId, i64>,
+    /// Phase-4-mailbox: Kad `get_record` queries we issued, keyed by
+    /// the Kademlia QueryId. The value is `(slot_id, sender_pid)` so
+    /// we can verify decryption attribution.
+    pending_record_queries: HashMap<kad::QueryId, (i64, PeerId)>,
 }
 
 /// Inputs that travel only on the first message of a fresh session:
@@ -140,6 +150,8 @@ impl P2PNode {
             pending_recvs: HashMap::new(),
             cached_otpks: HashMap::new(),
             listen_addrs: Vec::new(),
+            pending_provider_queries: HashMap::new(),
+            pending_record_queries: HashMap::new(),
         })
     }
 
@@ -334,6 +346,22 @@ impl P2PNode {
         cleanup_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         cleanup_tick.tick().await;
 
+        // Phase-4-mailbox: republish drops to the DHT periodically so
+        // they outlive Kad's per-record TTL.
+        let mut republish_tick =
+            tokio::time::interval(Duration::from_secs(mailbox::REPUBLISH_TICK_SECS));
+        republish_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        republish_tick.tick().await;
+
+        // Phase-4-mailbox: walk the DHT for drops addressed to us.
+        let mut poll_tick =
+            tokio::time::interval(Duration::from_secs(mailbox::POLL_TICK_SECS));
+        poll_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // Fire the first poll soon after startup (1 second) so users
+        // running `zerocenter` after being offline don't wait 10 min
+        // for a stale-mailbox sweep.
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
         loop {
             tokio::select! {
                 // Handle CLI commands
@@ -526,7 +554,22 @@ impl P2PNode {
                             Ok(n) => info!("Outbox sweep: deleted {} stale entries", n),
                             Err(e) => warn!("Outbox sweep failed: {}", e),
                         }
+                        match store.mailbox_drops_cleanup() {
+                            Ok(0) => {}
+                            Ok(n) => info!("Mailbox sweep: deleted {} expired/ACK'd drops", n),
+                            Err(e) => warn!("Mailbox sweep failed: {}", e),
+                        }
                     }
+                }
+
+                // Phase-4-mailbox republish.
+                _ = republish_tick.tick() => {
+                    self.republish_mailbox_drops(&mut swarm);
+                }
+
+                // Phase-4-mailbox poll.
+                _ = poll_tick.tick() => {
+                    self.poll_mailbox_slots(&mut swarm);
                 }
 
                 // Handle swarm events
@@ -580,7 +623,7 @@ impl P2PNode {
     ) -> Result<()> {
         match event {
             crate::network::BehaviourEvent::Kademlia(kad_event) => {
-                info!("Kademlia event: {:?}", kad_event);
+                self.handle_kad_event(swarm, kad_event);
             }
             crate::network::BehaviourEvent::Gossipsub(gs_event) => {
                 // Gossipsub is kept in the behaviour for future public-channel
@@ -783,6 +826,13 @@ impl P2PNode {
         // We accept that this doesn't help the "both never online at
         // once" case; that needs a relay layer, which is its own feature.
         if !self.connected_peers.contains_key(&peer) {
+            // Two parallel offline-delivery paths: (a) the persistent
+            // outbox handles "they come back to us directly"; (b) the
+            // DHT mailbox handles "they don't, but they're online
+            // somewhere in the Kad network." Both run unconditionally
+            // on the offline branch — the recipient's ratchet
+            // `try_skipped` cache silently dedupes the same ciphertext
+            // arriving via two paths.
             if let Some(ref store) = self.message_store {
                 match store.outbox_add(&peer.to_bytes(), plaintext.as_bytes(), 7 * 24 * 3600) {
                     Ok(_) => {
@@ -796,6 +846,10 @@ impl P2PNode {
             } else {
                 error!("No message store available; message to {} is lost", peer);
             }
+            // The mailbox publish is best-effort and a no-op when we
+            // have no session and no cached prekey (can't encrypt). It
+            // logs internally and never blocks the outbox path.
+            self.publish_mailbox_drop(swarm, peer, &plaintext);
             return;
         }
 
@@ -910,21 +964,60 @@ impl P2PNode {
         plaintext: &str,
         hello: Option<FirstMessageHello>,
     ) {
+        let Some((wire_bytes, ttl)) = self.ratchet_encrypt_and_wrap(peer, plaintext, hello) else {
+            return;
+        };
+
+        swarm
+            .behaviour_mut()
+            .request_response
+            .send_request(&peer, DirectMessageRequest(wire_bytes));
+
+        // Persist the local plaintext copy (so history shows it) and the
+        // updated session state (so a restart doesn't break the chain).
+        if let Some(ref store) = self.message_store {
+            if let Err(e) = store.store_message(
+                &self.identity.peer_id().to_bytes(),
+                &peer.to_bytes(),
+                plaintext.as_bytes(),
+                ttl,
+            ) {
+                warn!("Failed to store local plaintext copy: {}", e);
+            }
+        }
+        self.persist_session(&peer);
+
+        println!("📤 Encrypted message sent to {}", peer);
+    }
+
+    /// Phase-4-mailbox helper. Ratchet-encrypts `plaintext` for `peer`,
+    /// wraps it in a signed `ProtocolMessage`, returns the wire bytes
+    /// AND the message's TTL. Side-effects (advance ratchet state, log
+    /// errors) are identical to the send path, but no actual network
+    /// I/O happens — the caller decides whether to `send_request` or
+    /// `put_record` the bytes. Returns `None` on any encrypt/serialize
+    /// failure (every internal error path is logged at `error!`).
+    ///
+    /// Caller must ensure a session exists for `peer` first — typically
+    /// by calling `restore_session_if_persisted` and only invoking this
+    /// when that succeeded. `hello` is `None` for an existing-session
+    /// send and `Some(...)` only for the first message of a fresh X3DH
+    /// session.
+    fn ratchet_encrypt_and_wrap(
+        &mut self,
+        peer: PeerId,
+        plaintext: &str,
+        hello: Option<FirstMessageHello>,
+    ) -> Option<(Vec<u8>, i64)> {
         let ad = Self::ratchet_ad(&self.identity.peer_id(), &peer);
 
         let ratchet_msg = {
-            let session = match self.sessions.get_mut(&peer) {
-                Some(s) => s,
-                None => {
-                    error!("encrypt_and_send_existing: no session for {}", peer);
-                    return;
-                }
-            };
+            let session = self.sessions.get_mut(&peer)?;
             match session.encrypt(plaintext.as_bytes(), &ad) {
                 Ok(m) => m,
                 Err(e) => {
                     error!("Ratchet encrypt failed for {}: {}", peer, e);
-                    return;
+                    return None;
                 }
             }
         };
@@ -942,7 +1035,7 @@ impl P2PNode {
             Ok(b) => b,
             Err(e) => {
                 error!("Failed to serialize EncryptedPayload: {}", e);
-                return;
+                return None;
             }
         };
 
@@ -955,38 +1048,369 @@ impl P2PNode {
             Ok(m) => m,
             Err(e) => {
                 error!("Failed to sign DM: {}", e);
-                return;
+                return None;
             }
         };
 
+        let ttl = proto_msg.ttl;
         let wire_bytes = match proto_msg.to_bytes() {
             Ok(b) => b,
             Err(e) => {
                 error!("Failed to serialize ProtocolMessage: {}", e);
-                return;
+                return None;
             }
         };
 
-        swarm
-            .behaviour_mut()
-            .request_response
-            .send_request(&peer, DirectMessageRequest(wire_bytes));
+        Some((wire_bytes, ttl))
+    }
 
-        // Persist the local plaintext copy (so history shows it) and the
-        // updated session state (so a restart doesn't break the chain).
-        if let Some(ref store) = self.message_store {
-            if let Err(e) = store.store_message(
-                &self.identity.peer_id().to_bytes(),
-                &peer.to_bytes(),
-                plaintext.as_bytes(),
-                proto_msg.ttl,
-            ) {
-                warn!("Failed to store local plaintext copy: {}", e);
+    /// Phase-4-mailbox publish path. If we can encrypt for `peer` right
+    /// now (session exists OR cached prekey allows X3DH bootstrap), drop
+    /// the resulting wire bytes into the DHT at
+    /// `(slot_kad_key, drop_kad_key)` and record the row so the
+    /// republish tick keeps it alive until `expires_at` or ACK.
+    ///
+    /// Called from `try_send_or_queue` *in addition to* `outbox_add` on
+    /// the offline path. The outbox handles "they come back to us
+    /// directly"; the mailbox handles "they don't, but they're online
+    /// somewhere on the Kad network."
+    ///
+    /// Silent no-op when we have no way to encrypt (no session and no
+    /// cached prekey) — the recipient hasn't published a prekey to us
+    /// directly yet, so we can't build an X3DH bootstrap. The outbox
+    /// path still applies; the mailbox just can't help on the first
+    /// message to a brand-new contact.
+    fn publish_mailbox_drop(
+        &mut self,
+        swarm: &mut Swarm<Behaviour>,
+        peer: PeerId,
+        plaintext: &str,
+    ) {
+        // Two paths into encryption: existing persisted session, OR
+        // first-message bootstrap if we already have the responder's
+        // prekey (typically cached from a previous DM exchange).
+        let wire_bytes_opt = if self.restore_session_if_persisted(&peer) {
+            self.ratchet_encrypt_and_wrap(peer, plaintext, None)
+                .map(|(b, _ttl)| b)
+        } else if let Some(prekey_pub) = self.cached_prekey(&peer) {
+            // Bootstrap-and-encrypt inlined: pull from the OTPK cache
+            // if present, otherwise fall back to 2-DH. This duplicates
+            // the first half of `bootstrap_initiator_and_send` but
+            // without the `send_request` step.
+            let hello = match self.cached_otpks.remove(&peer) {
+                Some(otpk_bundle) => {
+                    let otpk_pub = X25519Pub::from(otpk_bundle.x25519_public);
+                    let (eph_pub, sk) = x3dh::initiator_derive_with_otpk(
+                        self.identity.x25519_secret(),
+                        &prekey_pub,
+                        &otpk_pub,
+                    );
+                    let session = RatchetState::new_initiator(sk, prekey_pub);
+                    self.sessions.insert(peer, session);
+                    FirstMessageHello {
+                        x3dh_eph: eph_pub,
+                        otpk_id: Some(otpk_bundle.id),
+                    }
+                }
+                None => {
+                    let (eph_pub, sk) = x3dh::initiator_derive(
+                        self.identity.x25519_secret(),
+                        &prekey_pub,
+                    );
+                    let session = RatchetState::new_initiator(sk, prekey_pub);
+                    self.sessions.insert(peer, session);
+                    FirstMessageHello {
+                        x3dh_eph: eph_pub,
+                        otpk_id: None,
+                    }
+                }
+            };
+            self.ratchet_encrypt_and_wrap(peer, plaintext, Some(hello))
+                .map(|(b, _ttl)| b)
+        } else {
+            debug!(
+                "Mailbox publish skipped for {}: no session and no cached prekey \
+                 (the outbox path still applies)",
+                peer
+            );
+            return;
+        };
+
+        let Some(wire_bytes) = wire_bytes_opt else {
+            // ratchet_encrypt_and_wrap already logged at error level.
+            return;
+        };
+
+        // Now actually drop into the DHT. Same wire_bytes the
+        // request-response path would have sent live.
+        let now = unix_seconds_now();
+        let slot = mailbox::slot_id_for(now);
+        let recipient_bytes = peer.to_bytes();
+        let sender_bytes = self.identity.peer_id().to_bytes();
+        let slot_key = mailbox::slot_kad_key(&recipient_bytes, slot);
+        let drop_key = mailbox::drop_kad_key(&recipient_bytes, &sender_bytes, slot);
+
+        // start_providing tells the providers DHT that we're the source
+        // for `slot_key` — the recipient will discover us via this
+        // when they query providers for the slot.
+        if let Err(e) = swarm.behaviour_mut().kademlia.start_providing(slot_key.clone()) {
+            warn!("Mailbox start_providing({}) failed: {:?}", peer, e);
+            // Not fatal: put_record may still land somewhere
+            // discoverable via direct key lookup on the recipient side.
+        }
+
+        // put_record stores the actual ciphertext bytes at drop_key.
+        let record = kad::Record {
+            key: drop_key.clone(),
+            value: wire_bytes.clone(),
+            publisher: None,
+            expires: None,
+        };
+        match swarm
+            .behaviour_mut()
+            .kademlia
+            .put_record(record, kad::Quorum::One)
+        {
+            Ok(_qid) => {
+                debug!(
+                    "Mailbox put_record submitted for {} at slot {} ({}B)",
+                    peer, slot, wire_bytes.len()
+                );
+            }
+            Err(e) => {
+                warn!("Mailbox put_record({}) failed: {:?}", peer, e);
+                return;
             }
         }
-        self.persist_session(&peer);
 
-        println!("📤 Encrypted message sent to {}", peer);
+        // Persist the drop locally so the republish tick can rebroadcast
+        // it before Kad's per-record TTL expires.
+        if let Some(ref store) = self.message_store {
+            let expires_at = now + mailbox::DEFAULT_DROP_TTL_SECS;
+            if let Err(e) = store.mailbox_drop_record(&recipient_bytes, slot, &wire_bytes, expires_at) {
+                warn!("Failed to persist mailbox_drop for {}: {}", peer, e);
+            }
+        }
+
+        info!("📨 Mailbox drop published for {} (slot {})", peer, slot);
+    }
+
+    /// Phase-4-mailbox republish tick body. Reads
+    /// `mailbox_drops_due_for_republish(REPUBLISH_AFTER_SECS)` and
+    /// re-`put_record` + re-`start_providing` each row. Touches the
+    /// `last_published_at` column on each successful put so it isn't
+    /// re-due next tick.
+    ///
+    /// We process all due rows in a single tick — typically just a
+    /// handful, since each republish is on a ~30-minute interval and
+    /// most users send only intermittent DMs. Worst case (a burst of
+    /// offline sends followed by a republish), Kad backpressures
+    /// internally; `put_record` returns immediately whether or not
+    /// the query has actually finished.
+    fn republish_mailbox_drops(&mut self, swarm: &mut Swarm<Behaviour>) {
+        let Some(ref store) = self.message_store else {
+            return;
+        };
+        let due = match store.mailbox_drops_due_for_republish(mailbox::REPUBLISH_AFTER_SECS) {
+            Ok(v) => v,
+            Err(e) => {
+                warn!("mailbox_drops_due_for_republish failed: {}", e);
+                return;
+            }
+        };
+        if due.is_empty() {
+            return;
+        }
+        info!("Republishing {} mailbox drop(s)", due.len());
+        let my_pid_bytes = self.identity.peer_id().to_bytes();
+        for (id, recipient_pid, slot, wire_bytes) in due {
+            let slot_key = mailbox::slot_kad_key(&recipient_pid, slot);
+            let drop_key = mailbox::drop_kad_key(&recipient_pid, &my_pid_bytes, slot);
+            if let Err(e) = swarm.behaviour_mut().kademlia.start_providing(slot_key) {
+                warn!("Republish start_providing failed for id={}: {:?}", id, e);
+            }
+            let record = kad::Record {
+                key: drop_key,
+                value: wire_bytes,
+                publisher: None,
+                expires: None,
+            };
+            match swarm
+                .behaviour_mut()
+                .kademlia
+                .put_record(record, kad::Quorum::One)
+            {
+                Ok(_qid) => {
+                    if let Err(e) = store.mailbox_drop_touch(id) {
+                        warn!("mailbox_drop_touch({}) failed: {}", id, e);
+                    }
+                }
+                Err(e) => warn!("Republish put_record failed for id={}: {:?}", id, e),
+            }
+        }
+    }
+
+    /// Phase-4-mailbox poll tick body. Queries the providers DHT for
+    /// every slot in `last_polled..now_slot`, capped at the last 24
+    /// slots so a fresh install doesn't fan out into a week of queries.
+    /// Results come in async via `OutboundQueryProgressed` events,
+    /// correlated through `pending_provider_queries`.
+    ///
+    /// We optimistically set `last_polled_slot = now_slot - 1` AFTER
+    /// kicking off the queries — re-querying the in-progress slot on
+    /// every tick ensures drops added during the current hour are
+    /// still picked up, while completed past slots only need one
+    /// query attempt.
+    fn poll_mailbox_slots(&mut self, swarm: &mut Swarm<Behaviour>) {
+        let Some(ref store) = self.message_store else {
+            return;
+        };
+        let now_slot = mailbox::slot_id_for(unix_seconds_now());
+        let last_polled = store.mailbox_last_polled_slot().unwrap_or(0);
+        // Cap range to 24 slots so a long-offline recipient doesn't
+        // blast the DHT with a 168-slot fan-out. Older drops are
+        // still kept alive by the sender's republish loop.
+        let start = std::cmp::max(last_polled + 1, now_slot - 23);
+        if start > now_slot {
+            return;
+        }
+
+        let my_pid_bytes = self.identity.peer_id().to_bytes();
+        let mut queued = 0;
+        for slot in start..=now_slot {
+            let slot_key = mailbox::slot_kad_key(&my_pid_bytes, slot);
+            let qid = swarm.behaviour_mut().kademlia.get_providers(slot_key);
+            self.pending_provider_queries.insert(qid, slot);
+            queued += 1;
+        }
+        if queued > 0 {
+            debug!("Mailbox poll: queued {} provider queries (slots {}..={})",
+                queued, start, now_slot);
+        }
+        // Bump last_polled to one before now_slot — the current slot
+        // remains "in progress" and gets re-queried each tick.
+        if now_slot > 0 {
+            if let Err(e) = store.mailbox_set_last_polled_slot(now_slot - 1) {
+                warn!("mailbox_set_last_polled_slot failed: {}", e);
+            }
+        }
+    }
+
+    /// Handle a Kademlia event. Most events we ignore (libp2p's kad
+    /// behaviour is chatty); the two we care about are the results of
+    /// our own `get_providers` and `get_record` queries, correlated
+    /// back through `pending_provider_queries` / `pending_record_queries`.
+    fn handle_kad_event(&mut self, swarm: &mut Swarm<Behaviour>, event: kad::Event) {
+        let kad::Event::OutboundQueryProgressed { id, result, .. } = event else {
+            // Bootstrap, routing-table updates, etc. — log only if
+            // they look unusual; the default kad behaviour is very
+            // verbose.
+            return;
+        };
+        match result {
+            kad::QueryResult::GetProviders(Ok(ok)) => {
+                self.handle_mailbox_providers_result(swarm, id, ok);
+            }
+            kad::QueryResult::GetProviders(Err(e)) => {
+                if let Some(slot) = self.pending_provider_queries.remove(&id) {
+                    debug!("Mailbox get_providers for slot {} failed: {:?}", slot, e);
+                }
+            }
+            kad::QueryResult::GetRecord(Ok(ok)) => {
+                self.handle_mailbox_record_result(swarm, id, ok);
+            }
+            kad::QueryResult::GetRecord(Err(e)) => {
+                if let Some((slot, sender)) = self.pending_record_queries.remove(&id) {
+                    debug!("Mailbox get_record for slot {} sender {} failed: {:?}",
+                        slot, sender, e);
+                }
+            }
+            kad::QueryResult::PutRecord(_) | kad::QueryResult::StartProviding(_) => {
+                // Our own put/announce queries; nothing more to do.
+            }
+            _ => {}
+        }
+    }
+
+    /// Branch of `handle_kad_event` that processes a `GetProviders`
+    /// result for one of our outstanding mailbox poll queries.
+    fn handle_mailbox_providers_result(
+        &mut self,
+        swarm: &mut Swarm<Behaviour>,
+        id: kad::QueryId,
+        ok: kad::GetProvidersOk,
+    ) {
+        let Some(&slot) = self.pending_provider_queries.get(&id) else {
+            return;
+        };
+        let my_pid_bytes = self.identity.peer_id().to_bytes();
+        match ok {
+            kad::GetProvidersOk::FoundProviders { providers, .. } => {
+                if providers.is_empty() {
+                    return;
+                }
+                debug!(
+                    "Mailbox slot {} has {} provider(s)",
+                    slot,
+                    providers.len()
+                );
+                for sender in providers {
+                    if sender == self.identity.peer_id() {
+                        // We see ourselves as a provider for our own
+                        // outgoing drops — skip; we don't want to fetch
+                        // our own records back.
+                        continue;
+                    }
+                    let drop_key = mailbox::drop_kad_key(&my_pid_bytes, &sender.to_bytes(), slot);
+                    let qid = swarm.behaviour_mut().kademlia.get_record(drop_key);
+                    self.pending_record_queries.insert(qid, (slot, sender));
+                }
+            }
+            kad::GetProvidersOk::FinishedWithNoAdditionalRecord { .. } => {
+                // Final step for this query — clean up.
+                self.pending_provider_queries.remove(&id);
+            }
+        }
+    }
+
+    /// Branch of `handle_kad_event` that processes a `GetRecord` result
+    /// — i.e. the actual encrypted ProtocolMessage bytes for one drop.
+    /// Routes through the same `process_incoming_dm` pipeline used for
+    /// directly-delivered DMs, so signature verification, ratchet
+    /// decrypt, dedup, etc. all happen identically.
+    fn handle_mailbox_record_result(
+        &mut self,
+        swarm: &mut Swarm<Behaviour>,
+        id: kad::QueryId,
+        ok: kad::GetRecordOk,
+    ) {
+        let Some((slot, sender)) = self.pending_record_queries.get(&id).copied() else {
+            return;
+        };
+        match ok {
+            kad::GetRecordOk::FoundRecord(rec) => {
+                let bytes = rec.record.value.clone();
+                debug!(
+                    "Mailbox drop fetched for slot {} sender {} ({}B)",
+                    slot,
+                    sender,
+                    bytes.len()
+                );
+                // Reuse the existing DM ingestion pipeline. The
+                // sender PeerId is the transport-level attribution
+                // we'd normally get from the request-response source;
+                // we pass it through here even though the bytes came
+                // out of the DHT, because `process_incoming_dm`
+                // cross-checks the signed envelope's `from` against
+                // this value (INVARIANTS §2). A mailbox drop is
+                // legitimate iff the signed envelope's `from` equals
+                // the provider PeerId we fetched it from.
+                self.process_incoming_dm(swarm, sender, &bytes);
+            }
+            kad::GetRecordOk::FinishedWithNoAdditionalRecord { .. } => {
+                self.pending_record_queries.remove(&id);
+            }
+        }
     }
 
     // ============================================================
@@ -1450,6 +1874,13 @@ impl P2PNode {
 }
 
 /// Format timestamp as HH:MM:SS
+fn unix_seconds_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+}
+
 fn chrono_format(timestamp: i64) -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let duration = SystemTime::UNIX_EPOCH

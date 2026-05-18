@@ -1,4 +1,5 @@
 mod behaviour;
+pub mod mailbox;
 pub mod scramble;
 
 pub use behaviour::{

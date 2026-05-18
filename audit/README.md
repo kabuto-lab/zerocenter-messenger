@@ -100,7 +100,7 @@ These are acknowledged limitations, not undiscovered bugs:
 
 2. **Initial-DM MITM not cryptographically prevented.** Without an out-of-band exchange, a network attacker who can substitute *both* peers' libp2p identify exchanges could relay. Mitigated only by the `safety` command (compare 160-bit fingerprint OOB).
 
-3. **No metadata privacy.** Sender + recipient PeerIds are visible to any on-path observer. The DHT reveals lookup intentions. Mitigation requires onion routing (Phase 4+).
+3. **No metadata privacy.** Sender + recipient PeerIds are visible to any on-path observer. The DHT reveals lookup intentions. With the Phase 4 mailbox layer this leak is more durable than before: the providers DHT records `(sender_pid, slot_kad_key(recipient_pid, slot))` for every offline drop, persisting until Kad TTL expires. Mitigation requires onion routing + sealed-sender (Phase 5; see INVARIANTS §21 for the mailbox-specific story).
 
 4. **Session state at rest is encrypted only with a DEK derived from the user's logon session.** A local attacker who compromises the user account can decrypt everything. Standard for DPAPI-class protection; documented.
 
