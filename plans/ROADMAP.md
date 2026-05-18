@@ -14,7 +14,7 @@ Living document tracking what's done, what's in flight, and what's queued. Last 
 | Persistent outbox (drained on connect / mDNS) | ✅ |
 | Safety-number anti-MITM CLI | ✅ |
 | `--obfs-key` ChaCha20 wire obfuscation, wired into the libp2p Transport | ✅ |
-| `--obfs-key` 256-byte frame padding (Phase 4c.2) | 🔄 in flight |
+| `--obfs-key` 256-byte frame padding (Phase 4c.2) | ✅ |
 | QUIC | ⏸ disabled (see `[[project-quic-disabled]]`; revisit when ring-on-MSVC settles) |
 | GUI (Tauri 2.x) | 🟡 handlers scaffolded; deps + build.rs + tauri.conf.json 2.x migration TODO |
 | DHT mailbox store-and-forward | 🟡 storage tables + methods scaffolded; network layer TODO |
@@ -22,7 +22,7 @@ Living document tracking what's done, what's in flight, and what's queued. Last 
 | Group chats (Megolm-style) | ❌ |
 | Deniability | ❌ (intentional non-deniability for v1) |
 
-Build: rustc 1.95 / cargo 1.95 / VS Build Tools. `cargo test`: 49/49 (will be 51/51 once Phase 4c.2 framing tests are confirmed green). `target/release/zerocenter.exe` is 9.11 MB and tracked in-tree.
+Build: rustc 1.95 / cargo 1.95 / VS Build Tools. `cargo test --lib`: 50/50 (49 baseline + 1 new `frame_padding_rounds_up_to_quantum` test; two other framing tests were modifications of existing ones, not net-new). `target/release/zerocenter.exe` is 9.11 MB and tracked in-tree.
 
 ## Done — chronological commits
 
@@ -30,7 +30,7 @@ Most recent first.
 
 | Commit | Title | What it shipped |
 |---|---|---|
-| _(pending)_ | feat(scramble): 256-byte frame padding (Phase 4c.2) | Length-prefixed frames padded to a 256-byte quantum, hiding per-message size from statistical DPI. Wire-format-breaking under `--obfs-key`. |
+| _(pending push)_ | feat(scramble): Phase 4c.2 — 256-byte frame padding | `ReadState` enum + `padded_frame_size` + framed `poll_read`/`poll_write` in `src/network/scramble.rs`. Length-prefixed frames padded to a 256-byte quantum, hiding per-message size from statistical DPI. Wire-format-breaking under `--obfs-key`. New test `frame_padding_rounds_up_to_quantum`; existing `short_inner_writes_dont_desync_keystream` reader switched to `read_to_end` so pad bytes drain on writer EOF. |
 | 0cd1dd7 | fix(scramble): pending-buffer so short inner writes don't desync ChaCha20 | Phase 4c.3. `drain_pending` helper; `pending` Vec carries scrambled-but-unsent tails across polls so the keystream never advances past unsent bytes. |
 | 8f04035 | docs(audit): refresh README — code now compiles, ScrambleStream wired | Removed the "never been compiled" build-status claim; added a fixes-table; updated caveat #6 for Phase 4b shipped. |
 | fb13ad9 | chore: refresh zerocenter.exe to Phase 4b release build | Tracked the 9.11 MB binary; the pre-2026-04-15 stale artefact was replaced. |
@@ -44,24 +44,7 @@ Most recent first.
 
 ## In flight
 
-### Phase 4c.2 — frame padding (uncommitted, tests in verification)
-
-Frame format on the wire:
-
-```
-[u16-be: actual_len] [actual_len bytes payload] [pad to FRAME_QUANTUM-multiple]
-```
-
-`FRAME_QUANTUM = 256`. Whole frame XOR'd with the ChaCha20 keystream so the header looks like content and the pad looks like more content.
-
-Files touched:
-- `src/network/scramble.rs` — `ReadState` enum, `padded_frame_size`, new `poll_read` (stateful frame parser), new `poll_write` (builds + scrambles + parks frame in `pending`), test updates (`wire_bytes_are_not_plaintext`, `different_keys_yield_garbled_decryption`) and new `frame_padding_rounds_up_to_quantum` test.
-
-Pending verification:
-- `cargo test --lib` running at commit time of this doc.
-- Two-peer end-to-end obfs smoke (alice dials bob, sends a DM) — needs re-run because the framing changes the wire format and both ends now require this version.
-- Release rebuild + `zerocenter.exe` refresh.
-- `audit/INVARIANTS.md` §17 + `audit/README.md` caveat #6 — update to mention size-fingerprint defence; remove "no length padding" from Phase 4c list (it's now Phase 4c.2 done).
+_None._ Phase 4c.2 framing shipped 2026-05-18. Next: Phase 4c.2′ (IAT jitter) per the remaining-plan section below.
 
 ## Remaining — prioritised forward plan
 
@@ -70,7 +53,7 @@ Pending verification:
 3 sub-items proposed; tackled in order:
 
 - **(3) Short-write keystream resync** — ✅ done (commit 0cd1dd7).
-- **(2) Length padding** — 🔄 in flight (see above).
+- **(2) Length padding** — ✅ done (Phase 4c.2 commit pending push).
 - **(2′) IAT jitter** — queued. Opt-in via a new `--obfs-jitter-ms <max>` CLI flag (default off, no extra latency for users who don't ask). State-machine: each `poll_write` either drains pending, or sleeps for a `[0, max_ms]` uniform window before scrambling + drain. The sleep future lives on the struct (`Option<Pin<Box<dyn Future>>>`); poll progresses it before the scramble step. Risk: integrating a tokio sleep into a futures-io poll loop without rewriting the existing drain logic. Allocate ~150 LOC + tests.
 - **(1) Hidden nonce (NTOR-style + elligator2)** — deferred. Real Obfs4 equivalent. Substantial scope: elligator2 encoding of X25519 ephemeral pubkeys, NTOR handshake, derive nonce from shared secret. Requires either picking up a curve25519-dalek feature for elligator2 or hand-rolling the encoding. Won't tackle until there's a clear ask for full Obfs4 parity — current 12-byte plaintext-nonce header gives a length-only fingerprint that a knowledgeable attacker can match anyway; the meaningful win is in (2) and (2′), which are already covering the realistic DPI / statistical attacks.
 

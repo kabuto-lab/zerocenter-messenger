@@ -206,25 +206,31 @@ A corollary: if the local DEK is compromised, queued-but-not-yet-sent messages a
 
 ---
 
-## §17. ScrambleStream wiring (Phase 4b — shipped)
+## §17. ScrambleStream wiring (Phase 4b + 4c.2 — shipped)
 
 **Statement.** When `--obfs-key <32-byte hex>` is supplied, every byte on the TCP socket — *including* the libp2p Noise XX handshake — is XOR'd with a ChaCha20 keystream before it leaves the host, and inverted on receipt. The 32-byte key is pre-shared out of band; both peers must use the same one.
 
 **Per-connection nonce.** On connection open, the dialer generates 12 random bytes, writes them in the clear, and starts the ChaCha20 keystream. The listener reads 12 bytes from the wire and starts the matching keystream. After that point, every subsequent byte is scrambled — Noise's XX handshake, Yamux frames, request-response payloads.
 
+**Frame padding (Phase 4c.2).** Above the byte-XOR layer sits a frame protocol: `[u16-be: payload_len] [payload_len bytes payload] [pad to FRAME_QUANTUM-multiple]` with `FRAME_QUANTUM = 256`. The whole frame (header + payload + pad) is XOR'd with the keystream as a unit, so an observer can't separate the header from the payload from the pad. Effect: every frame on the wire is a multiple of 256 bytes. A 48-byte Noise handshake message and a 200-byte DM both look like 256 bytes; a 300-byte DM looks like 512. This collapses the per-message size fingerprint that statistical DPI uses to identify libp2p.
+
 **Enforced at.**
 - `src/network/scramble.rs::scramble_handshake` — nonce exchange + wrap.
-- `src/network/scramble.rs::ScrambleStream` — `futures::io::AsyncRead+AsyncWrite` impls that apply / invert the keystream.
+- `src/network/scramble.rs::ScrambleStream` — `futures::io::AsyncRead+AsyncWrite` impls that apply / invert the keystream, with a stateful `ReadState` enum driving the framed reader and a frame builder in `poll_write`.
+- `src/network/scramble.rs::padded_frame_size` — quantizes frame totals to `FRAME_QUANTUM`.
 - `src/network/scramble.rs::MaybeScrambled` — enum that lets the transport builder unify the with-obfs and without-obfs branches into one concrete Output type.
 - `src/core/node.rs::P2PNode::start` — `.with_other_transport(|kp| ...)` replaces the previous `.with_tcp(...)` builder so the obfuscation `.and_then(...)` injection point sits BETWEEN `libp2p_tcp::tokio::Transport::new` and the `.upgrade().authenticate(noise).multiplex(yamux)` chain.
 
-**What this defeats.** A DPI box that fingerprints libp2p (e.g. by matching the Noise XX handshake pattern, by yamux frame headers, or by libp2p protocol-negotiation strings) sees only pseudo-random bytes once the obfs key is in play. The 12-byte in-clear nonce header is the only structural artefact left — it looks like 12 random bytes followed by more random bytes.
+**What this defeats.** A DPI box that fingerprints libp2p (e.g. by matching the Noise XX handshake pattern, by yamux frame headers, or by libp2p protocol-negotiation strings) sees only pseudo-random bytes once the obfs key is in play. The 12-byte in-clear nonce header is the only structural artefact left — it looks like 12 random bytes followed by more random bytes. With frame padding (4c.2) the per-message size fingerprint is also flattened to a 256-byte quantum.
 
 **Known limitations (Phase 4c candidates).**
 - The 12-byte nonce header is in the clear. Real Obfs4 derives the nonce from an NTOR-like handshake so there is no plaintext prefix.
-- No length padding, no inter-arrival-time jitter — statistical traffic analysis can still distinguish ZeroCenter traffic from cover noise.
+- No inter-arrival-time jitter — statistical traffic analysis can still distinguish ZeroCenter traffic from cover noise by message timing. Phase 4c.2′ candidate (`--obfs-jitter-ms <max>`).
+- `ScrambleStream::pending` is an unbounded `Vec<u8>`; a misbehaving inner that never accepts writes could grow it without limit. Bound is a Phase 4c.2′ candidate (see `plans/ROADMAP.md` known-debt list).
 
-**Short-inner-write resilience (fixed).** `ScrambleStream` carries a `pending: Vec<u8>` of scrambled-but-not-yet-handed-off bytes. On every `poll_write`/`poll_flush`/`poll_close` we drain `pending` BEFORE accepting new caller bytes via `drain_pending(...)`. The keystream is advanced exactly once per byte (at scramble time) and never re-advanced if the inner returns a short write — the un-accepted tail of `scratch` is parked in `pending` and re-tried later. The unit test `short_inner_writes_dont_desync_keystream` exercises this with a 16-byte inner duplex against a 1000-byte message.
+**Short-inner-write resilience (fixed).** `ScrambleStream` carries a `pending: Vec<u8>` of scrambled-but-not-yet-handed-off bytes. On every `poll_write`/`poll_flush`/`poll_close` we drain `pending` BEFORE accepting new caller bytes via `drain_pending(...)`. The keystream is advanced exactly once per byte (at scramble time) and never re-advanced if the inner returns a short write — the un-accepted tail of the freshly-scrambled frame is parked in `pending` and re-tried later. The unit test `short_inner_writes_dont_desync_keystream` exercises this with a 16-byte inner duplex against a 1000-byte message; the reader uses `read_to_end` (not `read_exact`) so pad bytes are consumed in the natural read flow and the writer's flush+close terminates cleanly.
+
+**Frame-padding test coverage.** `frame_padding_rounds_up_to_quantum` confirms 1/50/200/253-byte payloads all emit one 256-byte frame on the wire, and a 300-byte payload emits 512 bytes. `wire_bytes_are_not_plaintext` confirms the framed output contains no plaintext markers and is a `FRAME_QUANTUM`-multiple.
 
 **Suggested attack.** Capture two connection openings between the same peer pair. The 12-byte prefixes will differ (random) but byte 13 onward XOR'd against bytes from the same handshake position should yield XOR-of-keystreams = `0` if the same nonce was reused (it isn't — fresh per connection). Confirm via the integration smoke `tests/scripts/two_peer_obfs.sh` (TODO: lift the ad-hoc smoke we ran into a versioned test).
 

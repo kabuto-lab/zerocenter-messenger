@@ -1,5 +1,6 @@
 //! `ScrambleStream` — a ChaCha20-keystream obfuscation wrapper around an
-//! `AsyncRead + AsyncWrite + Unpin` stream.
+//! `AsyncRead + AsyncWrite + Unpin` stream, with 256-byte-quantum frame
+//! padding (Phase 4c task 2) to hide payload sizes from statistical DPI.
 //!
 //! ## What this is
 //!
@@ -7,28 +8,37 @@
 //! goes through the inverse. Both peers use the same 32-byte key
 //! (distributed out of band via the `--obfs-key` flag). Each new
 //! connection negotiates a fresh 12-byte ChaCha20 nonce via a tiny
-//! in-clear handshake (see [`scramble_handshake`]): the dialer picks
-//! random bytes and writes them, the listener reads them, then both
-//! sides wrap the rest of the byte stream with matching `ScrambleStream`
-//! instances. The result: from the second-handshake-byte onward, what
-//! a DPI box sees on the wire is indistinguishable from random bytes
-//! — the libp2p Noise XX handshake pattern is no longer recognisable.
+//! in-clear handshake (see [`scramble_handshake`]).
+//!
+//! ### Framing (Phase 4c task 2)
+//!
+//! Above the byte-XOR layer sits a simple frame protocol:
+//!
+//! ```text
+//!   [u16-be: actual_len] [actual_len bytes payload] [pad to next 256-multiple]
+//! ```
+//!
+//! The entire frame (header + payload + pad) is XOR'd with the keystream
+//! together, so an observer can't tell the header from the payload from
+//! the pad. The receiver descrambles the 2-byte header, learns the
+//! payload length, descrambles `payload + pad` bytes, delivers only the
+//! payload to the upper layer.
+//!
+//! Effect on the wire: every frame is a multiple of 256 bytes. A 48-byte
+//! Noise handshake message and a 200-byte DM both look like 256 bytes; a
+//! 300-byte DM looks like 512. This collapses the per-message size
+//! fingerprint that statistical DPI uses to identify libp2p.
 //!
 //! ## What this is NOT
 //!
-//! - **Not** real Obfs4. No NTOR handshake, no IAT randomization, no
-//!   length padding. A determined adversary using statistical analysis
-//!   (entropy, packet-size distribution) will still identify scrambled
-//!   libp2p traffic.
+//! - **Not** real Obfs4. The 12-byte nonce prefix is still sent in the
+//!   clear; real Obfs4 derives it from an NTOR-style handshake so there
+//!   is no plaintext prefix. There is also no inter-arrival-time
+//!   randomization yet (Phase 4c continuation).
 //! - **Not** privacy. Recipients still know who they're talking to;
 //!   network-layer metadata (IPs, timing) is fully visible.
 //! - **Not** authenticated. The key is used for obfuscation only — Noise
 //!   on top of the scrambled transport is what authenticates peers.
-//! - **Not** nonce-hidden. The 12-byte nonce prefix on each connection
-//!   is sent in the clear. A passive observer who knows the protocol
-//!   exists can see "12 random bytes then more random bytes." Real
-//!   Obfs4 derives the nonce from the handshake. Listed as a Phase 4c
-//!   improvement.
 //!
 //! ## Why ChaCha20
 //!
@@ -111,6 +121,41 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for MaybeScrambled<S> {
     }
 }
 
+/// Frame quantum: every on-wire frame's total length (header + payload +
+/// pad) is rounded up to a multiple of this. 256 is the documented
+/// default — small enough that short DMs don't waste much bandwidth,
+/// large enough to hide typical Noise handshake (48 B) and yamux
+/// header (~10 B) sizes inside a common bucket.
+pub const FRAME_QUANTUM: usize = 256;
+
+/// Maximum payload bytes per frame, dictated by the u16 length header.
+/// `poll_write` caps `buf` to this and returns `Ok(MAX_PAYLOAD)`; the
+/// caller (typically `AsyncWriteExt::write_all`) re-calls for the rest.
+pub const MAX_PAYLOAD_PER_FRAME: usize = u16::MAX as usize;
+
+/// What the reader expects on the wire next.
+enum ReadState {
+    /// Still accumulating the 2-byte length header. `partial[..filled]`
+    /// holds the descrambled bytes received so far.
+    NeedHeader { partial: [u8; 2], filled: usize },
+    /// Header parsed. `payload_remaining` payload bytes are still to be
+    /// read and delivered upward; after them, `pad_remaining` pad bytes
+    /// are still to be read and discarded. Both must be descrambled to
+    /// keep the keystream in lockstep with the sender.
+    InBody { payload_remaining: u16, pad_remaining: u16 },
+}
+
+impl Default for ReadState {
+    fn default() -> Self {
+        Self::NeedHeader { partial: [0; 2], filled: 0 }
+    }
+}
+
+/// Round `frame_total` up to the nearest [`FRAME_QUANTUM`]-multiple.
+fn padded_frame_size(frame_total: usize) -> usize {
+    frame_total.div_ceil(FRAME_QUANTUM) * FRAME_QUANTUM
+}
+
 /// Symmetric obfuscation wrapper. Holds two independent ChaCha20
 /// instances (one per direction) so reads and writes can advance their
 /// keystreams independently — required because they happen concurrently.
@@ -127,6 +172,10 @@ pub struct ScrambleStream<S> {
     /// Drained FIRST on every `poll_write` / `poll_flush` / `poll_close`
     /// before accepting new caller bytes.
     pending: Vec<u8>,
+    /// Framing state machine for the read side. Survives across
+    /// `poll_read` calls so a frame straddling many polls reassembles
+    /// correctly.
+    read_state: ReadState,
 }
 
 impl<S> ScrambleStream<S> {
@@ -140,6 +189,7 @@ impl<S> ScrambleStream<S> {
             out_cipher,
             in_cipher,
             pending: Vec::new(),
+            read_state: ReadState::default(),
         }
     }
 }
@@ -148,17 +198,102 @@ impl<S: AsyncRead + Unpin> AsyncRead for ScrambleStream<S> {
     fn poll_read(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-        buf: &mut [u8],
+        out_buf: &mut [u8],
     ) -> Poll<std::io::Result<usize>> {
-        // SAFETY: we project Pin to each field manually since we don't
-        // use pin-project for this small module. `inner` is the only
-        // field we re-pin; `in_cipher` is `Unpin`.
-        let this = unsafe { self.get_unchecked_mut() };
-        let res = Pin::new(&mut this.inner).poll_read(cx, buf);
-        if let Poll::Ready(Ok(n)) = res {
-            this.in_cipher.apply_keystream(&mut buf[..n]);
+        if out_buf.is_empty() {
+            return Poll::Ready(Ok(0));
         }
-        res
+        // SAFETY: manual Pin projection. `inner` is the only !Unpin
+        // field; everything else (cipher state, pending Vec, read state
+        // enum with Copy fields) is `Unpin`.
+        let this = unsafe { self.get_unchecked_mut() };
+
+        loop {
+            match this.read_state {
+                ReadState::NeedHeader { ref mut partial, ref mut filled } => {
+                    // Fill the 2-byte header. We may need multiple inner
+                    // polls if the inner returns short reads.
+                    let need = 2 - *filled;
+                    let mut tmp = [0u8; 2];
+                    match Pin::new(&mut this.inner).poll_read(cx, &mut tmp[..need]) {
+                        Poll::Pending => return Poll::Pending,
+                        Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                        Poll::Ready(Ok(0)) => {
+                            // Clean EOF only at a frame boundary; partial
+                            // header is a truncated stream.
+                            return if *filled == 0 {
+                                Poll::Ready(Ok(0))
+                            } else {
+                                Poll::Ready(Err(std::io::ErrorKind::UnexpectedEof.into()))
+                            };
+                        }
+                        Poll::Ready(Ok(n)) => {
+                            this.in_cipher.apply_keystream(&mut tmp[..n]);
+                            partial[*filled..*filled + n].copy_from_slice(&tmp[..n]);
+                            *filled += n;
+                            if *filled == 2 {
+                                let payload_len = u16::from_be_bytes(*partial);
+                                let frame_total = 2 + payload_len as usize;
+                                let padded = padded_frame_size(frame_total);
+                                let pad_amount = (padded - frame_total) as u16;
+                                this.read_state = ReadState::InBody {
+                                    payload_remaining: payload_len,
+                                    pad_remaining: pad_amount,
+                                };
+                            }
+                            // Loop: either keep filling the header (if
+                            // partial) or move into the body.
+                        }
+                    }
+                }
+                ReadState::InBody { ref mut payload_remaining, ref mut pad_remaining } => {
+                    if *payload_remaining > 0 {
+                        // Read payload bytes straight into the caller's
+                        // buffer, descramble in place, return.
+                        let want = std::cmp::min(out_buf.len(), *payload_remaining as usize);
+                        match Pin::new(&mut this.inner).poll_read(cx, &mut out_buf[..want]) {
+                            Poll::Pending => return Poll::Pending,
+                            Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                            Poll::Ready(Ok(0)) => {
+                                return Poll::Ready(Err(
+                                    std::io::ErrorKind::UnexpectedEof.into(),
+                                ));
+                            }
+                            Poll::Ready(Ok(n)) => {
+                                this.in_cipher.apply_keystream(&mut out_buf[..n]);
+                                *payload_remaining -= n as u16;
+                                return Poll::Ready(Ok(n));
+                            }
+                        }
+                    } else if *pad_remaining > 0 {
+                        // Pad bytes still need to be drained off the
+                        // wire — descramble (to advance the keystream
+                        // in lockstep with the sender) then discard.
+                        let chunk = std::cmp::min(*pad_remaining as usize, 512);
+                        let mut tmp = vec![0u8; chunk];
+                        match Pin::new(&mut this.inner).poll_read(cx, &mut tmp) {
+                            Poll::Pending => return Poll::Pending,
+                            Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                            Poll::Ready(Ok(0)) => {
+                                return Poll::Ready(Err(
+                                    std::io::ErrorKind::UnexpectedEof.into(),
+                                ));
+                            }
+                            Poll::Ready(Ok(n)) => {
+                                this.in_cipher.apply_keystream(&mut tmp[..n]);
+                                *pad_remaining -= n as u16;
+                                // Loop: maybe more pad, maybe done.
+                            }
+                        }
+                    } else {
+                        // Both zero: frame fully consumed. Next frame
+                        // starts with a fresh header.
+                        this.read_state = ReadState::default();
+                        // Loop: drop into the NeedHeader arm.
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -168,6 +303,9 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for ScrambleStream<S> {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<std::io::Result<usize>> {
+        if buf.is_empty() {
+            return Poll::Ready(Ok(0));
+        }
         let this = unsafe { self.get_unchecked_mut() };
 
         // Drain any scrambled bytes left from a previous short inner
@@ -180,36 +318,44 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for ScrambleStream<S> {
             Poll::Ready(Ok(())) => {}
         }
 
-        // Pending is now empty. Scramble the caller's buf and try to
-        // hand it to the inner writer in one shot. Any tail the inner
-        // didn't accept is parked in `pending` for the next drain.
-        let mut scratch = buf.to_vec();
-        this.out_cipher.apply_keystream(&mut scratch);
+        // Build one frame containing up to MAX_PAYLOAD_PER_FRAME bytes
+        // of `buf`. Frame layout:
+        //   [u16-be: payload_len] [payload_len bytes] [pad to FRAME_QUANTUM-multiple]
+        // The pad bytes start as zero; ChaCha20 XOR turns them into
+        // pseudo-random bytes on the wire. Pad bytes don't leak
+        // information because the keystream is already secret.
+        let payload_len = std::cmp::min(buf.len(), MAX_PAYLOAD_PER_FRAME);
+        let frame_total_unpadded = 2 + payload_len;
+        let padded = padded_frame_size(frame_total_unpadded);
 
-        match Pin::new(&mut this.inner).poll_write(cx, &scratch) {
+        let mut frame = Vec::with_capacity(padded);
+        frame.extend_from_slice(&(payload_len as u16).to_be_bytes());
+        frame.extend_from_slice(&buf[..payload_len]);
+        frame.resize(padded, 0);
+
+        // Scramble the whole frame in one go so the keystream advances
+        // exactly `padded` bytes for this frame.
+        this.out_cipher.apply_keystream(&mut frame);
+
+        match Pin::new(&mut this.inner).poll_write(cx, &frame) {
             Poll::Ready(Ok(n)) => {
-                if n < scratch.len() {
-                    this.pending.extend_from_slice(&scratch[n..]);
+                if n < frame.len() {
+                    this.pending.extend_from_slice(&frame[n..]);
                 }
-                // We've committed to all of `buf` either way — flushed
-                // bytes are in the inner pipeline, the rest sits in
-                // `pending` until the next poll drains it. The caller
-                // owns no further responsibility for these bytes.
-                Poll::Ready(Ok(buf.len()))
+                // Caller-visible: we accepted `payload_len` of their
+                // bytes. The pad + length-header overhead is invisible
+                // to them.
+                Poll::Ready(Ok(payload_len))
             }
             Poll::Ready(Err(e)) => {
-                // Cipher has been advanced past these bytes already and
-                // they never made it onto the wire. Connection's write
-                // half is permanently desynced — surface the error so
-                // the upper layer drops the connection.
+                // Cipher already advanced; connection's write half is
+                // permanently desynced. Surface the error.
                 Poll::Ready(Err(e))
             }
             Poll::Pending => {
-                // Inner not ready yet. Park the scrambled bytes; the
-                // caller will see Ok(buf.len()) once they retry after
-                // their waker fires, and the next call will drain.
-                this.pending.extend_from_slice(&scratch);
-                Poll::Ready(Ok(buf.len()))
+                // Park the scrambled frame; the next drain will ship it.
+                this.pending.extend_from_slice(&frame);
+                Poll::Ready(Ok(payload_len))
             }
         }
     }
@@ -348,8 +494,11 @@ mod tests {
 
     #[tokio::test]
     async fn wire_bytes_are_not_plaintext() {
-        // Confirm that a passive observer in the middle sees random
-        // bytes, not our plaintext.
+        // Confirm that a passive observer in the middle sees random-
+        // looking framed bytes, not our plaintext. With Phase 4c
+        // framing, the writer emits one 256-byte frame for a 22-byte
+        // needle (2-byte header + 22 payload + 232 pad), and the whole
+        // thing is XOR'd with the ChaCha20 keystream.
         let (a, middle_observer) = tokio::io::duplex(4096);
         let mut writer = ScrambleStream::new(a.compat(), &[1u8; 32], &[2u8; 12]);
 
@@ -361,8 +510,18 @@ mod tests {
         let mut middle = middle_observer.compat();
         let mut wire = Vec::new();
         middle.read_to_end(&mut wire).await.unwrap();
-        assert_eq!(wire.len(), needle.len());
-        assert_ne!(wire, needle, "the marker leaked through unscrambled");
+
+        assert!(!wire.is_empty(), "writer's frame must hit the wire");
+        assert_eq!(
+            wire.len() % FRAME_QUANTUM,
+            0,
+            "wire length must be a {FRAME_QUANTUM}-multiple after framing, got {}",
+            wire.len()
+        );
+        assert!(
+            !wire.windows(needle.len()).any(|w| w == needle),
+            "scrambled wire must not contain the plaintext marker"
+        );
     }
 
     #[tokio::test]
@@ -378,9 +537,58 @@ mod tests {
         let msg = b"hello";
         writer.write_all(msg).await.unwrap();
         writer.flush().await.unwrap();
+        drop(writer); // signal EOF so the reader doesn't block forever
+
+        // With the wrong key the descrambled length header is
+        // essentially random. The reader then tries to consume
+        // payload+pad bytes that don't exist on the truncated wire,
+        // which surfaces as UnexpectedEof — or if the random length
+        // happens to fit, the descrambled payload is garbage that
+        // doesn't match `msg`. Both outcomes are acceptable; what
+        // must NOT happen is a clean decode equal to the plaintext.
         let mut got = vec![0u8; msg.len()];
-        reader.read_exact(&mut got).await.unwrap();
-        assert_ne!(got, msg);
+        match reader.read_exact(&mut got).await {
+            Err(_) => {}
+            Ok(()) => assert_ne!(
+                got, msg,
+                "wrong-key decode must differ from plaintext"
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn frame_padding_rounds_up_to_quantum() {
+        // Three payloads in adjacent quantum buckets — verify the wire
+        // hides the difference: same total byte count for every payload
+        // that fits in one quantum.
+        for payload_len in [1usize, 50, 200, 253] {
+            let (a, observer) = tokio::io::duplex(4096);
+            let mut writer = ScrambleStream::new(a.compat(), &[3u8; 32], &[4u8; 12]);
+            let payload = vec![b'x'; payload_len];
+            writer.write_all(&payload).await.unwrap();
+            writer.flush().await.unwrap();
+            drop(writer);
+            let mut obs = observer.compat();
+            let mut wire = Vec::new();
+            obs.read_to_end(&mut wire).await.unwrap();
+            assert_eq!(
+                wire.len(),
+                FRAME_QUANTUM,
+                "payload_len={payload_len} must produce one {FRAME_QUANTUM}-byte frame"
+            );
+        }
+
+        // 300-byte payload spills into the next quantum: 2 + 300 = 302
+        // rounds up to 512.
+        let (a, observer) = tokio::io::duplex(4096);
+        let mut writer = ScrambleStream::new(a.compat(), &[3u8; 32], &[4u8; 12]);
+        writer.write_all(&vec![b'y'; 300]).await.unwrap();
+        writer.flush().await.unwrap();
+        drop(writer);
+        let mut obs = observer.compat();
+        let mut wire = Vec::new();
+        obs.read_to_end(&mut wire).await.unwrap();
+        assert_eq!(wire.len(), 2 * FRAME_QUANTUM, "300-byte payload → 2 quanta");
     }
 
     #[tokio::test]
@@ -405,11 +613,19 @@ mod tests {
         let write_fut = async {
             writer.write_all(&msg).await.unwrap();
             writer.flush().await.unwrap();
+            // `close()` signals EOF to the reader after the frame's pad
+            // bytes have been drained — without it the reader's
+            // `read_to_end` would hang waiting for more frames.
             writer.close().await.unwrap();
         };
         let read_fut = async {
-            let mut got = vec![0u8; 1000];
-            reader.read_exact(&mut got).await.unwrap();
+            // `read_to_end` (not `read_exact(1000)`) so pad bytes are
+            // consumed in the natural read flow and the reader terminates
+            // cleanly on the writer's EOF. read_exact would return after
+            // 1000 payload bytes and leave the writer's flush parked on
+            // 22 unconsumed pad bytes → deadlock.
+            let mut got = Vec::new();
+            reader.read_to_end(&mut got).await.unwrap();
             got
         };
         let (_, got) = futures::join!(write_fut, read_fut);
