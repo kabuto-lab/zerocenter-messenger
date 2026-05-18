@@ -69,6 +69,14 @@ pub struct P2PNode {
     /// `pending_record_queries` because the GetRecord result handler
     /// branches on which side fired the query.
     pending_ack_queries: HashMap<kad::QueryId, i64>,
+    /// Phase 5 OTPK-pool-drain defence. Tracks the last time we
+    /// honored a PrekeyRequest from each peer with a one-time prekey
+    /// attached. Within `OTPK_FETCH_COOLDOWN_SECS` of a previous
+    /// honored fetch, we still respond to the same peer's request but
+    /// without attaching an OTPK — forcing rapid-fire requesters into
+    /// the 2-DH fallback path. Pruned periodically on the cleanup
+    /// tick to bound memory.
+    recent_otpk_fetches: HashMap<PeerId, i64>,
 }
 
 /// Inputs that travel only on the first message of a fresh session:
@@ -160,6 +168,7 @@ impl P2PNode {
             pending_provider_queries: HashMap::new(),
             pending_record_queries: HashMap::new(),
             pending_ack_queries: HashMap::new(),
+            recent_otpk_fetches: HashMap::new(),
         })
     }
 
@@ -568,6 +577,8 @@ impl P2PNode {
                             Err(e) => warn!("Mailbox sweep failed: {}", e),
                         }
                     }
+                    // Phase 5: bound the OTPK-fetch rate-limit map.
+                    self.prune_recent_otpk_fetches();
                 }
 
                 // Phase-4-mailbox republish.
@@ -740,10 +751,23 @@ impl P2PNode {
         match event {
             request_response::Event::Message { peer, message, .. } => match message {
                 request_response::Message::Request { request: _, channel, .. } => {
-                    // Try to attach an OTPK bundle. If we have one in the
-                    // pool, it's popped (and marked consumed) atomically;
-                    // pre-3.5 peers without OTPK support just see None.
-                    let otpk_bundle = self.pop_one_otpk_bundle();
+                    // Phase 5 OTPK-pool-drain defence: only attach an
+                    // OTPK if this peer hasn't fetched one recently. The
+                    // signed prekey is ALWAYS sent (it's our public,
+                    // long-term, signed key — nothing to drain). The
+                    // OTPK is the consumable resource, so it's the one
+                    // we gate.
+                    let attach_otpk = self.should_attach_otpk(peer);
+                    let otpk_bundle = if attach_otpk {
+                        self.pop_one_otpk_bundle()
+                    } else {
+                        debug!(
+                            "Skipping OTPK for {}: rate-limited (within {}s cooldown)",
+                            peer,
+                            Self::OTPK_FETCH_COOLDOWN_SECS
+                        );
+                        None
+                    };
                     let resp = PrekeyResponse {
                         x25519_public: *self.identity.x25519_public().as_bytes(),
                         signature: self.identity.x25519_signature().to_bytes(),
@@ -1979,8 +2003,30 @@ impl P2PNode {
 
     /// Target size of the unused one-time prekey pool. Each `prekey/Request`
     /// from a peer pops one OTPK; we top the pool back up at startup and
-    /// whenever it gets depleted.
-    const OTPK_POOL_TARGET: i64 = 20;
+    /// whenever it gets depleted. Bumped to 100 in Phase 5 for higher
+    /// raw cost-to-drain — combined with [`Self::OTPK_FETCH_COOLDOWN_SECS`]
+    /// per-peer rate limiting, an attacker controlling N Sybil
+    /// identities still needs `100 / (1 + uptime_seconds / cooldown)`
+    /// distinct identities active simultaneously to keep the pool
+    /// depleted, which scales linearly with attacker resources.
+    const OTPK_POOL_TARGET: i64 = 100;
+
+    /// Phase 5 OTPK-pool-drain defence: minimum gap between two
+    /// honored OTPK-attached PrekeyResponses to the same remote peer.
+    /// Within this window, repeat PrekeyRequests from the same peer
+    /// still get a valid signed-prekey response, but without an OTPK
+    /// attached — forcing rapid-fire fetchers to fall back to 2-DH
+    /// X3DH on their subsequent attempts.
+    ///
+    /// 60 seconds is a deliberately loose window: legitimate retry
+    /// scenarios (network glitch, peer briefly disconnected mid-
+    /// handshake) typically resolve in much less than that, so the
+    /// only callers that hit the gate are scripts or attackers.
+    /// A motivated attacker who can Sybil their PeerId can bypass
+    /// the per-peer limit, which is why we ALSO bumped
+    /// `OTPK_POOL_TARGET` to 100 — raising the per-identity throw-
+    /// away cost.
+    const OTPK_FETCH_COOLDOWN_SECS: i64 = 60;
 
     /// Ensure we have at least `OTPK_POOL_TARGET` unused OTPKs by
     /// generating fresh ones and signing them with our Ed25519 identity.
@@ -2013,6 +2059,33 @@ impl P2PNode {
             Self::OTPK_POOL_TARGET
         );
         Ok(())
+    }
+
+    /// Phase 5 OTPK-pool-drain defence. Returns `true` iff we should
+    /// attach a one-time prekey to a `PrekeyResponse` for `peer` right
+    /// now. The signed prekey is always sent regardless; only the OTPK
+    /// is gated.
+    ///
+    /// Updates `recent_otpk_fetches[peer]` to the current timestamp on
+    /// an honored attempt, so the next request from the same peer is
+    /// rate-limited until `OTPK_FETCH_COOLDOWN_SECS` has elapsed.
+    fn should_attach_otpk(&mut self, peer: PeerId) -> bool {
+        check_and_update_otpk_gate(
+            &mut self.recent_otpk_fetches,
+            peer,
+            unix_seconds_now(),
+            Self::OTPK_FETCH_COOLDOWN_SECS,
+        )
+    }
+
+    /// Periodic prune of the OTPK-fetch tracking map. Drops entries
+    /// older than `OTPK_FETCH_COOLDOWN_SECS` since they no longer
+    /// affect the gate. Called from the hourly cleanup tick so the
+    /// map can't grow unboundedly under a high-churn workload.
+    fn prune_recent_otpk_fetches(&mut self) {
+        let now = unix_seconds_now();
+        let cutoff = now - Self::OTPK_FETCH_COOLDOWN_SECS;
+        self.recent_otpk_fetches.retain(|_, last| *last >= cutoff);
     }
 
     /// Pop one unused OTPK from the store for inclusion in a prekey
@@ -2103,6 +2176,83 @@ fn unix_seconds_now() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64
+}
+
+/// Phase 5 pure helper for the OTPK rate-limit gate. Factored out of
+/// `P2PNode::should_attach_otpk` so the cooldown logic is testable
+/// without spinning up a full P2PNode.
+///
+/// Returns `true` iff `peer` should be honored with an OTPK attached
+/// right now. On `true`, the map is updated with `now` so the next
+/// call within `cooldown_secs` returns `false`.
+fn check_and_update_otpk_gate(
+    recent: &mut HashMap<PeerId, i64>,
+    peer: PeerId,
+    now: i64,
+    cooldown_secs: i64,
+) -> bool {
+    let allow = match recent.get(&peer) {
+        Some(&last) if now - last < cooldown_secs => false,
+        _ => true,
+    };
+    if allow {
+        recent.insert(peer, now);
+    }
+    allow
+}
+
+#[cfg(test)]
+mod otpk_gate_tests {
+    use super::*;
+
+    fn fresh_peer() -> PeerId {
+        // Generate a unique PeerId from a random Ed25519 keypair —
+        // each test gets distinct identities for free.
+        let kp = libp2p::identity::Keypair::generate_ed25519();
+        PeerId::from(kp.public())
+    }
+
+    #[test]
+    fn first_call_allows_and_records() {
+        let mut recent = HashMap::new();
+        let p = fresh_peer();
+        assert!(check_and_update_otpk_gate(&mut recent, p, 1_000, 60));
+        assert_eq!(recent.get(&p), Some(&1_000));
+    }
+
+    #[test]
+    fn repeat_within_cooldown_is_blocked() {
+        let mut recent = HashMap::new();
+        let p = fresh_peer();
+        assert!(check_and_update_otpk_gate(&mut recent, p, 1_000, 60));
+        // Same peer at +30s → still within 60s cooldown → blocked.
+        assert!(!check_and_update_otpk_gate(&mut recent, p, 1_030, 60));
+        // Map timestamp not updated on blocked attempt — the original
+        // "last honored" timestamp stands.
+        assert_eq!(recent.get(&p), Some(&1_000));
+    }
+
+    #[test]
+    fn repeat_past_cooldown_is_allowed() {
+        let mut recent = HashMap::new();
+        let p = fresh_peer();
+        assert!(check_and_update_otpk_gate(&mut recent, p, 1_000, 60));
+        // Same peer at +60s → boundary is exclusive; allowed.
+        assert!(check_and_update_otpk_gate(&mut recent, p, 1_060, 60));
+        assert_eq!(recent.get(&p), Some(&1_060));
+    }
+
+    #[test]
+    fn distinct_peers_do_not_share_the_cooldown() {
+        let mut recent = HashMap::new();
+        let p1 = fresh_peer();
+        let p2 = fresh_peer();
+        assert!(check_and_update_otpk_gate(&mut recent, p1, 1_000, 60));
+        // Different peer is independent.
+        assert!(check_and_update_otpk_gate(&mut recent, p2, 1_001, 60));
+        assert_eq!(recent.get(&p1), Some(&1_000));
+        assert_eq!(recent.get(&p2), Some(&1_001));
+    }
 }
 
 fn chrono_format(timestamp: i64) -> String {

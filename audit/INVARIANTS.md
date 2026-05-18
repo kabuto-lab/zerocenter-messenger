@@ -116,11 +116,11 @@ i.e. length-prefixed `sender_pid || recipient_pid` concatenated with `dh || pn_b
 
 **Statement.** An OTPK is marked `consumed_at` at the moment it is included in a `PrekeyResponse` — NOT after the initiator successfully delivers the first message.
 
-**Why.** Trade-off documented. Marking on confirm leaves a race window where two concurrent fetches both get the same OTPK. The chosen semantics is: every fetch burns one OTPK from the pool, even fetches that never lead to a real session. Pool size (20) is the buffer.
+**Why.** Trade-off documented. Marking on confirm leaves a race window where two concurrent fetches both get the same OTPK. The chosen semantics is: every fetch burns one OTPK from the pool, even fetches that never lead to a real session. Pool size (now 100 after Phase 5; see §23) is the buffer.
 
 **Where to verify.** `src/storage/store.rs::pop_unused_otpk` — the `UPDATE` happens unconditionally on pop. The row is `delete_otpk`'d after successful first-decrypt in `bootstrap_responder_and_decrypt`, but that's just GC; the security-critical "this OTPK is no longer available" state is already set at pop time.
 
-**Suggested attack.** Repeatedly fetch prekeys from a victim and never send a message — drain their OTPK pool. Verify the pool reseeds via `replenish_otpk_pool` (called in `start` and after each pop). If reseed is missing — DoS opening, finding.
+**Suggested attack.** Repeatedly fetch prekeys from a victim and never send a message — drain their OTPK pool. Verify the pool reseeds via `replenish_otpk_pool` (called in `start` and after each pop) AND the per-peer rate limit (§23) blunts the attack within a single attacker identity.
 
 ---
 
@@ -363,6 +363,32 @@ If all four pass, the sender PeerId is authenticated and the message proceeds th
 **Suggested attack.** Capture a sealed envelope and replay it. The inner signature scope includes `timestamp` and `ttl`, so `process_incoming_dm`'s `is_expired()` check (audit F5) drops replays past the TTL. Within the TTL, the ratchet's already-consumed-mk check (§4 / §6) makes the second arrival a silent no-op.
 
 **Suggested attack.** Construct a sealed envelope addressed to victim, sealing a `sender_cert` with mallory's PeerId and mallory's signature. Victim decrypts the seal (mallory's signature verifies, mallory's identity is recovered as the sender). This is correct behavior — mallory really did send the envelope; sealed sender doesn't try to hide that. The recipient knows mallory is the author; the only protected secret is mallory's identity vis-à-vis the network transport. A reviewer should confirm the inner signature verifies under mallory's Ed25519 pubkey and rejects if any field (to/payload/ts/ttl/msg_type) was tampered.
+
+---
+
+## §23. OTPK pool-drain defence (Phase 5)
+
+**Statement.** A single remote peer cannot drain our one-time-prekey pool by rapid-fire `PrekeyRequest`s. The responder honors AT MOST one OTPK-attached `PrekeyResponse` per peer per `OTPK_FETCH_COOLDOWN_SECS = 60` seconds. Within that window, subsequent requests from the same peer still receive a valid signed-prekey response, but with `otpk: None` — forcing the requester into the 2-DH variant of X3DH for their subsequent attempts.
+
+**Why.** Without per-peer rate limiting, an attacker who can rapidly issue `PrekeyRequest`s drains the OTPK pool faster than `replenish_otpk_pool` can refill, forcing every subsequent legitimate first-message into 2-DH (weaker forward secrecy than 3-DH). The pool size (`OTPK_POOL_TARGET = 100`, bumped from 20 in Phase 5) gives a raw cost-to-drain of 100 OTPKs per uncoordinated attacker; the per-peer cooldown caps a single PeerId's throughput at `1 OTPK / cooldown` — making a single-identity drain attack arbitrarily slow.
+
+**Sybil note.** An attacker who can produce many PeerIds can bypass the per-peer limit by rotating identities. Each Sybil identity has the same `1 / cooldown` ceiling though, so the total attacker throughput is `N_sybils × (1 OTPK / cooldown)`. With `OTPK_POOL_TARGET = 100` and `cooldown = 60s`, the attacker needs 100 Sybil identities active simultaneously to keep the pool depleted indefinitely. Per-IP rate limiting at the transport layer would compound this — currently not implemented (libp2p transport limits exist but aren't tied to our application gate).
+
+**Enforced at.**
+- `src/core/node.rs::OTPK_POOL_TARGET = 100` — raw pool depth.
+- `src/core/node.rs::OTPK_FETCH_COOLDOWN_SECS = 60` — per-peer cooldown.
+- `src/core/node.rs::should_attach_otpk` — gate predicate, delegated to the pure helper `check_and_update_otpk_gate(map, peer, now, cooldown)` for unit-testability.
+- `src/core/node.rs::handle_prekey_event` Request arm — gate before `pop_one_otpk_bundle`.
+- `src/core/node.rs::prune_recent_otpk_fetches` — periodic prune of the tracking map (called from the hourly cleanup tick) so the map can't grow unboundedly.
+
+**What this DOES NOT defend against.**
+- A patient attacker who waits `cooldown` seconds between requests can still drain the pool from a single identity, eventually. The fix there is either a larger cooldown or a smaller per-peer total quota — out of scope for v0.
+- An attacker who controls a Sybil army (cheap PeerId generation) can bypass per-peer limits. Mitigation: IP-level rate limiting or PoW on prekey-fetch, both substantial additions.
+- A legitimate user with a flaky network who retries their PrekeyRequest within 60s will get a `None` OTPK on the retry and fall back to 2-DH for that send. This is a deliberate trade-off; 2-DH still has post-compromise security from the ratchet step, just weaker first-message FS.
+
+**Test coverage.** `otpk_gate_tests` (4 tests, file-bottom in `node.rs`): first-call-allows-and-records, repeat-within-cooldown-is-blocked, repeat-past-cooldown-is-allowed, distinct-peers-do-not-share-the-cooldown.
+
+**Suggested attack.** Issue 200 PrekeyRequests from a single PeerId in 1 second. Expected: 1 honored OTPK, 199 None-OTPK responses, all with valid signed-prekey. Pool deficit: 1 per minute per identity ceiling.
 
 ---
 
