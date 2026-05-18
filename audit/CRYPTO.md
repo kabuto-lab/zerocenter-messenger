@@ -357,18 +357,54 @@ blob = u8(AT_REST_VERSION = 1)
 - `prekeys_seen.x25519_pub` / `.signature` (public).
 - Timestamps and TTLs.
 
-## 11. Obfuscation transport (Phase 4a — stub)
+## 11. Obfuscation transport (Phase 4b / 4c.1 / 4c.2 / 4c.2′ — shipped)
 
-`src/network/scramble.rs::ScrambleStream<S>` wraps any `AsyncRead + AsyncWrite + Unpin` with two independent ChaCha20 keystreams (one per direction). Reads XOR with the inbound stream; writes XOR with the outbound stream.
+`src/network/scramble.rs::ScrambleStream<S>` wraps any `futures::io::AsyncRead + AsyncWrite + Unpin` (libp2p 0.53's transport flavour) with **two independent ChaCha20 keystreams**, one per direction, derived from an NTOR-style handshake at connection open. ScrambleStream is spliced into the libp2p `Transport` via `SwarmBuilder::with_other_transport(|kp| ...)` in `src/core/node.rs::P2PNode::start`, sitting between raw TCP and the Noise XX upgrade. Activation is gated on the `--obfs-key <HEX64>` CLI flag; without it traffic is vanilla libp2p (no obfs layer).
 
-- **Key:** 32-byte shared secret, distributed out of band via `--obfs-key <HEX64>`.
-- **Nonce:** currently passed as a constructor argument (the in-band nonce-exchange handshake is Phase 4b).
-- **Not wired into libp2p yet** — the module exists and has unit tests; the actual `Transport::and_then` wrapping is deferred.
-- **NOT real Obfs4** — no NTOR, no IAT, no padding. Defeats naive DPI signatures; does not defeat statistical analysis or active probing.
+### 11.1 Per-connection key + nonce derivation (Phase 4c.1, NTOR-style)
+
+On every new connection, both peers run a hidden-nonce handshake:
+
+1. **Ephemeral keypair generation.** Each side picks a random X25519 private key whose public has an elligator2 representative under the `Randomized` variant of `curve25519-elligator2 = "0.1.0-alpha.2"`. Roughly 50% of keys have a representative; the generator retries up to 64 times (2⁻⁶⁴ failure under a healthy RNG).
+2. **Wire exchange.** Both sides send their 32-byte elligator2 representative. To a passive observer those 32 bytes are computationally indistinguishable from uniform random — no plaintext nonce prefix to fingerprint.
+3. **X25519 DH.** Each side decodes the peer's representative back to a Montgomery point and computes `shared_secret = X25519(my_priv, their_pub)`. The handshake refuses `shared_secret == 0` (low-order peer pubkey defence; audit F2).
+4. **HKDF-SHA256 dual derivation.** From `IKM = shared_secret || obfs_key` with `salt = "zerocenter-ntor-v1"`, expand TWO 44-byte OKMs under role-distinguished `info` strings:
+   - `"zc-chacha-d2l-v1"` → dialer→listener keystream `(key32 || nonce12)`.
+   - `"zc-chacha-l2d-v1"` → listener→dialer keystream `(key32 || nonce12)`.
+   Per-direction keying is load-bearing: with a single shared `(key, nonce)` for both directions, both peers' outbound ciphers would generate the same keystream — a textbook two-time-pad recoverable by XOR-ing the two directions of a wire capture (audit F1, fixed at commit 2273cf5).
+5. **Cipher initialization.** The dialer's `out_cipher` is initialized from the d2l pair and its `in_cipher` from the l2d pair; the listener mirrors. Both ciphers start at counter 0.
+
+The pre-shared `obfs_key` is the obfuscation envelope's authenticator: an MITM substituting their own ephemerals (without `obfs_key`) derives a different OKM-pair and can't decrypt either side's scrambled stream.
+
+### 11.2 Framing (Phase 4c.2 — 256-byte quantum)
+
+Above the byte-XOR layer sits a length-prefixed frame protocol:
+
+```
+[u16-be: payload_len] [payload_len bytes payload] [pad to next FRAME_QUANTUM-multiple]
+```
+
+with `FRAME_QUANTUM = 256`. The entire frame (header + payload + pad) is XOR'd with the keystream as a unit, so an observer can't separate header from payload from pad. Effect: every frame on the wire is a multiple of 256 bytes, hiding per-message size from statistical DPI. The frame size is further bounded at `MAX_PENDING_BYTES = 4 × FRAME_QUANTUM = 1024 bytes` via `MAX_PAYLOAD_PER_FRAME = MAX_PENDING_BYTES - 2 = 1022` (caps payload per frame; `write_all` naturally splits larger writes into multiple bounded frames) — this also bounds `ScrambleStream::pending` and tightens the wire-frame-size fingerprint to `{256, 512, 768, 1024}`.
+
+### 11.3 Inter-arrival-time jitter (Phase 4c.2′ — opt-in)
+
+When `--obfs-jitter-ms <MAX_MS>` is supplied alongside `--obfs-key`, every `poll_write` that's about to emit a NEW frame first waits a `uniform(0..=max)` ms delay (via `tokio::time::Sleep`). State machine: `pending_sleep: Option<Pin<Box<tokio::time::Sleep>>>` on the struct, polled to completion before each frame emission. Defeats off-the-shelf emission-timing fingerprinters. Cost: up to `max` ms of added per-frame latency. Default off — users who don't ask pay nothing. Distribution is uniform; future Pareto/Poisson variants are out of scope for v0.
+
+### 11.4 Properties
+
+- **Per-connection forward secrecy at the obfs layer.** Ephemerals are dropped at end of handshake; even a captured `obfs_key` cannot reconstruct the keystream of past captured sessions without the ephemeral privates.
+- **Drain-first discipline.** `ScrambleStream::pending` is bounded at `MAX_PENDING_BYTES = 1024`; `poll_write` drains it before scrambling new caller bytes, so the keystream is never advanced past bytes that didn't reach the inner stream (`debug_assert!` enforces the bound).
+
+### 11.5 What this is NOT
+
+- **Not full Obfs4 parity.** Obfs4 packs server-identity authentication and time-bucketed replay defence into its handshake; we don't need either because `obfs_key` is our authenticator and Noise XX above us provides peer authentication.
+- **Not privacy.** Recipients still know who they're talking to; network-layer metadata (IPs, frame timing without jitter) is visible.
+- **Not authenticated at the obfs layer.** The pre-shared key provides a MAC-of-sorts via the HKDF binding (an attacker without the key derives a different keystream and Noise XX above fails to handshake), but Noise XX is what actually authenticates peers.
 
 **Files:**
 - module: `src/network/scramble.rs`
-- design: `plans/phase4-obfs4.md`
+- transport wiring: `src/core/node.rs::P2PNode::start` (`with_other_transport` closure)
+- invariants: `audit/INVARIANTS.md` §17
 
 ## 12. Random number generation
 

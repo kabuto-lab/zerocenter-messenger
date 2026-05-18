@@ -23,7 +23,9 @@ There is no central server, no operator, no bootstrap-must-be-online dependency 
 
 ## Build status — read this first
 
-**As of 2026-05-17 the codebase compiles clean and `cargo test` passes 48/48** on rustc 1.95.0 / cargo 1.95.0 with VS Build Tools (Windows). The committed `zerocenter.exe` (commit fb13ad9, 9.11 MB) is the release binary produced by `cargo build --release` against this audit pack's source — it represents the audited code, not an older artefact.
+**As of 2026-05-18 the codebase compiles clean and `cargo test --lib` passes 66/66** on rustc 1.95.0 / cargo 1.95.0 with VS Build Tools (Windows). The committed `zerocenter.exe` is the default-feature (CLI) release binary produced by `cargo build --release`. The `--features gui` build additionally pulls Tauri 2.x and produces a separately-buildable larger binary that is not tracked in-tree.
+
+Phase 4 has shipped end-to-end: ScrambleStream (`--obfs-key`) is wired into the libp2p Transport, NTOR-style hidden-nonce handshake via elligator2 is in place, 256-byte frame padding (`MAX_PENDING_BYTES = 1024` bound) is in place, opt-in IAT jitter (`--obfs-jitter-ms <MAX_MS>`) is in place, and the DHT mailbox store-and-forward layer is functional (v0 — no ACK loop yet; sealed-sender deferred to Phase 5). See `plans/ROADMAP.md` for the full status table. The most recent self-audit (`audit/SELF_AUDIT.md`) drove fixes for F1 (per-direction keystream keying — wire-format-breaking), F2 (low-order pubkey check), F3 (consumed_at gate on `load_otpk_private`), F5 (stale envelope drop), F7 (identify-event log downgrade), and F9 (session-insert order in responder bootstrap).
 
 **Historical note for reviewers.** Phase 3, Phase 3.5, and Phase 4 were originally authored *without* a working Rust toolchain — written from memory against published crate APIs. The first end-to-end compile happened in commit 7caa646 and surfaced six categories of surface-level fixes; all are now in the tree:
 

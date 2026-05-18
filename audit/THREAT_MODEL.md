@@ -86,9 +86,9 @@ A reviewer focused on supply chain should consider: pinning fewer transitive dep
 
 | Claim | Status |
 |---|---|
-| Cannot identify ZeroCenter traffic by simple signature match. | ⚠️ partial — once ScrambleStream is wired (Phase 4b), naive matching fails. Currently the Noise XX handshake is recognizable. |
-| Cannot identify by statistical analysis (entropy, packet sizes). | ❌ no — needs full Obfs4 (Phase 4c). |
-| Cannot identify by active probing. | ❌ no — needs full Obfs4. |
+| Cannot identify ZeroCenter traffic by simple signature match. | ✅ via ScrambleStream when `--obfs-key` is supplied. Phase 4b wired the transport; Phase 4c.1 hides the connection-opening 32 bytes (each direction) behind elligator2-encoded ephemerals so the wire has no plaintext nonce prefix to fingerprint. Subject to commit-2273cf5 fix (audit F1) for per-direction keystream split. Without `--obfs-key`, vanilla libp2p Noise XX is recognizable. |
+| Cannot identify by statistical analysis (entropy, packet sizes). | ✅ partial — Phase 4c.2 256-byte frame padding flattens per-message size to a 1024-byte bound; Phase 4c.2′ `--obfs-jitter-ms <max>` randomizes inter-arrival timing within an operator-chosen window. Defeats off-the-shelf statistical fingerprinters; a sophisticated observer with enough samples can still recover the underlying uniform-distribution emission pattern. |
+| Cannot identify by active probing. | ⚠️ partial — without `obfs_key` a prober gets no handshake response, so passive probing fails. Real Obfs4-style probe defence (server fingerprint, time-bucketed replay) is not implemented; an attacker holding `obfs_key` (e.g. obtained from a compromised bridge line) can probe ZeroCenter peers and identify them. |
 | Cannot block by IP. | ❌ no — IPs are visible at the network layer. |
 | Cannot break authentication / confidentiality of traffic they can't block. | ✅ — full E2EE remains. |
 
@@ -122,6 +122,6 @@ Out of scope — different design space (plausible deniability, ephemeral device
 | D. Offline disk read | ✅ msg/state/otpk | ⚠️ identity.json plaintext | ✅ | ✅ | n/a |
 | E. Online local user | ❌ DEK readable | ❌ | n/a | n/a | n/a |
 | F. Bad dependency | depends | depends | depends | depends | depends |
-| G. State DPI | ✅ content | ✅ | ✅ | ✅ | ⚠️ (Phase 4) |
+| G. State DPI | ✅ content | ✅ | ✅ | ✅ | ✅ via `--obfs-key`; ⚠️ statistical / active probing partial |
 | H. Quantum | ❌ | ❌ | ❌ | ❌ | n/a |
 | I. Coercion | ❌ no defense | ❌ | ❌ | ❌ | ❌ |

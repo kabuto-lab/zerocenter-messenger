@@ -667,13 +667,27 @@ impl P2PNode {
             },
             crate::network::BehaviourEvent::IdentifyBehaviour(id_event) => match id_event {
                 libp2p::identify::Event::Received { peer_id, info } => {
-                    info!("Identify from {}: {:?}", peer_id, info);
+                    // Audit F7: full identify payload includes the
+                    // peer's listening addresses, agent string, and
+                    // protocol set. None is plaintext-secret but all
+                    // is network-topology metadata; demote to debug
+                    // so it doesn't reach remote log aggregators
+                    // configured at INFO. Keep only the PeerId +
+                    // count-of-protocols at info level for liveness
+                    // visibility.
+                    debug!("Identify from {}: agent={:?} protocols={:?} listen_addrs={:?}",
+                        peer_id, info.agent_version, info.protocols, info.listen_addrs);
+                    info!(
+                        "Identify from {} ({} protocols announced)",
+                        peer_id,
+                        info.protocols.len()
+                    );
                 }
                 libp2p::identify::Event::Sent { peer_id } => {
-                    info!("Sent identify info to {}", peer_id);
+                    debug!("Sent identify info to {}", peer_id);
                 }
                 libp2p::identify::Event::Pushed { peer_id, .. } => {
-                    info!("Pushed identify info to {}", peer_id);
+                    debug!("Pushed identify info to {}", peer_id);
                 }
                 libp2p::identify::Event::Error { peer_id, error } => {
                     warn!("Identify error with {}: {:?}", peer_id, error);
@@ -1453,6 +1467,20 @@ impl P2PNode {
             return;
         }
 
+        // Step 3.5 (audit F5): drop expired envelopes BEFORE doing any
+        // state-modifying work. Stale drops fished out of the DHT
+        // mailbox (where records can survive up to Kad TTL even after
+        // our local 7-day expiry) shouldn't drive responder bootstrap
+        // or advance the ratchet. Direct-DM envelopes from a peer with
+        // skewed clock also bail out here cleanly.
+        if proto_msg.is_expired() {
+            debug!(
+                "Dropping stale DM from {}: envelope past its TTL",
+                verified_sender
+            );
+            return;
+        }
+
         // Step 4: parse the encrypted payload.
         let payload = match EncryptedPayload::from_bytes(&proto_msg.payload) {
             Ok(p) => p,
@@ -1554,22 +1582,31 @@ impl P2PNode {
         let my_spk_clone =
             x25519_dalek::StaticSecret::from(self.identity.x25519_secret().to_bytes());
         let session = RatchetState::new_responder(sk, my_spk_clone);
-        self.sessions.insert(peer, session);
 
-        // Decrypt happens via the session we just installed. If it
-        // succeeds we delete the consumed OTPK row so it can't be reused
-        // even by ourselves; if it fails the OTPK is wasted but already
-        // marked consumed by `pop_unused_otpk` — net effect: one OTPK
-        // burned per bad-first-message attempt, which is also a mild
-        // DoS resistance property.
+        // Audit F9: install the session ONLY if first-message decrypt
+        // succeeds. Previously we inserted unconditionally and the
+        // broken session stuck around on AEAD failure, wedging every
+        // subsequent legitimate message under that same session
+        // record. Now: stash the session, attempt decrypt, then
+        // commit (or drop and leave the slot empty so the next
+        // legitimate first-message can re-bootstrap cleanly).
+        self.sessions.insert(peer, session);
         let decrypted_ok = self.decrypt_first_message(peer, payload);
-        if decrypted_ok {
-            if let (Some(id), Some(store)) =
-                (payload.otpk_id, self.message_store.as_ref())
-            {
-                if let Err(e) = store.delete_otpk(id) {
-                    warn!("Failed to delete consumed OTPK id={}: {}", id, e);
-                }
+        if !decrypted_ok {
+            self.sessions.remove(&peer);
+            return;
+        }
+
+        // Success path: delete the consumed OTPK row so it can't be
+        // reused even by ourselves. (Failure path above doesn't touch
+        // the OTPK row — it stays marked consumed by `pop_unused_otpk`
+        // and is now blocked from re-load by the audit-F3 consumed_at
+        // gate in `load_otpk_private`, so even a future replay of the
+        // same first-message can't re-bootstrap. One OTPK burned per
+        // bad-first-message is also mild DoS resistance.)
+        if let (Some(id), Some(store)) = (payload.otpk_id, self.message_store.as_ref()) {
+            if let Err(e) = store.delete_otpk(id) {
+                warn!("Failed to delete consumed OTPK id={}: {}", id, e);
             }
         }
     }

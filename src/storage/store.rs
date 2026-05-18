@@ -533,12 +533,16 @@ impl MessageStore {
     }
 
     /// Load and decrypt the private bytes for the OTPK with the given id.
-    /// Returns `None` if the id is unknown — that's the "OTPK was rotated
-    /// out or the initiator replayed a stale handshake" case; the caller
-    /// should drop the message rather than fall back.
+    /// Returns `None` if the id is unknown OR if the row already has
+    /// `consumed_at` set — the audit's F3 finding. Gating on
+    /// `consumed_at IS NULL` defends against a replay of a first-
+    /// message where the OTPK row is still present (not yet GC'd by
+    /// `delete_otpk`) but has been used. Without the gate, the replay
+    /// would re-derive the same SK and a fresh `RatchetState::new_responder`
+    /// would overwrite any in-memory chain progress on this peer.
     pub fn load_otpk_private(&self, id: i64) -> Result<Option<[u8; 32]>> {
         let row = self.conn.query_row(
-            "SELECT x25519_priv FROM my_otpks WHERE id = ?1",
+            "SELECT x25519_priv FROM my_otpks WHERE id = ?1 AND consumed_at IS NULL",
             params![id],
             |row| row.get::<_, Vec<u8>>(0),
         );
@@ -857,6 +861,41 @@ mod tests {
         let dir = tempdir().unwrap();
         let store = MessageStore::open(dir.path(), test_dek()).unwrap();
         assert!(store.load_prekey(&[1, 2, 3]).unwrap().is_none());
+    }
+
+    #[test]
+    fn load_otpk_private_skips_consumed_rows() {
+        // F3 regression: prior to the fix, `load_otpk_private(id)`
+        // returned the private bytes as long as the row existed,
+        // regardless of `consumed_at`. A replay of a first-message
+        // could then re-bootstrap a responder session even after the
+        // OTPK was consumed, wiping any subsequent chain progress.
+        // Now the SQL guards `consumed_at IS NULL` so a consumed row
+        // looks identical to "row was already GC'd" — caller drops
+        // the message.
+        let dir = tempdir().unwrap();
+        let store = MessageStore::open(dir.path(), test_dek()).unwrap();
+
+        let priv_bytes = [7u8; 32];
+        let pub_bytes = [8u8; 32];
+        let sig = [9u8; 64];
+        let id = store.add_my_otpk(&priv_bytes, &pub_bytes, &sig).unwrap();
+
+        // Pre-consume: loadable.
+        assert_eq!(
+            store.load_otpk_private(id).unwrap().as_ref(),
+            Some(&priv_bytes)
+        );
+
+        // Consume via pop. The row stays in the table (consumed_at set);
+        // `delete_otpk` would remove it physically — F3 covers the
+        // window in between.
+        let (popped_id, _, _) = store.pop_unused_otpk().unwrap().unwrap();
+        assert_eq!(popped_id, id);
+
+        // Post-consume: load returns None even though the row still
+        // exists — confirming the consumed_at gate.
+        assert!(store.load_otpk_private(id).unwrap().is_none());
     }
 
     #[test]
