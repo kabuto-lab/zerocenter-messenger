@@ -3,6 +3,7 @@ use crate::core::Identity;
 
 pub mod keyring;
 pub mod ratchet;
+pub mod sealed;
 pub mod x3dh;
 
 /// Convert our identity to a libp2p keypair (already stored in Identity)

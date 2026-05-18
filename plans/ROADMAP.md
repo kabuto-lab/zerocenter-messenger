@@ -20,11 +20,12 @@ Living document tracking what's done, what's in flight, and what's queued. Last 
 | QUIC | ⏸ disabled (see `[[project-quic-disabled]]`; revisit when ring-on-MSVC settles) |
 | GUI (Tauri 2.x) | ✅ (build wired; basic chat UI; UX polish like push-style refresh deferred to v1) |
 | DHT mailbox store-and-forward | ✅ (encrypt-once + ACK loop shipped Phase 5; sealed-sender still deferred) |
-| External security audit | ❌ not started; `audit/` pack ready for reviewer |
+| External security audit | ❌ not started; `audit/` pack ready for reviewer (self-audit done) |
+| Sealed sender (Phase 5) | ✅ ECIES-encrypted sender cert; sealed when recipient's prekey is cached |
 | Group chats (Megolm-style) | ❌ |
 | Deniability | ❌ (intentional non-deniability for v1) |
 
-Build: rustc 1.95 / cargo 1.95 / VS Build Tools. `cargo test --lib`: 68/68 on default features. `cargo build --release` (default, headless CLI) produces a ~9.24 MB `zerocenter.exe`; `cargo build --release --features gui` additionally pulls Tauri 2.x and its webview2 toolchain (Windows). The tracked in-tree `zerocenter.exe` is the default build — the GUI artefact is significantly larger and isn't checked in.
+Build: rustc 1.95 / cargo 1.95 / VS Build Tools. `cargo test --lib`: 79/79 on default features. `cargo build --release` (default, headless CLI) produces a ~9.24 MB `zerocenter.exe`; `cargo build --release --features gui` additionally pulls Tauri 2.x and its webview2 toolchain (Windows). The tracked in-tree `zerocenter.exe` is the default build — the GUI artefact is significantly larger and isn't checked in.
 
 ## Done — chronological commits
 

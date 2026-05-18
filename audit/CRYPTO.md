@@ -71,20 +71,23 @@ This document lists every cryptographic primitive and construction used by ZeroC
 ### 5.1 Structure
 ```rust
 pub struct ProtocolMessage {
-    pub to:        Vec<u8>,   // recipient PeerId bytes
-    pub from:      Vec<u8>,   // sender PeerId bytes
-    pub payload:   Vec<u8>,   // serialized EncryptedPayload (Phase 3+) or raw bytes
-    pub timestamp: i64,       // unix seconds
-    pub ttl:       i64,       // seconds
-    pub msg_type:  MessageType,
-    pub signature: Vec<u8>,   // Ed25519 sig over signing_bytes()
+    pub to:            Vec<u8>,   // recipient PeerId bytes (always clear)
+    pub from:          Vec<u8>,   // sender PeerId bytes; empty on Phase 5 sealed envelopes
+    pub sealed_sender: Vec<u8>,   // Phase 5 sealed envelope; empty on legacy direct envelopes
+    pub payload:       Vec<u8>,   // serialized EncryptedPayload (Phase 3+) or raw bytes
+    pub timestamp:     i64,       // unix seconds
+    pub ttl:           i64,       // seconds
+    pub msg_type:      MessageType,
+    pub signature:     Vec<u8>,   // Ed25519 sig (direct path); empty on sealed envelopes
 }
 ```
 
-### 5.2 Canonical signing bytes
+Two authentication paths share the same struct. `is_sealed()` returns true iff `sealed_sender` is non-empty; the receiver routes to `verify` or `verify_sealed` based on that.
+
+### 5.2 Direct-path canonical signing bytes
 ```
-signing_bytes() =
-    "zerocenter-dm-v1"          // 16 bytes domain separator
+direct_signing_bytes() =
+    "zerocenter-dm-v1"          // domain separator
  || len_be32(to)    || to
  || len_be32(from)  || from
  || len_be32(payload) || payload
@@ -94,23 +97,46 @@ signing_bytes() =
 ```
 Length-prefixed; deterministic; excludes `signature` itself.
 
-### 5.3 Verification (`ProtocolMessage::verify`)
-1. Reject if signature is empty (MissingSignature).
-2. Parse `from` as PeerId.
-3. Reject if multihash code ≠ 0 (no inline public key).
-4. Decode protobuf public key from multihash digest.
-5. `Verify(pk, signing_bytes(), signature)` — if false, reject (BadSignature).
-6. Return the parsed PeerId.
+### 5.3 Sealed-path canonical signing bytes (Phase 5)
+```
+sealed_signing_bytes(sender_pid) =
+    "zerocenter-sealed-dm-v1"   // DISTINCT domain separator (§1)
+ || len_be32(to)         || to
+ || len_be32(sender_pid) || sender_pid
+ || len_be32(payload)    || payload
+ || i64_be(timestamp)
+ || i64_be(ttl)
+ || u8(msg_type)
+```
+Different domain from §5.2 so a captured direct signature can't be transplanted into a sealed envelope. `sender_pid` is passed in because the envelope's own `from` is empty for sealed envelopes — the PeerId lives inside `sealed_sender` and only appears after unsealing.
 
-### 5.4 Cross-check at receive
+### 5.4 Direct verification (`ProtocolMessage::verify`)
+1. Reject if `is_sealed()` (caller should route to `verify_sealed`).
+2. Reject if signature is empty (MissingSignature).
+3. Parse `from` as PeerId.
+4. Reject if multihash code ≠ 0 (no inline public key).
+5. Decode protobuf public key from multihash digest.
+6. `Verify(pk, direct_signing_bytes(), signature)` — if false, reject (BadSignature).
+7. Return the parsed PeerId.
+
+### 5.5 Sealed verification (`ProtocolMessage::verify_sealed`)
+1. Reject if not `is_sealed()`.
+2. Call `crypto::sealed::unseal_sender_cert(recipient_x25519_priv, sealed_sender)`. AEAD failure → SealDecryptFailed.
+3. Parse the cert as length-prefixed `sender_pid || signature`. Malformed → MalformedSealedCert.
+4. Extract sender pubkey from `sender_pid` (same multihash convention as §5.4).
+5. `Verify(pk, sealed_signing_bytes(sender_pid), signature)` — if false, reject (BadSignature).
+6. Return the recovered sender PeerId.
+
+### 5.6 Cross-check at receive (DIRECT path only)
 After `verify` returns the *signed* sender PeerId, the receiver also checks:
-- `transport_peer == verified_sender`. Reject otherwise. Prevents a connected peer relaying captured messages.
-- **Enforced at:** `src/core/node.rs::process_incoming_dm` (step 3).
+- `transport_peer == verified_sender`. Reject otherwise. Prevents a connected peer relaying captured direct messages.
+- **For sealed envelopes the cross-check is skipped** — the transport peer is decoupled from the signed sender by design.
+- **Enforced at:** `src/core/node.rs::process_incoming_dm` (step 3, gated on the `sealed` flag).
 
-### 5.5 Domain separator
-`zerocenter-dm-v1`. Kept at v1 across Phase 3 because the *signed-bytes layout* is unchanged — only the *contents* of `payload` migrated from plaintext to ciphertext. Bump only on layout change.
+### 5.7 Domain separators
+`zerocenter-dm-v1` (direct) and `zerocenter-sealed-dm-v1` (sealed). Distinct to prevent cross-path signature replay (INVARIANTS §1).
 
-**Files:** `src/protocol/message.rs:35-200`
+**Files:** `src/protocol/message.rs`, `src/crypto/sealed.rs`, `src/core/node.rs::process_incoming_dm`
 
 ## 6. End-to-end payload (`EncryptedPayload`)
 
@@ -405,6 +431,52 @@ When `--obfs-jitter-ms <MAX_MS>` is supplied alongside `--obfs-key`, every `poll
 - module: `src/network/scramble.rs`
 - transport wiring: `src/core/node.rs::P2PNode::start` (`with_other_transport` closure)
 - invariants: `audit/INVARIANTS.md` §17
+
+## 11A. Sealed sender (Phase 5 — shipped)
+
+**Goal.** Hide the sender's PeerId from network-transport observers (relays, DHT-mailbox providers, on-path nodes). The recipient is the only party who can recover the sender.
+
+### 11A.1 Sealing construction
+
+Per-message ECIES variant. Sender:
+
+1. Generate ephemeral X25519 `(e_priv, e_pub)`.
+2. `shared = X25519(e_priv, recipient_x25519_prekey_pub)`. Refused if `shared == 0` (low-order pubkey defence).
+3. `(aead_key, aead_nonce) = HKDF-SHA256(salt="zerocenter-sealed-sender-v1", ikm=shared, info="chacha-key-nonce")`, 44-byte expansion split as `(32, 12)`.
+4. `sender_cert = len_be32(sender_pid) || sender_pid || len_be32(signature) || signature`, where `signature` is over the sealed-path signing bytes (CRYPTO §5.3) under the sender's Ed25519 key.
+5. `aead_ct = ChaCha20-Poly1305-Encrypt(aead_key, aead_nonce, sender_cert, aad=empty)`.
+6. Wire: `e_pub (32 bytes) || aead_ct`. This goes into `ProtocolMessage::sealed_sender`.
+
+The ephemeral private key is dropped before the function returns.
+
+### 11A.2 Unsealing construction
+
+Recipient takes their long-term X25519 prekey private and the wire `sealed` bytes:
+
+1. Split `sealed` into `e_pub` (first 32 bytes) and `aead_ct` (rest).
+2. `shared = X25519(recipient_x25519_priv, e_pub)`. Refused if zero.
+3. Same HKDF derivation as §11A.1 step 3.
+4. `sender_cert = ChaCha20-Poly1305-Decrypt(aead_key, aead_nonce, aead_ct, aad=empty)`. AEAD failure → reject.
+5. Parse cert: `sender_pid`, `signature`. Malformed → reject.
+6. Extract sender's Ed25519 pubkey from `sender_pid` (multihash code 0).
+7. `Verify(sender_pk, sealed_signing_bytes(sender_pid), signature)`. Mismatch → reject.
+
+### 11A.3 Forward secrecy
+
+Per-message ephemeral private = per-message keystream. A later compromise of the recipient's prekey does NOT let an attacker decrypt past sealed envelopes — they would also need the ephemeral private, which was generated fresh, used once, and dropped.
+
+### 11A.4 What this layer does NOT hide
+
+- **Recipient PeerId.** The outer `to` field of `ProtocolMessage` is required for libp2p routing and (when delivered via DHT mailbox) for `slot_kad_key` derivation. Hiding the recipient needs onion routing — Phase 6 or later.
+- **First-contact fallback.** When the sender doesn't yet have the recipient's X25519 prekey cached (only happens on the very first send to a brand-new contact, before the prekey-fetch reply lands), the envelope falls back to the legacy direct path with a clear `from`. After the prekey is cached, all subsequent sends are sealed.
+- **ACK records.** Phase-5 mailbox ACKs (commit 6df48ef) publish at a Kad key derived from `(recipient, sender, slot)` with the recipient's PeerId as the value — a separate metadata leak not protected by sealed sender.
+
+**Files:**
+- module: `src/crypto/sealed.rs`
+- envelope: `src/protocol/message.rs::ProtocolMessage::{new_sealed, verify_sealed, sealed_signing_bytes}`
+- send-path selector: `src/core/node.rs::ratchet_encrypt_and_wrap` — picks sealed when `cached_prekey(peer)` is Some
+- recv-path router: `src/core/node.rs::process_incoming_dm` — routes by `is_sealed()`; skips §2 cross-check for sealed
+- invariants: `audit/INVARIANTS.md` §22
 
 ## 12. Random number generation
 

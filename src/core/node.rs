@@ -1099,15 +1099,33 @@ impl P2PNode {
             }
         };
 
-        let proto_msg = match ProtocolMessage::new_direct_signed(
-            peer.to_bytes(),
-            self.identity.peer_id().to_bytes(),
-            payload_bytes,
-            self.identity.keypair(),
-        ) {
+        // Phase 5 sealed sender: if we know the recipient's X25519
+        // prekey (cached from a previous fetch or current X3DH path)
+        // use `new_sealed` so transport-layer observers see only `to`
+        // and the encrypted payload — not our own sender PeerId.
+        // Falls back to the legacy direct path when the prekey isn't
+        // cached (typically only the very first send to a brand-new
+        // contact before the prekey-fetch reply has landed).
+        let proto_msg_result = if let Some(recipient_prekey) = self.cached_prekey(&peer) {
+            ProtocolMessage::new_sealed(
+                peer.to_bytes(),
+                self.identity.peer_id().to_bytes(),
+                payload_bytes,
+                self.identity.keypair(),
+                recipient_prekey.as_bytes(),
+            )
+        } else {
+            ProtocolMessage::new_direct_signed(
+                peer.to_bytes(),
+                self.identity.peer_id().to_bytes(),
+                payload_bytes,
+                self.identity.keypair(),
+            )
+        };
+        let proto_msg = match proto_msg_result {
             Ok(m) => m,
             Err(e) => {
-                error!("Failed to sign DM: {}", e);
+                error!("Failed to build outbound envelope: {}", e);
                 return None;
             }
         };
@@ -1596,19 +1614,41 @@ impl P2PNode {
         };
 
         // Step 2: verify the application-layer Ed25519 signature.
-        let verified_sender = match proto_msg.verify() {
-            Ok(s) => s,
-            Err(e) => {
-                warn!(
-                    "Dropping DM from transport peer {}: signature verification failed ({})",
-                    transport_peer, e
-                );
-                return false;
+        // Two paths: sealed envelopes need the recipient's X25519
+        // prekey private to unseal; direct envelopes verify against
+        // the clear `from` field.
+        let sealed = proto_msg.is_sealed();
+        let verified_sender = if sealed {
+            match proto_msg.verify_sealed(self.identity.x25519_secret()) {
+                Ok(s) => s,
+                Err(e) => {
+                    warn!(
+                        "Dropping sealed DM from transport peer {}: {}",
+                        transport_peer, e
+                    );
+                    return false;
+                }
+            }
+        } else {
+            match proto_msg.verify() {
+                Ok(s) => s,
+                Err(e) => {
+                    warn!(
+                        "Dropping DM from transport peer {}: signature verification failed ({})",
+                        transport_peer, e
+                    );
+                    return false;
+                }
             }
         };
 
-        // Step 3: transport peer must equal the signed sender.
-        if verified_sender != transport_peer {
+        // Step 3: transport peer must equal the signed sender — for
+        // direct envelopes only. Sealed envelopes intentionally
+        // decouple the transport peer (a relay / DHT-mailbox provider)
+        // from the signed sender; that's the whole point of Phase 5
+        // sealed sender. The signature inside the seal authenticates
+        // the sender; the transport peer is just a delivery agent.
+        if !sealed && verified_sender != transport_peer {
             warn!(
                 "Dropping DM: transport peer {} != signed sender {}",
                 transport_peer, verified_sender

@@ -12,7 +12,8 @@ This document enumerates the adversary capabilities the implementation is meant 
 | Cannot link two messages by content. | ✅ | Each message has a fresh `mk`; ciphertexts are pseudorandom. |
 | Cannot tell which DM session a message belongs to. | ⚠️ partial | The DH ratchet pubkey in the header is the same for many messages within a chain — observable correlator. Acceptable in this threat model. |
 | Cannot identify the protocol as ZeroCenter. | ❌ no | The libp2p Noise XX handshake is recognizable. Mitigation requires Phase 4b ScrambleStream wiring + Phase 4c full Obfs4. |
-| Cannot tell who is talking to whom. | ❌ no | Sender + recipient PeerIds are visible in `ProtocolMessage` and at the libp2p layer. Out of scope; needs onion routing. |
+| Cannot tell who is talking to whom (sender side). | ✅ partial | Phase 5 sealed sender encrypts the sender PeerId inside the envelope; transport-layer observers see only the recipient and an encrypted payload. Subject to the first-contact fallback window (single direct-path send per fresh contact before prekey cache is populated). See INVARIANTS §22. |
+| Cannot tell who is talking to whom (recipient side). | ❌ no | Recipient PeerId is in clear in `ProtocolMessage.to` and at the libp2p layer; needed for routing + DHT-mailbox `slot_kad_key`. Hiding the recipient requires onion routing — Phase 6+. |
 | Cannot tell how often or how much they talk. | ❌ no | Timing and size are unmodified. Out of scope. |
 
 ## B. Active on-path attacker (MITM)
@@ -55,7 +56,7 @@ This document enumerates the adversary capabilities the implementation is meant 
 | Cannot use OTPKs to impersonate. | ✅ | OTPK private bytes AEAD-encrypted. |
 | Cannot read your Ed25519 / X25519 long-term keys. | ❌ no | `identity.json` is **plaintext**. The chicken-and-egg of encrypting it requires another secret; known caveat. **This is the single biggest unencrypted-at-rest exposure.** Anyone with disk read can impersonate the user. |
 | Cannot tell who you talked to (just from the file). | ❌ no | PeerId columns are plaintext (used as indices). Contact list is in `contacts` table. |
-| Cannot tell what's queued for whom (just envelope). | ⚠️ partial | `outbox.peer_id` is plaintext; the *content* is encrypted but the recipient is visible. |
+| Cannot tell what's queued for whom (just envelope). | ⚠️ partial | `outbox.peer_id` is plaintext; the *content* is encrypted but the recipient is visible on disk. Note: outbox.peer_id is the RECIPIENT of our outbound queue, not the sender — sealed sender doesn't help here. Phase 5 metadata-privacy work (HMAC the column) would. |
 
 ## E. Compromised local user session (online attacker on your machine)
 

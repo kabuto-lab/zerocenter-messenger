@@ -17,7 +17,8 @@ If you find an invariant that's stated here but **not** enforced (or enforced in
 **Why.** Without this, a signature collected under one purpose (e.g. a DM) could be replayed under another (e.g. a future control message), forging assertions the user never made.
 
 **Enforced at.**
-- `src/protocol/message.rs::DOMAIN_SEPARATOR = "zerocenter-dm-v1"` — DM envelope.
+- `src/protocol/message.rs::DOMAIN_SEPARATOR = "zerocenter-dm-v1"` — direct-path DM envelope.
+- `src/protocol/message.rs::SEALED_DOMAIN_SEPARATOR = "zerocenter-sealed-dm-v1"` — Phase 5 sealed-path DM envelope (see §22). Distinct from the direct domain so a captured direct signature can't be transplanted into a sealed envelope or vice versa.
 - `src/core/identity.rs::PREKEY_SIG_DOMAIN = "zerocenter-prekey-v1"` — both signed prekey and OTPK (see §3).
 - `src/main.rs` safety-number handler hashes under `b"zerocenter-safety-v1"` — not a signature, but same hygiene.
 
@@ -25,15 +26,21 @@ If you find an invariant that's stated here but **not** enforced (or enforced in
 
 ---
 
-## §2. The PeerId of a signed sender is cross-checked against the transport peer
+## §2. The PeerId of a signed sender is cross-checked against the transport peer (DIRECT path only)
 
-**Statement.** When a DM arrives over `/zerocenter/direct-message/2.0.0`, the receiver verifies the application-layer Ed25519 signature AND checks that the libp2p transport-level peer matches the signed `from`. If either check fails, the message is dropped before any state change.
+**Statement.** When a DM arrives over `/zerocenter/direct-message/2.0.0` on the **direct path** (legacy: `from` + `signature` fields populated), the receiver verifies the application-layer Ed25519 signature AND checks that the libp2p transport-level peer matches the signed `from`. If either check fails, the message is dropped before any state change.
 
-**Why.** Without the cross-check, a connected peer can relay a captured message and the receiver would treat it as direct delivery (impacting offline-delivery semantics in the future).
+**For sealed-path envelopes** (Phase 5; see §22), the §3 transport-peer cross-check is **intentionally skipped**. The sender PeerId is encrypted inside the seal and decoupled from the transport-level source — this is the entire point of sealed sender. The inner signature inside the seal authenticates the sender; the transport peer is just a delivery agent (e.g. a DHT-mailbox provider). Skipping the cross-check is documented at the relevant code site.
 
-**Enforced at.** `src/core/node.rs::process_incoming_dm` steps 2 and 3.
+**Why (direct path).** Without the cross-check, a connected peer can relay a captured direct-DM message and the receiver would treat it as direct delivery (impacting offline-delivery semantics).
 
-**Suggested attack.** Build a transport peer that connects to victim and sends a captured `ProtocolMessage` signed by a third party. Cross-check should reject. If not — finding.
+**Why (sealed path).** A network observer relaying sealed envelopes doesn't know who sent them; we cannot meaningfully ask "did the transport peer match the signed sender" because we are explicitly trying to hide the sender from the transport. Authentication moves entirely to the inner signature.
+
+**Enforced at.** `src/core/node.rs::process_incoming_dm` steps 2 and 3. The `sealed` boolean gates whether step 3 runs.
+
+**Suggested attack (direct).** Build a transport peer that connects to victim and sends a captured direct-path `ProtocolMessage` signed by a third party. Cross-check should reject.
+
+**Suggested attack (sealed).** Substitute the `from` field of a captured envelope while keeping `sealed_sender` intact. The new "from" doesn't matter — `from` is empty for sealed envelopes anyway; what authenticates is the inner signature, which is bound to the original sender PeerId encoded inside the seal. Tampering with the seal's plaintext is prevented by AEAD; tampering with `to`/`payload`/`timestamp`/`ttl` is prevented by the signature scope inside the seal.
 
 ---
 
@@ -313,6 +320,49 @@ it could land in a remote log aggregator.
 **Suggested attack.** Tamper with a fetched `ProtocolMessage` value mid-DHT — flip a single bit in `record.value`. The recipient's `process_incoming_dm` invokes `ProtocolMessage::verify` first, which checks the Ed25519 signature; tamper detection is the same as for direct DMs. Mailbox storage does NOT add a separate integrity layer; the envelope signature suffices.
 
 **Suggested attack.** Drop a `ProtocolMessage` whose `from` field does NOT match the provider PeerId fronting the record. The `process_incoming_dm` cross-check (§2 step 2) rejects it; the inconsistency between transport-attribution and signed-sender is enough to drop the message before any state change.
+
+---
+
+## §22. Sealed-sender envelope authentication chain (Phase 5)
+
+**Statement.** When `ProtocolMessage::is_sealed()` is true, the sender's identity is encrypted inside `sealed_sender` and only the recipient (holder of the X25519 prekey private) can recover it. The authentication chain is:
+
+1. **AEAD decrypt** with `(key, nonce)` derived from `HKDF(salt="zerocenter-sealed-sender-v1", ikm=X25519(recipient_prekey_priv, sealed[..32]))`. The first 32 wire bytes are the sender's per-message ephemeral X25519 pubkey. AEAD failure → drop.
+2. **Cert parse:** length-prefixed `sender_pid_bytes || signature_bytes`. Malformed → drop.
+3. **Sender pubkey extraction** from `sender_pid` via the embedded-protobuf-pubkey convention (multihash code = 0x00). Failure → drop.
+4. **Signature verify** under the **sealed domain separator** `"zerocenter-sealed-dm-v1"` over `(to || sender_pid || payload || timestamp || ttl || msg_type)`. Mismatch → drop.
+
+If all four pass, the sender PeerId is authenticated and the message proceeds through `process_incoming_dm` exactly as a direct-path message would (modulo §2's transport-peer cross-check being skipped).
+
+**Why.** The sealed envelope hides the sender from the transport (relays, DHT-mailbox providers, on-path observers) while still allowing the recipient to verify the sender. The encryption guarantees confidentiality of the sender identity; the inner signature guarantees authenticity; the distinct domain separator (§1) prevents cross-path signature replay.
+
+**Per-message forward secrecy at the seal layer.** The per-message ephemeral X25519 private key is dropped at end of `seal_sender_cert` and never persisted. A later compromise of the recipient's prekey does NOT let an attacker decrypt past sealed envelopes — they would also need the ephemeral private, which is gone.
+
+**Limitations.**
+- **Recipient PeerId is still clear.** The outer `to` field is required for libp2p routing (and for DHT-mailbox `slot_kad_key` derivation). Hiding the recipient requires onion routing, out of scope for Phase 5.
+- **Timing / size correlation.** A passive observer who watches a sender's outbound TCP and a recipient's inbound TCP simultaneously can correlate by timing. The Phase 4c.2 frame padding and 4c.2′ jitter help but aren't sufficient against a global passive adversary.
+- **First-contact fallback.** When the sender has no cached prekey for the recipient yet, the envelope falls back to the direct path (clear `from`). This happens once per fresh contact — after the recipient's prekey is fetched and cached, all subsequent sends are sealed. The fallback window is observable; a future improvement is to fetch the prekey synchronously and only send sealed.
+- **ACK records are not sealed.** Phase-5 mailbox ACKs (commit 6df48ef) publish at `ack_kad_key(recipient, sender, slot)` with the recipient's PeerId as the value — that's a separate metadata leak. Documented; pluggable later.
+
+**Enforced at.**
+- `src/crypto/sealed.rs::seal_sender_cert` / `unseal_sender_cert` — the ECIES layer.
+- `src/protocol/message.rs::ProtocolMessage::new_sealed` — sealed envelope construction.
+- `src/protocol/message.rs::ProtocolMessage::verify_sealed` — recipient-side verification chain.
+- `src/protocol/message.rs::SEALED_DOMAIN_SEPARATOR` — domain hygiene with §1.
+- `src/core/node.rs::process_incoming_dm` — routes sealed vs direct based on `is_sealed()`, skips §2 for sealed.
+- `src/core/node.rs::ratchet_encrypt_and_wrap` — picks sealed envelope when `cached_prekey(peer)` returns Some.
+
+**Test coverage.**
+- `crypto::sealed::tests` (6 tests) — ECIES roundtrip, wrong-key fail, AEAD tamper detection, ephemeral tamper detection, too-short input, randomness of ephemerals across seals.
+- `protocol::message::tests::sealed_envelope_roundtrips_through_recipient` — end-to-end seal + unseal + signature verify.
+- `protocol::message::tests::sealed_envelope_rejected_by_wrong_recipient` — confirms the X25519 keying gate.
+- `protocol::message::tests::sealed_envelope_tampered_payload_fails_signature` — confirms the inner signature scope binds to the outer payload.
+- `protocol::message::tests::sealed_signature_uses_distinct_domain` — confirms a direct-path signature wrapped in a sealed envelope fails verify (domain hygiene with §1).
+- `protocol::message::tests::verify_sealed_rejects_direct_envelope` — and the inverse.
+
+**Suggested attack.** Capture a sealed envelope and replay it. The inner signature scope includes `timestamp` and `ttl`, so `process_incoming_dm`'s `is_expired()` check (audit F5) drops replays past the TTL. Within the TTL, the ratchet's already-consumed-mk check (§4 / §6) makes the second arrival a silent no-op.
+
+**Suggested attack.** Construct a sealed envelope addressed to victim, sealing a `sender_cert` with mallory's PeerId and mallory's signature. Victim decrypts the seal (mallory's signature verifies, mallory's identity is recovered as the sender). This is correct behavior — mallory really did send the envelope; sealed sender doesn't try to hide that. The recipient knows mallory is the author; the only protected secret is mallory's identity vis-à-vis the network transport. A reviewer should confirm the inner signature verifies under mallory's Ed25519 pubkey and rejects if any field (to/payload/ts/ttl/msg_type) was tampered.
 
 ---
 
