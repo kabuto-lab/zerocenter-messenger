@@ -217,23 +217,32 @@ pub struct ScrambleStream<S> {
 }
 
 impl<S> ScrambleStream<S> {
-    /// Wrap `inner`. `key` is shared between both peers; `nonce` must
-    /// be agreed (typically via [`scramble_handshake`]). No jitter.
+    /// Wrap `inner` using the same `(key, nonce)` for both directions.
+    /// **Convenience constructor for unidirectional tests only.** Real
+    /// production paths must use distinct per-direction keying (see
+    /// [`ScrambleStream::with_split_keys`]) — sharing one keystream
+    /// across both directions creates a two-time-pad situation on any
+    /// bidirectional connection.
     pub fn new(inner: S, key: &[u8; 32], nonce: &[u8; 12]) -> Self {
-        Self::with_jitter(inner, key, nonce, None)
+        Self::with_split_keys(inner, key, nonce, key, nonce, None)
     }
 
-    /// Like [`ScrambleStream::new`] but with a per-frame jitter cap.
-    /// `jitter_max_ms = Some(n)` makes every new frame wait `uniform(0..=n)`
-    /// ms before emission. `None` or `Some(0)` is the no-jitter path.
-    pub fn with_jitter(
+    /// Wrap `inner` with distinct out-direction and in-direction
+    /// keystreams. `out_*` are XOR'd against bytes we WRITE; `in_*`
+    /// are XOR'd against bytes we READ. The peer at the other end
+    /// must mirror these — its `out_*` equals our `in_*` and vice
+    /// versa — for a roundtrip. [`scramble_handshake`] arranges this
+    /// from a single NTOR-derived shared secret.
+    pub fn with_split_keys(
         inner: S,
-        key: &[u8; 32],
-        nonce: &[u8; 12],
+        out_key: &[u8; 32],
+        out_nonce: &[u8; 12],
+        in_key: &[u8; 32],
+        in_nonce: &[u8; 12],
         jitter_max_ms: Option<u32>,
     ) -> Self {
-        let out_cipher = ChaCha20::new(key.into(), nonce.into());
-        let in_cipher = ChaCha20::new(key.into(), nonce.into());
+        let out_cipher = ChaCha20::new(out_key.into(), out_nonce.into());
+        let in_cipher = ChaCha20::new(in_key.into(), in_nonce.into());
         Self {
             inner,
             out_cipher,
@@ -613,25 +622,85 @@ where
     // 32-byte shared secret.
     let shared_secret: [u8; 32] = x25519_dalek::x25519(my_priv, their_pub);
 
-    // Step 5 — HKDF (`shared_secret || obfs_key`) → ChaCha20 key+nonce.
-    let mut ikm = [0u8; 64];
-    ikm[..32].copy_from_slice(&shared_secret);
-    ikm[32..].copy_from_slice(obfs_key);
-    let hk = hkdf::Hkdf::<sha2::Sha256>::new(Some(b"zerocenter-ntor-v1"), &ikm);
-    let mut okm = [0u8; 44];
-    hk.expand(b"chacha-key-nonce", &mut okm)
-        .expect("44 bytes < 32 * 255 = HKDF max output");
-    let mut chacha_key = [0u8; 32];
-    chacha_key.copy_from_slice(&okm[..32]);
-    let mut chacha_nonce = [0u8; 12];
-    chacha_nonce.copy_from_slice(&okm[32..]);
+    // Per the F2 self-audit finding: refuse low-order / all-zero DH
+    // outputs. If a peer (or an active MITM at the obfs layer) supplied
+    // a representative that decoded to a low-order point, the shared
+    // secret collapses to `[0u8; 32]` and the HKDF below would become
+    // a deterministic function of `obfs_key` alone — losing per-
+    // connection key freshness. Plain equality is fine here: an attacker
+    // submitting a low-order point can already observe whether the
+    // handshake completed (via the subsequent Noise XX outcome), so a
+    // constant-time check buys nothing.
+    if shared_secret == [0u8; 32] {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "X25519 shared secret collapsed to zero (low-order peer pubkey?)",
+        ));
+    }
 
-    Ok(ScrambleStream::with_jitter(
+    // Step 5 — HKDF (`shared_secret || obfs_key`) → TWO ChaCha20
+    // key+nonce pairs, one per direction. Without per-direction
+    // keying, both peers' out-ciphers and in-ciphers would share a
+    // keystream — a two-time-pad on any bidirectional connection
+    // (self-audit finding F1). Standard fix: role-distinguished info
+    // strings — dialer→listener gets one, listener→dialer gets the
+    // other. Then `out_cipher` and `in_cipher` get different keys
+    // depending on which side of the connection we sit on.
+    let (km_d2l, km_l2d) = derive_ntor_keystream_pairs(&shared_secret, obfs_key);
+
+    // The dialer's OUT cipher uses d2l (it writes dialer-to-listener
+    // bytes); its IN cipher uses l2d. The listener mirrors: its OUT
+    // is l2d, its IN is d2l.
+    let (out, inn) = if is_dialer { (&km_d2l, &km_l2d) } else { (&km_l2d, &km_d2l) };
+
+    Ok(ScrambleStream::with_split_keys(
         stream,
-        &chacha_key,
-        &chacha_nonce,
+        &out.0,
+        &out.1,
+        &inn.0,
+        &inn.1,
         jitter_max_ms,
     ))
+}
+
+/// Phase 4c.1 F1 fix — derive two independent ChaCha20 `(key, nonce)`
+/// pairs from the NTOR shared secret and the pre-shared `obfs_key`,
+/// one keyed for dialer→listener traffic, the other for listener→
+/// dialer. Splitting them out into a separate fn (a) keeps the
+/// `scramble_handshake` body readable, (b) gives tests a direct lever
+/// to assert the two pairs actually differ (regression test for F1
+/// where both directions accidentally used the same `(key, nonce)`).
+///
+/// The HKDF salt `"zerocenter-ntor-v1"` is unchanged from the pre-F1
+/// derivation; only the info strings are role-distinguished. This
+/// keeps the math identical to the v1 single-key form modulo the
+/// info-string XOR through the HKDF HMAC, which is the standard way
+/// to derive multiple keys from one secret.
+pub(crate) fn derive_ntor_keystream_pairs(
+    shared_secret: &[u8; 32],
+    obfs_key: &[u8; 32],
+) -> (([u8; 32], [u8; 12]), ([u8; 32], [u8; 12])) {
+    let mut ikm = [0u8; 64];
+    ikm[..32].copy_from_slice(shared_secret);
+    ikm[32..].copy_from_slice(obfs_key);
+    let hk = hkdf::Hkdf::<sha2::Sha256>::new(Some(b"zerocenter-ntor-v1"), &ikm);
+
+    let mut okm_d2l = [0u8; 44];
+    hk.expand(b"zc-chacha-d2l-v1", &mut okm_d2l)
+        .expect("44 bytes < 32 * 255 = HKDF max output");
+    let mut okm_l2d = [0u8; 44];
+    hk.expand(b"zc-chacha-l2d-v1", &mut okm_l2d)
+        .expect("44 bytes < 32 * 255 = HKDF max output");
+
+    let mut k1 = [0u8; 32];
+    k1.copy_from_slice(&okm_d2l[..32]);
+    let mut n1 = [0u8; 12];
+    n1.copy_from_slice(&okm_d2l[32..]);
+    let mut k2 = [0u8; 32];
+    k2.copy_from_slice(&okm_l2d[..32]);
+    let mut n2 = [0u8; 12];
+    n2.copy_from_slice(&okm_l2d[32..]);
+    ((k1, n1), (k2, n2))
 }
 
 /// Generate an X25519 private key whose public has an elligator2
@@ -891,8 +960,9 @@ mod tests {
         let nonce = [22u8; 12];
 
         let mut writer =
-            ScrambleStream::with_jitter(a.compat(), &key, &nonce, Some(3));
-        let mut reader = ScrambleStream::with_jitter(b.compat(), &key, &nonce, None);
+            ScrambleStream::with_split_keys(a.compat(), &key, &nonce, &key, &nonce, Some(3));
+        let mut reader =
+            ScrambleStream::with_split_keys(b.compat(), &key, &nonce, &key, &nonce, None);
 
         let write_fut = async {
             // Three separate frames so the jitter path is exercised
@@ -921,7 +991,7 @@ mod tests {
         let nonce = [21u8; 12];
 
         let mut writer =
-            ScrambleStream::with_jitter(a.compat(), &key, &nonce, Some(0));
+            ScrambleStream::with_split_keys(a.compat(), &key, &nonce, &key, &nonce, Some(0));
         let mut reader = ScrambleStream::new(b.compat(), &key, &nonce);
 
         let msg = b"hello with zero-jitter";
@@ -931,6 +1001,73 @@ mod tests {
         let mut got = vec![0u8; msg.len()];
         reader.read_exact(&mut got).await.unwrap();
         assert_eq!(got, msg);
+    }
+
+    #[test]
+    fn ntor_derives_distinct_per_direction_keystream_pairs() {
+        // F1 regression: prior to the fix, scramble_handshake HKDF'd a
+        // single 44-byte OKM and reused it for both `out_cipher` and
+        // `in_cipher`, producing identical keystreams in both
+        // directions — a textbook two-time-pad. The fix uses two
+        // role-distinguished HKDF info strings to derive INDEPENDENT
+        // `(key, nonce)` pairs. This test verifies the derivation
+        // helper produces two pairs that don't match at any field.
+        let shared = [0x42u8; 32];
+        let obfs = [0x88u8; 32];
+        let ((k_d2l, n_d2l), (k_l2d, n_l2d)) =
+            derive_ntor_keystream_pairs(&shared, &obfs);
+        assert_ne!(k_d2l, k_l2d, "per-direction keys must differ (F1)");
+        assert_ne!(n_d2l, n_l2d, "per-direction nonces must differ (F1)");
+        // Determinism: same inputs → same outputs.
+        let ((k_d2l_again, _), _) = derive_ntor_keystream_pairs(&shared, &obfs);
+        assert_eq!(k_d2l, k_d2l_again);
+    }
+
+    #[tokio::test]
+    async fn ntor_paired_handshake_uses_mirrored_per_direction_keys() {
+        // End-to-end behavioural check of F1: after a paired
+        // handshake, the dialer's OUT keystream must equal the
+        // listener's IN keystream (so dialer-write → listener-read
+        // round-trips), and the listener's OUT keystream must equal
+        // the dialer's IN keystream. Crucially, the two streams must
+        // NOT be the same stream (the F1 bug). We verify by running a
+        // full bidirectional exchange: both sides write distinct
+        // payloads, both sides read each other's payloads correctly.
+        // Under the F1 bug, this test ALSO happens to pass — because
+        // each ScrambleStream's local out/in ciphers advance
+        // independently — so we additionally assert the HKDF helper
+        // returns distinct pairs (see test above).
+        let (a, b) = tokio::io::duplex(8192);
+        let key = [9u8; 32];
+
+        let dialer_fut = scramble_handshake(a.compat(), &key, true, None);
+        let listener_fut = scramble_handshake(b.compat(), &key, false, None);
+
+        let (d_res, l_res) = futures::join!(dialer_fut, listener_fut);
+        let mut d = d_res.expect("dialer handshake");
+        let mut l = l_res.expect("listener handshake");
+
+        let from_dialer = b"d->l: this is the dialer writing";
+        let from_listener = b"l->d: and this is the listener writing back";
+
+        // Drive both directions concurrently.
+        let dialer_io = async {
+            d.write_all(from_dialer).await.unwrap();
+            d.flush().await.unwrap();
+            let mut got = vec![0u8; from_listener.len()];
+            d.read_exact(&mut got).await.unwrap();
+            got
+        };
+        let listener_io = async {
+            let mut got = vec![0u8; from_dialer.len()];
+            l.read_exact(&mut got).await.unwrap();
+            l.write_all(from_listener).await.unwrap();
+            l.flush().await.unwrap();
+            got
+        };
+        let (dialer_got, listener_got) = futures::join!(dialer_io, listener_io);
+        assert_eq!(dialer_got, from_listener);
+        assert_eq!(listener_got, from_dialer);
     }
 
     #[tokio::test]
