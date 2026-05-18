@@ -138,10 +138,29 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for MaybeScrambled<S> {
 /// header (~10 B) sizes inside a common bucket.
 pub const FRAME_QUANTUM: usize = 256;
 
-/// Maximum payload bytes per frame, dictated by the u16 length header.
-/// `poll_write` caps `buf` to this and returns `Ok(MAX_PAYLOAD)`; the
-/// caller (typically `AsyncWriteExt::write_all`) re-calls for the rest.
-pub const MAX_PAYLOAD_PER_FRAME: usize = u16::MAX as usize;
+/// Hard upper bound on `ScrambleStream::pending`. A `poll_write` builds
+/// AT MOST one frame per call, and our `drain_pending`-first discipline
+/// guarantees `pending` is empty before we build, so the in-process
+/// invariant is `pending.len() ≤ MAX_FRAME_SIZE` at any await point.
+/// We make this explicit at the value `4 × FRAME_QUANTUM = 1024` and
+/// constrain [`MAX_PAYLOAD_PER_FRAME`] so a single built frame can
+/// never exceed it.
+///
+/// **Why this also matters on the wire.** Capping the max frame size
+/// at the bound tightens the obfs fingerprint: every observed frame
+/// sits in one of `{256, 512, 768, 1024}` bytes, instead of being any
+/// 256-multiple up to ~65 KiB. Larger writes are split into multiple
+/// bounded frames by `write_all`'s natural retry loop, so callers
+/// notice nothing at the API.
+pub const MAX_PENDING_BYTES: usize = 4 * FRAME_QUANTUM;
+
+/// Maximum payload bytes per frame. Set so the largest frame we build
+/// (header + payload + pad rounded up to a `FRAME_QUANTUM`-multiple) is
+/// exactly [`MAX_PENDING_BYTES`]. With a 2-byte length header and 256-
+/// byte quantum: `MAX_PAYLOAD_PER_FRAME = 4 × 256 − 2 = 1022`. Writes
+/// larger than this are split into multiple frames by the caller's
+/// natural `write_all` retry loop; no API surface change.
+pub const MAX_PAYLOAD_PER_FRAME: usize = MAX_PENDING_BYTES - 2;
 
 /// What the reader expects on the wire next.
 enum ReadState {
@@ -417,6 +436,12 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for ScrambleStream<S> {
                 if n < frame.len() {
                     this.pending.extend_from_slice(&frame[n..]);
                 }
+                debug_assert!(
+                    this.pending.len() <= MAX_PENDING_BYTES,
+                    "pending exceeded bound: {} > {}",
+                    this.pending.len(),
+                    MAX_PENDING_BYTES
+                );
                 // Caller-visible: we accepted `payload_len` of their
                 // bytes. The pad + length-header overhead is invisible
                 // to them.
@@ -430,6 +455,12 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for ScrambleStream<S> {
             Poll::Pending => {
                 // Park the scrambled frame; the next drain will ship it.
                 this.pending.extend_from_slice(&frame);
+                debug_assert!(
+                    this.pending.len() <= MAX_PENDING_BYTES,
+                    "pending exceeded bound: {} > {}",
+                    this.pending.len(),
+                    MAX_PENDING_BYTES
+                );
                 Poll::Ready(Ok(payload_len))
             }
         }
@@ -810,6 +841,42 @@ mod tests {
         };
         let (_, got) = futures::join!(write_fut, read_fut);
         assert_eq!(got, msg, "1000-byte message must survive many short writes");
+    }
+
+    #[tokio::test]
+    async fn large_payload_respects_pending_bound() {
+        // Writing 10 KiB through a 200-byte inner duplex forces many
+        // pending-park cycles: every frame is ~1024 bytes but the
+        // duplex can hold only 200. The debug_assert! in poll_write
+        // panics if `pending` ever exceeds MAX_PENDING_BYTES — so a
+        // clean round-trip AND no panic ⇒ the bound holds.
+        let (a, b) = tokio::io::duplex(200);
+        let key = [55u8; 32];
+        let nonce = [11u8; 12];
+
+        let mut writer = ScrambleStream::new(a.compat(), &key, &nonce);
+        let mut reader = ScrambleStream::new(b.compat(), &key, &nonce);
+
+        let msg: Vec<u8> = (0..10_000u32).map(|i| (i % 251) as u8).collect();
+
+        let write_fut = async {
+            writer.write_all(&msg).await.unwrap();
+            writer.flush().await.unwrap();
+            writer.close().await.unwrap();
+        };
+        let read_fut = async {
+            let mut got = Vec::new();
+            reader.read_to_end(&mut got).await.unwrap();
+            got
+        };
+        let (_, got) = futures::join!(write_fut, read_fut);
+        assert_eq!(got, msg, "10 KiB must roundtrip across the small duplex");
+
+        // Compile-time invariants this test relies on. If the bound
+        // changes in the future, these `const _` lines force the
+        // updater to revisit the test.
+        const _: () = assert!(MAX_PENDING_BYTES == 4 * FRAME_QUANTUM);
+        const _: () = assert!(MAX_PAYLOAD_PER_FRAME == MAX_PENDING_BYTES - 2);
     }
 
     #[tokio::test]

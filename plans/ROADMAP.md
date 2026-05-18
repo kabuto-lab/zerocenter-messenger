@@ -24,7 +24,7 @@ Living document tracking what's done, what's in flight, and what's queued. Last 
 | Group chats (Megolm-style) | ❌ |
 | Deniability | ❌ (intentional non-deniability for v1) |
 
-Build: rustc 1.95 / cargo 1.95 / VS Build Tools. `cargo test --lib`: 55/55 (52 after 4c.2′ + Phase 4c.1's net-new tests: `ntor_mismatched_obfs_keys_yield_unreadable_stream`, `ntor_handshake_first_32_bytes_look_uniform`, `representable_keypair_succeeds`; the legacy `handshake_exchanges_nonce_and_roundtrips` test was replaced 1:1 by `ntor_handshake_roundtrips`). `target/release/zerocenter.exe` is ~9.19 MB and tracked in-tree.
+Build: rustc 1.95 / cargo 1.95 / VS Build Tools. `cargo test --lib`: 56/56 (55 after 4c.1 + the new `large_payload_respects_pending_bound` test added when the pending buffer was hard-bounded). `target/release/zerocenter.exe` is ~9.19 MB and tracked in-tree.
 
 ## Done — chronological commits
 
@@ -89,7 +89,7 @@ _None._ Phase 4c is complete: 4b (XOR + ScrambleStream wired into transport) + 4
 ## Known debt (not phase-tagged)
 
 - `audit/README.md` and `audit/INVARIANTS.md` need a refresh whenever framing/jitter changes the threat-model story. The "build status" table in `audit/README.md` is now accurate but the source-tree paragraph hasn't grown the framing additions.
-- `ScrambleStream`'s `pending: Vec<u8>` has no upper bound. A misbehaving inner that never accepts writes would let this grow unboundedly. Bound by something like 4 × FRAME_QUANTUM and return `WouldBlock` past that — Phase 4c.2′ candidate.
+- ~~`ScrambleStream`'s `pending: Vec<u8>` has no upper bound.~~ Bounded at `MAX_PENDING_BYTES = 4 × FRAME_QUANTUM = 1024` bytes. `MAX_PAYLOAD_PER_FRAME` lowered to `MAX_PENDING_BYTES − 2 = 1022` so each built frame fits in the bound; `debug_assert!` guards every modification of `pending`. (Side benefit: wire-level frame size is now ≤ 1024 bytes always, tightening the obfs fingerprint.)
 - `pending_sends` / `pending_recvs` / `cached_otpks` on `P2PNode` are in-memory only (INVARIANTS §16). A `send` issued mid-prekey-fetch is lost on restart. Persistent table would fix; see INVARIANTS §16 for the trade-off.
 - `info!`-level log lines still mention PeerIds verbatim everywhere. Plaintext is fixed (INVARIANTS §19) but PeerIds are still metadata. For high-paranoia deployments we'd want a config to redact those too.
 - QUIC re-enable: ring 0.17.14 built fine on the current MSVC toolchain in this session. The `[[project-quic-disabled]]` blocker may already be obsolete — needs a real test. Re-enable `quic` in `Cargo.toml`, restore `.with_quic()` in `node.rs::start` after `with_other_transport(...)`, run two-peer smoke.
