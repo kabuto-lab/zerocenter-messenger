@@ -142,11 +142,12 @@ impl MessageStore {
         // a disk-read attacker can't see queued messages.
         conn.execute(
             "CREATE TABLE IF NOT EXISTS outbox (
-                id           INTEGER PRIMARY KEY AUTOINCREMENT,
-                peer_id      BLOB NOT NULL,
-                ciphertext   BLOB NOT NULL,
-                created_at   INTEGER NOT NULL,
-                ttl          INTEGER NOT NULL
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                peer_id       BLOB NOT NULL,
+                ciphertext    BLOB NOT NULL,
+                created_at    INTEGER NOT NULL,
+                ttl           INTEGER NOT NULL,
+                is_wire_bytes INTEGER NOT NULL DEFAULT 0
             )",
             [],
         )?;
@@ -154,6 +155,26 @@ impl MessageStore {
             "CREATE INDEX IF NOT EXISTS idx_outbox_peer ON outbox(peer_id)",
             [],
         )?;
+
+        // Phase 5 mailbox encrypt-once: pre-existing databases that
+        // predate the `is_wire_bytes` column get it via a one-shot
+        // migration. SQLite's `ALTER TABLE ADD COLUMN` is idempotent
+        // when the column is absent and errors otherwise — we ignore
+        // the "duplicate column" error to keep startup clean. New
+        // databases pick up the column at CREATE time above.
+        if let Err(e) = conn.execute(
+            "ALTER TABLE outbox ADD COLUMN is_wire_bytes INTEGER NOT NULL DEFAULT 0",
+            [],
+        ) {
+            // rusqlite returns a SqliteFailure with extended code
+            // SQLITE_ERROR for "duplicate column name"; the message
+            // contains "duplicate column". Any other ALTER failure
+            // surfaces.
+            let msg = format!("{}", e);
+            if !msg.contains("duplicate column") {
+                return Err(e.into());
+            }
+        }
 
         // DHT-mailbox drops we have published on behalf of the local
         // user. Used to drive republish-before-Kad-TTL-expires and to
@@ -568,31 +589,68 @@ impl MessageStore {
 
     /// Queue a plaintext message for later delivery to `peer_id`. The
     /// content is AEAD-encrypted before persisting. Returns the row id.
+    /// Used on the "no session yet" offline path where we can't ratchet-
+    /// encrypt up front; `drain_outbox_for` will re-feed the plaintext
+    /// through `try_send_or_queue` and encrypt then.
     pub fn outbox_add(&self, peer_id: &[u8], plaintext: &[u8], ttl_secs: i64) -> Result<i64> {
         let enc = self.encrypt_at_rest(plaintext);
         self.conn.execute(
-            "INSERT INTO outbox (peer_id, ciphertext, created_at, ttl)
-             VALUES (?1, ?2, ?3, ?4)",
+            "INSERT INTO outbox (peer_id, ciphertext, created_at, ttl, is_wire_bytes)
+             VALUES (?1, ?2, ?3, ?4, 0)",
+            params![peer_id, enc, chrono_time(), ttl_secs],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Phase 5 mailbox encrypt-once: queue an ALREADY-encrypted
+    /// `ProtocolMessage` (wire bytes that would have gone over the
+    /// live `request-response` channel) for later delivery to
+    /// `peer_id`. The wire bytes are AEAD-encrypted again at rest under
+    /// the local DEK. `drain_outbox_for` sends these bytes directly
+    /// via `request_response::send_request` without re-encrypting,
+    /// guaranteeing that the recipient sees identical ciphertext for
+    /// the direct-delivery and mailbox-fetch paths.
+    pub fn outbox_add_wire(
+        &self,
+        peer_id: &[u8],
+        wire_bytes: &[u8],
+        ttl_secs: i64,
+    ) -> Result<i64> {
+        let enc = self.encrypt_at_rest(wire_bytes);
+        self.conn.execute(
+            "INSERT INTO outbox (peer_id, ciphertext, created_at, ttl, is_wire_bytes)
+             VALUES (?1, ?2, ?3, ?4, 1)",
             params![peer_id, enc, chrono_time(), ttl_secs],
         )?;
         Ok(self.conn.last_insert_rowid())
     }
 
     /// Return all unsent outbox entries for `peer_id`, oldest first.
-    /// Each entry is `(row_id, plaintext)` — caller must delete the row
-    /// after successful delivery. Rows whose ciphertext fails to
-    /// decrypt are skipped (logged at warn).
-    pub fn outbox_get_for(&self, peer_id: &[u8]) -> Result<Vec<(i64, Vec<u8>)>> {
+    /// Each entry is `(row_id, content, is_wire_bytes)`:
+    /// - `is_wire_bytes = false` → `content` is plaintext; the caller
+    ///   should re-feed it through the normal encrypt path.
+    /// - `is_wire_bytes = true` → `content` is the encrypted
+    ///   `ProtocolMessage` wire bytes; the caller should send them
+    ///   directly without re-encrypting.
+    /// Caller must `outbox_delete` after successful delivery in either
+    /// case. Rows whose at-rest blob fails to decrypt are skipped
+    /// (logged at warn).
+    pub fn outbox_get_for(&self, peer_id: &[u8]) -> Result<Vec<(i64, Vec<u8>, bool)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, ciphertext FROM outbox WHERE peer_id = ?1 ORDER BY id ASC",
+            "SELECT id, ciphertext, is_wire_bytes
+             FROM outbox WHERE peer_id = ?1 ORDER BY id ASC",
         )?;
-        let rows: Vec<(i64, Vec<u8>)> = stmt
+        let rows: Vec<(i64, Vec<u8>, bool)> = stmt
             .query_map(params![peer_id], |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, i64>(2)? != 0,
+                ))
             })?
             .filter_map(|r| r.ok())
-            .filter_map(|(id, enc)| match self.decrypt_at_rest(&enc) {
-                Ok(plain) => Some((id, plain)),
+            .filter_map(|(id, enc, is_wire)| match self.decrypt_at_rest(&enc) {
+                Ok(content) => Some((id, content, is_wire)),
                 Err(e) => {
                     tracing::warn!("Skipping outbox row id={}: {}", id, e);
                     None
@@ -1000,14 +1058,42 @@ mod tests {
 
         let queued = store.outbox_get_for(&peer).unwrap();
         assert_eq!(queued.len(), 2);
-        assert_eq!(queued[0], (id1, b"hello bob".to_vec()));
-        assert_eq!(queued[1], (id2, b"and a follow-up".to_vec()));
+        // The plaintext path returns is_wire_bytes = false.
+        assert_eq!(queued[0], (id1, b"hello bob".to_vec(), false));
+        assert_eq!(queued[1], (id2, b"and a follow-up".to_vec(), false));
 
         // After delivery, caller deletes.
         store.outbox_delete(id1).unwrap();
         let after = store.outbox_get_for(&peer).unwrap();
         assert_eq!(after.len(), 1);
         assert_eq!(after[0].0, id2);
+    }
+
+    #[test]
+    fn outbox_add_wire_round_trips_with_kind_flag() {
+        // Phase 5: outbox_add_wire stores already-encrypted bytes and
+        // returns them via outbox_get_for tagged is_wire_bytes = true,
+        // so the drain path knows not to re-encrypt.
+        let dir = tempdir().unwrap();
+        let store = MessageStore::open(dir.path(), test_dek()).unwrap();
+        let peer = [11u8; 38];
+
+        let plain_id = store.outbox_add(&peer, b"plaintext one", 60).unwrap();
+        let wire_id = store
+            .outbox_add_wire(&peer, b"opaque-protocol-message-bytes", 60)
+            .unwrap();
+
+        let queued = store.outbox_get_for(&peer).unwrap();
+        assert_eq!(queued.len(), 2);
+        // Insertion order preserved.
+        let (got_plain_id, got_plain, got_plain_wire) = &queued[0];
+        let (got_wire_id, got_wire, got_wire_wire) = &queued[1];
+        assert_eq!(*got_plain_id, plain_id);
+        assert_eq!(got_plain.as_slice(), b"plaintext one");
+        assert!(!got_plain_wire, "plaintext rows must report is_wire_bytes=false");
+        assert_eq!(*got_wire_id, wire_id);
+        assert_eq!(got_wire.as_slice(), b"opaque-protocol-message-bytes");
+        assert!(got_wire_wire, "wire rows must report is_wire_bytes=true");
     }
 
     #[test]

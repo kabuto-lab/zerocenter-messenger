@@ -840,30 +840,46 @@ impl P2PNode {
         // We accept that this doesn't help the "both never online at
         // once" case; that needs a relay layer, which is its own feature.
         if !self.connected_peers.contains_key(&peer) {
-            // Two parallel offline-delivery paths: (a) the persistent
-            // outbox handles "they come back to us directly"; (b) the
-            // DHT mailbox handles "they don't, but they're online
-            // somewhere in the Kad network." Both run unconditionally
-            // on the offline branch — the recipient's ratchet
-            // `try_skipped` cache silently dedupes the same ciphertext
-            // arriving via two paths.
-            if let Some(ref store) = self.message_store {
-                match store.outbox_add(&peer.to_bytes(), plaintext.as_bytes(), 7 * 24 * 3600) {
-                    Ok(_) => {
-                        info!("Peer {} not connected — queued in outbox", peer);
-                        println!("📭 Peer not connected — message queued (will send when peer appears)");
-                    }
-                    Err(e) => {
-                        error!("Failed to add to outbox for {}: {}", peer, e);
-                    }
-                }
+            // Phase 5 encrypt-once. If we can ratchet-encrypt right
+            // now (session exists OR cached prekey allows X3DH
+            // bootstrap), do it ONCE and feed the same ciphertext into
+            // BOTH the outbox AND the mailbox publish — so when the
+            // recipient eventually receives the message via either
+            // path, the OTHER path's copy is byte-identical and the
+            // ratchet's already-consumed-mk check makes the second
+            // arrival a silent no-op. No more F8 duplicate delivery.
+            //
+            // If we can't encrypt yet (no session, no cached prekey),
+            // fall through to the legacy plaintext outbox path. The
+            // mailbox can't help — the recipient hasn't published a
+            // prekey to us — so they must come online to us directly
+            // for the first message.
+            let outbox_result = if let Some(wire_bytes) =
+                self.try_encrypt_offline(peer, &plaintext)
+            {
+                self.put_mailbox_drop_bytes(swarm, peer, &wire_bytes);
+                self.message_store.as_ref().map(|store| {
+                    store.outbox_add_wire(&peer.to_bytes(), &wire_bytes, 7 * 24 * 3600)
+                })
             } else {
-                error!("No message store available; message to {} is lost", peer);
+                self.message_store.as_ref().map(|store| {
+                    store.outbox_add(&peer.to_bytes(), plaintext.as_bytes(), 7 * 24 * 3600)
+                })
+            };
+            match outbox_result {
+                Some(Ok(_)) => {
+                    info!("Peer {} not connected — queued in outbox", peer);
+                    println!(
+                        "📭 Peer not connected — message queued (will send when peer appears)"
+                    );
+                }
+                Some(Err(e)) => {
+                    error!("Failed to add to outbox for {}: {}", peer, e);
+                }
+                None => {
+                    error!("No message store available; message to {} is lost", peer);
+                }
             }
-            // The mailbox publish is best-effort and a no-op when we
-            // have no session and no cached prekey (can't encrypt). It
-            // logs internally and never blocks the outbox path.
-            self.publish_mailbox_drop(swarm, peer, &plaintext);
             return;
         }
 
@@ -889,10 +905,18 @@ impl P2PNode {
     }
 
     /// Drain the on-disk outbox for `peer`. Called when a peer becomes
-    /// reachable (ConnectionEstablished or mDNS discovery). Each queued
-    /// plaintext is fed back into `try_send_or_queue` — which now sees
-    /// the peer as connected, so it proceeds through the normal
-    /// encrypt-and-send path (including prekey fetch if needed).
+    /// reachable (ConnectionEstablished or mDNS discovery). Two row
+    /// kinds, distinguished by `is_wire_bytes`:
+    ///
+    /// - `false` (legacy / no-session-at-queue-time): content is
+    ///   plaintext. Re-feed through `try_send_or_queue`, which encrypts
+    ///   now (session probably exists by now, having just connected).
+    /// - `true` (Phase 5 encrypt-once): content is the already-encrypted
+    ///   `ProtocolMessage` wire bytes. Send directly via
+    ///   `request_response::send_request` so the recipient sees the
+    ///   byte-identical ciphertext that was published to the DHT —
+    ///   ratchet dedup makes the second arrival a no-op.
+    ///
     /// The outbox row is deleted only after the message is handed off.
     fn drain_outbox_for(&mut self, swarm: &mut Swarm<Behaviour>, peer: PeerId) {
         let entries = match self.message_store.as_ref() {
@@ -911,9 +935,23 @@ impl P2PNode {
         }
         info!("Draining {} outbox entries for {}", entries.len(), peer);
 
-        for (row_id, plaintext_bytes) in entries {
-            let plaintext = String::from_utf8_lossy(&plaintext_bytes).into_owned();
-            self.try_send_or_queue(swarm, peer, plaintext);
+        for (row_id, content, is_wire) in entries {
+            if is_wire {
+                // Phase 5 encrypt-once: send the stored ProtocolMessage
+                // bytes directly. The ratchet has already advanced for
+                // this message at outbox-add time; re-encrypting now
+                // would produce a different ciphertext and the
+                // recipient would treat them as two distinct messages.
+                debug!("Draining outbox row {} for {} as wire bytes ({}B)",
+                    row_id, peer, content.len());
+                swarm
+                    .behaviour_mut()
+                    .request_response
+                    .send_request(&peer, DirectMessageRequest(content));
+            } else {
+                let plaintext = String::from_utf8_lossy(&content).into_owned();
+                self.try_send_or_queue(swarm, peer, plaintext);
+            }
             if let Some(ref store) = self.message_store {
                 if let Err(e) = store.outbox_delete(row_id) {
                     warn!("Failed to delete outbox row {}: {}", row_id, e);
@@ -1078,85 +1116,75 @@ impl P2PNode {
         Some((wire_bytes, ttl))
     }
 
-    /// Phase-4-mailbox publish path. If we can encrypt for `peer` right
-    /// now (session exists OR cached prekey allows X3DH bootstrap), drop
-    /// the resulting wire bytes into the DHT at
-    /// `(slot_kad_key, drop_kad_key)` and record the row so the
-    /// republish tick keeps it alive until `expires_at` or ACK.
+    /// Phase 5 encrypt-once helper. Performs the ratchet encryption
+    /// (existing session OR fresh X3DH bootstrap from a cached prekey)
+    /// for `peer` and returns the resulting `ProtocolMessage` wire
+    /// bytes. Returns `None` if neither encryption path is available
+    /// (no session and no cached prekey — typical for a brand-new
+    /// contact whose prekey we've never fetched).
     ///
-    /// Called from `try_send_or_queue` *in addition to* `outbox_add` on
-    /// the offline path. The outbox handles "they come back to us
-    /// directly"; the mailbox handles "they don't, but they're online
-    /// somewhere on the Kad network."
+    /// Centralizing the encryption here lets the offline branch of
+    /// `try_send_or_queue` encrypt EXACTLY ONCE and feed the same
+    /// wire bytes into both the persistent outbox and the DHT mailbox
+    /// publish path, so the recipient sees one ciphertext (not two
+    /// distinct ones at different ratchet positions — audit F8).
+    fn try_encrypt_offline(&mut self, peer: PeerId, plaintext: &str) -> Option<Vec<u8>> {
+        if self.restore_session_if_persisted(&peer) {
+            return self
+                .ratchet_encrypt_and_wrap(peer, plaintext, None)
+                .map(|(b, _ttl)| b);
+        }
+        let prekey_pub = self.cached_prekey(&peer)?;
+        // Inline X3DH bootstrap (parallel to `bootstrap_initiator_and_send`
+        // but without the network send — the wire bytes are returned
+        // to the caller for delivery via outbox + mailbox).
+        let hello = match self.cached_otpks.remove(&peer) {
+            Some(otpk_bundle) => {
+                let otpk_pub = X25519Pub::from(otpk_bundle.x25519_public);
+                let (eph_pub, sk) = x3dh::initiator_derive_with_otpk(
+                    self.identity.x25519_secret(),
+                    &prekey_pub,
+                    &otpk_pub,
+                );
+                let session = RatchetState::new_initiator(sk, prekey_pub);
+                self.sessions.insert(peer, session);
+                FirstMessageHello {
+                    x3dh_eph: eph_pub,
+                    otpk_id: Some(otpk_bundle.id),
+                }
+            }
+            None => {
+                let (eph_pub, sk) = x3dh::initiator_derive(
+                    self.identity.x25519_secret(),
+                    &prekey_pub,
+                );
+                let session = RatchetState::new_initiator(sk, prekey_pub);
+                self.sessions.insert(peer, session);
+                FirstMessageHello {
+                    x3dh_eph: eph_pub,
+                    otpk_id: None,
+                }
+            }
+        };
+        self.ratchet_encrypt_and_wrap(peer, plaintext, Some(hello))
+            .map(|(b, _ttl)| b)
+    }
+
+    /// Phase 5 encrypt-once helper. Publishes pre-encrypted
+    /// `ProtocolMessage` wire bytes to the DHT mailbox at
+    /// `(slot_kad_key(recipient, slot), drop_kad_key(recipient, self, slot))`.
+    /// Records the drop locally so the republish loop keeps it alive
+    /// until `expires_at` or recipient ACK.
     ///
-    /// Silent no-op when we have no way to encrypt (no session and no
-    /// cached prekey) — the recipient hasn't published a prekey to us
-    /// directly yet, so we can't build an X3DH bootstrap. The outbox
-    /// path still applies; the mailbox just can't help on the first
-    /// message to a brand-new contact.
-    fn publish_mailbox_drop(
+    /// The caller supplies the wire bytes — typically from
+    /// `try_encrypt_offline` — so the same ciphertext can also be
+    /// queued into the outbox via `outbox_add_wire`.
+    fn put_mailbox_drop_bytes(
         &mut self,
         swarm: &mut Swarm<Behaviour>,
         peer: PeerId,
-        plaintext: &str,
+        wire_bytes: &[u8],
     ) {
-        // Two paths into encryption: existing persisted session, OR
-        // first-message bootstrap if we already have the responder's
-        // prekey (typically cached from a previous DM exchange).
-        let wire_bytes_opt = if self.restore_session_if_persisted(&peer) {
-            self.ratchet_encrypt_and_wrap(peer, plaintext, None)
-                .map(|(b, _ttl)| b)
-        } else if let Some(prekey_pub) = self.cached_prekey(&peer) {
-            // Bootstrap-and-encrypt inlined: pull from the OTPK cache
-            // if present, otherwise fall back to 2-DH. This duplicates
-            // the first half of `bootstrap_initiator_and_send` but
-            // without the `send_request` step.
-            let hello = match self.cached_otpks.remove(&peer) {
-                Some(otpk_bundle) => {
-                    let otpk_pub = X25519Pub::from(otpk_bundle.x25519_public);
-                    let (eph_pub, sk) = x3dh::initiator_derive_with_otpk(
-                        self.identity.x25519_secret(),
-                        &prekey_pub,
-                        &otpk_pub,
-                    );
-                    let session = RatchetState::new_initiator(sk, prekey_pub);
-                    self.sessions.insert(peer, session);
-                    FirstMessageHello {
-                        x3dh_eph: eph_pub,
-                        otpk_id: Some(otpk_bundle.id),
-                    }
-                }
-                None => {
-                    let (eph_pub, sk) = x3dh::initiator_derive(
-                        self.identity.x25519_secret(),
-                        &prekey_pub,
-                    );
-                    let session = RatchetState::new_initiator(sk, prekey_pub);
-                    self.sessions.insert(peer, session);
-                    FirstMessageHello {
-                        x3dh_eph: eph_pub,
-                        otpk_id: None,
-                    }
-                }
-            };
-            self.ratchet_encrypt_and_wrap(peer, plaintext, Some(hello))
-                .map(|(b, _ttl)| b)
-        } else {
-            debug!(
-                "Mailbox publish skipped for {}: no session and no cached prekey \
-                 (the outbox path still applies)",
-                peer
-            );
-            return;
-        };
-
-        let Some(wire_bytes) = wire_bytes_opt else {
-            // ratchet_encrypt_and_wrap already logged at error level.
-            return;
-        };
-
-        // Now actually drop into the DHT. Same wire_bytes the
-        // request-response path would have sent live.
         let now = unix_seconds_now();
         let slot = mailbox::slot_id_for(now);
         let recipient_bytes = peer.to_bytes();
@@ -1164,19 +1192,13 @@ impl P2PNode {
         let slot_key = mailbox::slot_kad_key(&recipient_bytes, slot);
         let drop_key = mailbox::drop_kad_key(&recipient_bytes, &sender_bytes, slot);
 
-        // start_providing tells the providers DHT that we're the source
-        // for `slot_key` — the recipient will discover us via this
-        // when they query providers for the slot.
         if let Err(e) = swarm.behaviour_mut().kademlia.start_providing(slot_key.clone()) {
             warn!("Mailbox start_providing({}) failed: {:?}", peer, e);
-            // Not fatal: put_record may still land somewhere
-            // discoverable via direct key lookup on the recipient side.
         }
 
-        // put_record stores the actual ciphertext bytes at drop_key.
         let record = kad::Record {
             key: drop_key.clone(),
-            value: wire_bytes.clone(),
+            value: wire_bytes.to_vec(),
             publisher: None,
             expires: None,
         };
@@ -1188,7 +1210,9 @@ impl P2PNode {
             Ok(_qid) => {
                 debug!(
                     "Mailbox put_record submitted for {} at slot {} ({}B)",
-                    peer, slot, wire_bytes.len()
+                    peer,
+                    slot,
+                    wire_bytes.len()
                 );
             }
             Err(e) => {
@@ -1197,11 +1221,10 @@ impl P2PNode {
             }
         }
 
-        // Persist the drop locally so the republish tick can rebroadcast
-        // it before Kad's per-record TTL expires.
         if let Some(ref store) = self.message_store {
             let expires_at = now + mailbox::DEFAULT_DROP_TTL_SECS;
-            if let Err(e) = store.mailbox_drop_record(&recipient_bytes, slot, &wire_bytes, expires_at) {
+            if let Err(e) = store.mailbox_drop_record(&recipient_bytes, slot, wire_bytes, expires_at)
+            {
                 warn!("Failed to persist mailbox_drop for {}: {}", peer, e);
             }
         }
