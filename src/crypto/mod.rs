@@ -2,6 +2,7 @@ use libp2p::identity::Keypair;
 use crate::core::Identity;
 
 pub mod keyring;
+pub mod megolm;
 pub mod ratchet;
 pub mod sealed;
 pub mod x3dh;
