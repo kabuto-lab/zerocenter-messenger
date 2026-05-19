@@ -193,6 +193,20 @@ pub async fn run_cli_with_handlers(
                     println!("addr handler not available");
                 }
             }
+            "group" | "g" => {
+                let args = if parts.len() > 1 { parts[1] } else { "" };
+                if args.trim().is_empty() {
+                    print_group_help();
+                    continue;
+                }
+                if let Some(handler) = handlers.get("group") {
+                    if let Err(e) = handler(args) {
+                        println!("Error: {}", e);
+                    }
+                } else {
+                    println!("Group handler not available");
+                }
+            }
             _ => {
                 println!("Unknown command: {}. Type 'help' for commands.", cmd);
             }
@@ -200,6 +214,23 @@ pub async fn run_cli_with_handlers(
     }
 
     Ok(())
+}
+
+fn print_group_help() {
+    println!();
+    println!("Group subcommands:");
+    println!("  group create <name> <pid1> [<pid2> ...]");
+    println!("                        Create a new group with you as founder + the listed peers.");
+    println!("  group list            List local groups (with id, epoch, member count, founder).");
+    println!("  group send <gid> <message>");
+    println!("                        Send a text message to all members of the group.");
+    println!("  group add <gid> <pid> Add a peer to the group (founder only).");
+    println!("  group remove <gid> <pid>");
+    println!("                        Remove a peer from the group (founder only).");
+    println!("  group leave <gid>     Leave the group (broadcasts a signed Leave).");
+    println!();
+    println!("  <gid> is the 64-character hex group id printed by `group create` / `group list`.");
+    println!();
 }
 
 fn print_help() {
@@ -215,6 +246,7 @@ fn print_help() {
     println!("  safety, sn <peer>      - Print fingerprint to compare with peer (anti-MITM)");
     println!("  whoami, me             - Print your own PeerId");
     println!("  addr, addrs, a         - Print your shareable multiaddrs");
+    println!("  group, g <subcmd>      - Group chats (create/list/send/add/remove/leave). `group` alone for help.");
     println!();
 }
 

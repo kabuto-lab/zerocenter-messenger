@@ -133,6 +133,22 @@ pub enum NodeCommand {
     /// suffix appended). Used by the `addr` CLI command.
     ListAddrs,
 
+    // ---- Phase 5 group chats, CLI-shaped fire-and-forget ----
+    /// Create a new group with `name` and the given members. Founder
+    /// (self) is implicitly included if not already in the list.
+    /// Prints the new group_id on success.
+    GroupCreate(String, Vec<PeerId>),
+    /// Print all local groups.
+    GroupList,
+    /// Send a text message into the named group.
+    GroupSend(crate::protocol::GroupId, String),
+    /// Founder-issued: add `peer_id` to the group.
+    GroupAdd(crate::protocol::GroupId, PeerId),
+    /// Founder-issued: remove `peer_id` from the group.
+    GroupRemove(crate::protocol::GroupId, PeerId),
+    /// Self-issued: leave the group.
+    GroupLeave(crate::protocol::GroupId),
+
     // ---- GUI-shaped, structured reply ----
     /// Return the local PeerId as a base58 string.
     QueryPeerId(tokio::sync::oneshot::Sender<String>),
@@ -592,6 +608,25 @@ impl P2PNode {
                             } else {
                                 println!("Message store not available");
                             }
+                        }
+                        // ─────── Phase 5 group-chat handlers ───────
+                        Some(NodeCommand::GroupCreate(name, members)) => {
+                            self.handle_group_create(&mut swarm, name, members);
+                        }
+                        Some(NodeCommand::GroupList) => {
+                            self.handle_group_list();
+                        }
+                        Some(NodeCommand::GroupSend(group_id, content)) => {
+                            self.group_send(&mut swarm, group_id, &content);
+                        }
+                        Some(NodeCommand::GroupAdd(group_id, peer_id)) => {
+                            self.handle_group_add(&mut swarm, group_id, peer_id);
+                        }
+                        Some(NodeCommand::GroupRemove(group_id, peer_id)) => {
+                            self.handle_group_remove(&mut swarm, group_id, peer_id);
+                        }
+                        Some(NodeCommand::GroupLeave(group_id)) => {
+                            self.handle_group_leave(&mut swarm, group_id);
                         }
                         None => break, // Channel closed
                     }
@@ -2483,6 +2518,401 @@ impl P2PNode {
             group_id: hex::encode(env.group_id),
             sender: sender.to_base58(),
         });
+    }
+
+    // ───────────────────── Phase 5 group CLI handlers ─────────────────────
+
+    /// Founder-side group creation. Generates a random 32-byte
+    /// `group_id`, builds a signed `CreateGroup` control message,
+    /// installs the group locally, then broadcasts the control
+    /// message to each (non-self) member via the existing 1:1 DR
+    /// channel.
+    ///
+    /// Self is implicitly included in the member list if the caller
+    /// didn't already put us there. The first `group send` after
+    /// create will trigger `SenderKeyDistribution` for our chain
+    /// (task #4 wired that already).
+    fn handle_group_create(
+        &mut self,
+        swarm: &mut Swarm<Behaviour>,
+        name: String,
+        mut members: Vec<PeerId>,
+    ) {
+        let my_pid = self.identity.peer_id();
+        if !members.contains(&my_pid) {
+            members.insert(0, my_pid);
+        }
+
+        // Random 32-byte group id. OsRng matches the convention used
+        // elsewhere (otpk gen, x25519 ephemeral gen). The id is
+        // unlinkable (no founder bits leaked into the bytes).
+        let mut group_id = [0u8; 32];
+        use rand::RngCore;
+        rand::rngs::OsRng.fill_bytes(&mut group_id);
+
+        let founder_pid_bytes = my_pid.to_bytes();
+        let member_bytes: Vec<Vec<u8>> =
+            members.iter().map(|p| p.to_bytes()).collect();
+
+        let ctrl = match crate::protocol::GroupControl::new_create_group(
+            group_id,
+            name.clone(),
+            founder_pid_bytes.clone(),
+            member_bytes.clone(),
+            0,
+            self.identity.keypair(),
+        ) {
+            Ok(c) => c,
+            Err(e) => {
+                println!("❌ Group create: signature failed: {}", e);
+                return;
+            }
+        };
+        let ctrl_bytes = match ctrl.to_bytes() {
+            Ok(b) => b,
+            Err(e) => {
+                println!("❌ Group create: serialize failed: {}", e);
+                return;
+            }
+        };
+
+        // Install locally before broadcast so a partial fan-out
+        // doesn't leave the founder without their own row.
+        let Some(store) = self.message_store.as_ref() else {
+            println!("❌ Group create: no message store");
+            return;
+        };
+        if let Err(e) = store.group_upsert(&group_id, &name, &founder_pid_bytes, 0) {
+            println!("❌ Group create: group_upsert failed: {}", e);
+            return;
+        }
+        for m in &member_bytes {
+            let _ = store.group_member_add(&group_id, m);
+        }
+
+        let mut delivered = 0usize;
+        let mut targeted = 0usize;
+        for peer in &members {
+            if *peer == my_pid {
+                continue;
+            }
+            targeted += 1;
+            if self.deliver_kind_to_member(swarm, *peer, 1, &ctrl_bytes) {
+                delivered += 1;
+            }
+        }
+
+        println!(
+            "✅ Created group '{}' id={}",
+            name,
+            hex::encode(group_id)
+        );
+        println!(
+            "   Broadcast CreateGroup to {}/{} member(s) — your sender-key bundle is distributed on first `group send`",
+            delivered, targeted
+        );
+    }
+
+    /// Print all local groups with member counts.
+    fn handle_group_list(&self) {
+        let Some(store) = self.message_store.as_ref() else {
+            println!("Group store not available");
+            return;
+        };
+        let rows = match store.group_list() {
+            Ok(r) => r,
+            Err(e) => {
+                println!("Error loading groups: {}", e);
+                return;
+            }
+        };
+        if rows.is_empty() {
+            println!("\nGroups: (none)");
+            return;
+        }
+        println!("\nGroups:");
+        println!("─────────────────────────────────────");
+        for row in rows {
+            let members = store.group_members(&row.group_id).unwrap_or_default();
+            let founder = PeerId::from_bytes(&row.founder_pid)
+                .map(|p| p.to_string())
+                .unwrap_or_else(|_| "?".to_string());
+            println!(
+                "  {} '{}' epoch={} members={} founder={}",
+                hex::encode(row.group_id),
+                row.name,
+                row.epoch,
+                members.len(),
+                founder,
+            );
+        }
+        println!("─────────────────────────────────────");
+    }
+
+    /// Founder-side member add. Bumps the local epoch, builds a
+    /// signed `MembershipUpdate`, applies it locally, and broadcasts
+    /// to every group member (including the newly-added one — they
+    /// need the update to know they're now a member). Sender-key
+    /// distribution to/from the new joiner is wired in task #6.
+    fn handle_group_add(
+        &mut self,
+        swarm: &mut Swarm<Behaviour>,
+        group_id: crate::protocol::GroupId,
+        new_member: PeerId,
+    ) {
+        let row = {
+            let Some(store) = self.message_store.as_ref() else {
+                println!("❌ no message store");
+                return;
+            };
+            match store.group_get(&group_id) {
+                Ok(Some(r)) => r,
+                Ok(None) => {
+                    println!("❌ unknown group {}", hex::encode(group_id));
+                    return;
+                }
+                Err(e) => {
+                    println!("❌ group_get: {}", e);
+                    return;
+                }
+            }
+        };
+
+        let my_pid_bytes = self.identity.peer_id().to_bytes();
+        if row.founder_pid != my_pid_bytes {
+            println!("❌ group add: only the founder can add members");
+            return;
+        }
+
+        let new_epoch = row.epoch + 1;
+        let new_member_bytes = new_member.to_bytes();
+
+        let ctrl = match crate::protocol::GroupControl::new_membership_update(
+            group_id,
+            vec![new_member_bytes.clone()],
+            vec![],
+            new_epoch,
+            self.identity.keypair(),
+        ) {
+            Ok(c) => c,
+            Err(e) => {
+                println!("❌ MembershipUpdate sign failed: {}", e);
+                return;
+            }
+        };
+        let ctrl_bytes = match ctrl.to_bytes() {
+            Ok(b) => b,
+            Err(e) => {
+                println!("❌ MembershipUpdate serialize failed: {}", e);
+                return;
+            }
+        };
+
+        // Apply locally first.
+        let Some(store) = self.message_store.as_ref() else { return };
+        let _ = store.group_member_add(&group_id, &new_member_bytes);
+        let _ = store.group_bump_epoch(&group_id, new_epoch);
+
+        // Broadcast to the FULL new member set (existing + newly added).
+        let current_members = store.group_members(&group_id).unwrap_or_default();
+        let mut delivered = 0usize;
+        let mut targeted = 0usize;
+        for m_bytes in &current_members {
+            if m_bytes == &my_pid_bytes {
+                continue;
+            }
+            targeted += 1;
+            let member_pid = match PeerId::from_bytes(m_bytes) {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+            if self.deliver_kind_to_member(swarm, member_pid, 1, &ctrl_bytes) {
+                delivered += 1;
+            }
+        }
+        println!(
+            "✅ Added {} to group {} (epoch {} → {}); broadcast to {}/{} member(s)",
+            new_member,
+            hex::encode(group_id),
+            row.epoch,
+            new_epoch,
+            delivered,
+            targeted,
+        );
+    }
+
+    /// Founder-side member remove. Mirrors `handle_group_add` but
+    /// deletes the removed member from local state and drops their
+    /// cached sender-chain. Sender-chain rotation on our own end
+    /// (to deny the removed member future plaintext) is task #6.
+    fn handle_group_remove(
+        &mut self,
+        swarm: &mut Swarm<Behaviour>,
+        group_id: crate::protocol::GroupId,
+        gone: PeerId,
+    ) {
+        let row = {
+            let Some(store) = self.message_store.as_ref() else {
+                println!("❌ no message store");
+                return;
+            };
+            match store.group_get(&group_id) {
+                Ok(Some(r)) => r,
+                Ok(None) => {
+                    println!("❌ unknown group {}", hex::encode(group_id));
+                    return;
+                }
+                Err(e) => {
+                    println!("❌ group_get: {}", e);
+                    return;
+                }
+            }
+        };
+        let my_pid_bytes = self.identity.peer_id().to_bytes();
+        if row.founder_pid != my_pid_bytes {
+            println!("❌ group remove: only the founder can remove members");
+            return;
+        }
+
+        let new_epoch = row.epoch + 1;
+        let gone_bytes = gone.to_bytes();
+
+        let ctrl = match crate::protocol::GroupControl::new_membership_update(
+            group_id,
+            vec![],
+            vec![gone_bytes.clone()],
+            new_epoch,
+            self.identity.keypair(),
+        ) {
+            Ok(c) => c,
+            Err(e) => {
+                println!("❌ MembershipUpdate sign failed: {}", e);
+                return;
+            }
+        };
+        let ctrl_bytes = match ctrl.to_bytes() {
+            Ok(b) => b,
+            Err(e) => {
+                println!("❌ MembershipUpdate serialize failed: {}", e);
+                return;
+            }
+        };
+
+        // Apply locally first.
+        let Some(store) = self.message_store.as_ref() else { return };
+        let _ = store.group_member_remove(&group_id, &gone_bytes);
+        let _ = store.their_sender_key_delete(&group_id, &gone_bytes);
+        let _ = store.group_bump_epoch(&group_id, new_epoch);
+
+        // Broadcast to remaining members only. We deliberately do
+        // NOT send the update to the removed peer — they'll learn
+        // they're out from the absence of subsequent messages.
+        let remaining = store.group_members(&group_id).unwrap_or_default();
+        let mut delivered = 0usize;
+        let mut targeted = 0usize;
+        for m_bytes in &remaining {
+            if m_bytes == &my_pid_bytes || m_bytes == &gone_bytes {
+                continue;
+            }
+            targeted += 1;
+            let member_pid = match PeerId::from_bytes(m_bytes) {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+            if self.deliver_kind_to_member(swarm, member_pid, 1, &ctrl_bytes) {
+                delivered += 1;
+            }
+        }
+        println!(
+            "✅ Removed {} from group {} (epoch {} → {}); broadcast to {}/{} remaining member(s)",
+            gone,
+            hex::encode(group_id),
+            row.epoch,
+            new_epoch,
+            delivered,
+            targeted,
+        );
+    }
+
+    /// Self-issued leave. Builds a `Leave` control message signed by
+    /// our identity, broadcasts to every other member, then drops the
+    /// group from local state.
+    fn handle_group_leave(
+        &mut self,
+        swarm: &mut Swarm<Behaviour>,
+        group_id: crate::protocol::GroupId,
+    ) {
+        // Phase A: collect the snapshot we need under an immutable
+        // self-borrow, then drop it before any &mut self calls.
+        let (row_epoch, members) = {
+            let Some(store) = self.message_store.as_ref() else { return };
+            let row = match store.group_get(&group_id) {
+                Ok(Some(r)) => r,
+                Ok(None) => {
+                    println!("❌ unknown group {}", hex::encode(group_id));
+                    return;
+                }
+                Err(e) => {
+                    println!("❌ group_get: {}", e);
+                    return;
+                }
+            };
+            let members = store.group_members(&group_id).unwrap_or_default();
+            (row.epoch, members)
+        };
+
+        let my_pid_bytes = self.identity.peer_id().to_bytes();
+        let ctrl = match crate::protocol::GroupControl::new_leave(
+            group_id,
+            my_pid_bytes.clone(),
+            row_epoch,
+            self.identity.keypair(),
+        ) {
+            Ok(c) => c,
+            Err(e) => {
+                println!("❌ Leave sign failed: {}", e);
+                return;
+            }
+        };
+        let ctrl_bytes = match ctrl.to_bytes() {
+            Ok(b) => b,
+            Err(e) => {
+                println!("❌ Leave serialize failed: {}", e);
+                return;
+            }
+        };
+
+        // Phase B: mutable fan-out.
+        let mut delivered = 0usize;
+        let mut targeted = 0usize;
+        for m_bytes in &members {
+            if m_bytes == &my_pid_bytes {
+                continue;
+            }
+            targeted += 1;
+            let member_pid = match PeerId::from_bytes(m_bytes) {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+            if self.deliver_kind_to_member(swarm, member_pid, 1, &ctrl_bytes) {
+                delivered += 1;
+            }
+        }
+
+        // Phase C: drop the group locally. Group-message history rows
+        // survive (group_forget keeps the history table for audit).
+        if let Some(store) = self.message_store.as_ref() {
+            if let Err(e) = store.group_forget(&group_id) {
+                println!("⚠ group_forget failed: {}", e);
+            }
+        }
+
+        println!(
+            "✅ Left group {}; Leave broadcast to {}/{} member(s)",
+            hex::encode(group_id),
+            delivered,
+            targeted,
+        );
     }
 
     /// Drain any queued sends / recvs that were waiting on this prekey.

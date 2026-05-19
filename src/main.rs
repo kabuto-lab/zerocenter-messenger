@@ -115,6 +115,7 @@ async fn main() -> Result<()> {
     let cmd_tx_for_contacts = cmd_tx.clone();
     let cmd_tx_for_history = cmd_tx.clone();
     let cmd_tx_for_addr = cmd_tx.clone();
+    let cmd_tx_for_group = cmd_tx.clone();
 
     // Build command handlers
     let mut handlers: std::collections::HashMap<String, zerocenter_messenger::cli::CommandHandler> = 
@@ -238,6 +239,81 @@ async fn main() -> Result<()> {
         Ok(())
     }));
 
+    // Group subcommand router. The whole `group <subcmd> [args...]`
+    // chord lands here; we split off the subcommand word and dispatch
+    // to the matching NodeCommand variant. Argument parsing errors
+    // bubble back to the CLI which prints them.
+    handlers.insert("group".to_string(), Box::new(move |args: &str| -> Result<()> {
+        let mut head = args.trim().splitn(2, char::is_whitespace);
+        let sub = head.next().unwrap_or("").to_lowercase();
+        let rest = head.next().unwrap_or("").trim();
+
+        let send_cmd = |cmd: NodeCommand| -> Result<()> {
+            futures::executor::block_on(cmd_tx_for_group.send(cmd))
+                .map_err(|e| anyhow::anyhow!("Failed to send command: {}", e))
+        };
+
+        match sub.as_str() {
+            "create" => {
+                let toks: Vec<&str> = rest.split_whitespace().collect();
+                if toks.len() < 1 {
+                    anyhow::bail!("Usage: group create <name> [<pid1> <pid2> ...]");
+                }
+                let name = toks[0].to_string();
+                let members: Result<Vec<PeerId>, _> =
+                    toks[1..].iter().map(|s| s.parse::<PeerId>()).collect();
+                let members = members
+                    .map_err(|e| anyhow::anyhow!("Invalid peer id in member list: {}", e))?;
+                send_cmd(NodeCommand::GroupCreate(name, members))
+            }
+            "list" | "ls" => send_cmd(NodeCommand::GroupList),
+            "send" => {
+                let mut parts = rest.splitn(2, char::is_whitespace);
+                let gid_str = parts.next().unwrap_or("");
+                let message = parts.next().unwrap_or("").trim();
+                if gid_str.is_empty() || message.is_empty() {
+                    anyhow::bail!("Usage: group send <group_id_hex> <message>");
+                }
+                let gid = parse_group_id_hex(gid_str)?;
+                send_cmd(NodeCommand::GroupSend(gid, message.to_string()))
+            }
+            "add" => {
+                let toks: Vec<&str> = rest.split_whitespace().collect();
+                if toks.len() != 2 {
+                    anyhow::bail!("Usage: group add <group_id_hex> <peer_id>");
+                }
+                let gid = parse_group_id_hex(toks[0])?;
+                let peer: PeerId = toks[1]
+                    .parse()
+                    .map_err(|e| anyhow::anyhow!("Invalid peer id: {}", e))?;
+                send_cmd(NodeCommand::GroupAdd(gid, peer))
+            }
+            "remove" | "rm" => {
+                let toks: Vec<&str> = rest.split_whitespace().collect();
+                if toks.len() != 2 {
+                    anyhow::bail!("Usage: group remove <group_id_hex> <peer_id>");
+                }
+                let gid = parse_group_id_hex(toks[0])?;
+                let peer: PeerId = toks[1]
+                    .parse()
+                    .map_err(|e| anyhow::anyhow!("Invalid peer id: {}", e))?;
+                send_cmd(NodeCommand::GroupRemove(gid, peer))
+            }
+            "leave" => {
+                let gid_str = rest.trim();
+                if gid_str.is_empty() {
+                    anyhow::bail!("Usage: group leave <group_id_hex>");
+                }
+                let gid = parse_group_id_hex(gid_str)?;
+                send_cmd(NodeCommand::GroupLeave(gid))
+            }
+            other => anyhow::bail!(
+                "Unknown group subcommand '{}'. Try: create, list, send, add, remove, leave.",
+                other
+            ),
+        }
+    }));
+
     // Start the node in background with command receiver
     let node_handle = tokio::spawn(async move {
         if let Err(e) = P2PNode::run_with_commands(node, cmd_rx).await {
@@ -287,6 +363,22 @@ async fn run_gui(
          Rebuild with: cargo build --release --features gui \
          (and see plans/phase4-gui.md for the Tauri integration checklist)."
     )
+}
+
+/// Decode a 64-character hex string into a 32-byte `GroupId`. Surfaces
+/// a friendly error for the CLI rather than the raw hex-decode message.
+fn parse_group_id_hex(s: &str) -> Result<[u8; 32]> {
+    let bytes = hex::decode(s.trim())
+        .map_err(|e| anyhow::anyhow!("group id must be 64 hex chars: {}", e))?;
+    if bytes.len() != 32 {
+        anyhow::bail!(
+            "group id must be exactly 32 bytes (64 hex chars); got {} bytes",
+            bytes.len()
+        );
+    }
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&bytes);
+    Ok(out)
 }
 
 fn get_profile_dir(profile: &str) -> Result<PathBuf> {

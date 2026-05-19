@@ -74,6 +74,18 @@ pub async fn run(
                             GuiEvent::DmReceived { peer } => {
                                 let _ = handle.emit("dm-received", peer);
                             }
+                            GuiEvent::GroupMessageReceived { group_id, sender } => {
+                                // Frontend listener for "group-msg-received"
+                                // is wired in task #7. The forwarder arm is
+                                // here now so the variant compiles end-to-end.
+                                let _ = handle.emit(
+                                    "group-msg-received",
+                                    serde_json::json!({
+                                        "group_id": group_id,
+                                        "sender": sender,
+                                    }),
+                                );
+                            }
                         }
                     }
                 });
