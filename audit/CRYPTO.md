@@ -478,7 +478,184 @@ Per-message ephemeral private = per-message keystream. A later compromise of the
 - recv-path router: `src/core/node.rs::process_incoming_dm` — routes by `is_sealed()`; skips §2 cross-check for sealed
 - invariants: `audit/INVARIANTS.md` §22
 
-## 12. Random number generation
+## 12. Group chats — Megolm-style sender chains (Phase 5)
+
+**Goal:** many-to-many group encryption that encrypts each plaintext exactly once on the sender side and lets each receiver decrypt independently against the sender's chain state, with per-message authenticity that resists cross-member impersonation.
+
+The construction is layered on top of the existing 1:1 Double Ratchet (`§8`): bundles, control messages, and group ciphertexts all ride the existing DR session between any two members. Group send fan-out is N-1 unicasts, not multicast.
+
+### 12.1. Group identifier
+
+- 32 random bytes generated via `OsRng::fill_bytes` at create time. Unlinkable (no founder bits leaked into the value). Rendered as 64-char lowercase hex when surfaced to a UI.
+- File: `src/protocol/group.rs::GroupId = [u8; 32]`.
+
+### 12.2. Wire envelope discrimination
+
+`EncryptedPayload` (the §6 DR ciphertext wrapper) gained a `kind: u8` field in Phase 5:
+
+```
+kind = 0  — text DM (default; backward-compatible — pre-Phase-5 senders omit the field, recipients default it to 0).
+kind = 1  — GroupControl  (cbor-or-json — currently json; see §12.4).
+kind = 2  — GroupMessageEnvelope (§12.5).
+```
+
+`#[serde(default)]` + `skip_serializing_if = "is_zero_u8"` keeps the wire bytes byte-identical for kind=0, so a non-Phase-5 peer still parses our text DMs and we still parse theirs. The discriminator is read AFTER ratchet-decrypt and routed in `src/core/node.rs::dispatch_decrypted_content`.
+
+### 12.3. Megolm sender-chain primitives
+
+Per-group, per-sender state. One `SenderChain` per group I belong to; one `ReceiverChain` per `(group_id, peer)` pair for every other member of every group.
+
+**Chain advance** (mirrors §8.3 KDF_CK with the same constants):
+```
+message_key   = HMAC-SHA256(chain_key, 0x01)
+next_chain_key= HMAC-SHA256(chain_key, 0x02)
+```
+
+**Per-message AEAD:** ChaCha20-Poly1305 with `key = message_key`, `nonce = [0u8; 12]`. Each `message_key` is used exactly once (the chain advances unconditionally on every `encrypt`), matching the §8 safety argument for zero-nonce.
+
+**AEAD AD layout:**
+```
+build_group_ad(group_id, sender_pid)
+  = group_id (32) || sender_pid_len_be (4) || sender_pid
+```
+
+**Per-message Ed25519 signature** binds the ciphertext to the chain owner. Each `SenderChain` is born with its own Ed25519 keypair; the public half is included in the `SenderKeyBundle` (§12.4) so receivers can verify. Canonical signing bytes:
+```
+GROUP_MSG_DOMAIN_SEPARATOR = b"zerocenter-group-msg-v1"
+canonical = DOMAIN
+          || index_be (4)
+          || ad_len_be (4) || ad
+          || ct_len_be (4) || ct
+```
+Length-prefixed, so byte-unambiguous. The verifier runs `verify(canonical, sig)` BEFORE any chain-state mutation — a bad signature is a no-op on the receiver's chain.
+
+**Skipped-keys cache.** Bounded `VecDeque<SkippedKey>` with `MAX_SKIP = 1000`, mirroring §8's policy (oldest-first eviction). Out-of-order delivery within the window decrypts cleanly; replay of an already-consumed index returns `MegolmError::MessageKeyMissing(index)`.
+
+**Wire types** (json-serialised, ride inside the DR ciphertext as `EncryptedPayload.kind=2`):
+```
+SenderKeyBundle    { chain_key: [u8;32], index: u32, verify_pub: [u8;32] }
+EncryptedGroupMessage { index: u32, ciphertext: Vec<u8>, signature: Vec<u8> }
+GroupMessageEnvelope { group_id: GroupId, msg: EncryptedGroupMessage }
+```
+
+The `signature` field is `Vec<u8>` (not `[u8;64]`) because serde's blanket Deserialize impls don't cover arbitrary-size byte arrays; bad-length signature blobs surface as `BadSignature` on decrypt.
+
+Files:
+- `src/crypto/megolm.rs` — `SenderChain`, `ReceiverChain`, primitives, MAX_SKIP, AEAD, sign/verify.
+- `src/protocol/group.rs::GroupMessageEnvelope` + `build_group_ad`.
+
+### 12.4. Group control envelope (kind=1)
+
+Bootstrap and membership-change protocol. Travels as the kind=1 plaintext inside the DR ciphertext (so authentication of "who sent this control message" inherits from the 1:1 DR session). Four variants, distinguished by serde tag `op`:
+
+```
+GroupControl = CreateGroup
+             | MembershipUpdate
+             | SenderKeyDistribution
+             | Leave
+
+GROUP_CTRL_DOMAIN_SEPARATOR = b"zerocenter-group-ctrl-v1"
+```
+
+Distinct domain separator from §1's DM/sealed paths so a captured DM signature can't be replayed as group control authorization (and vice versa).
+
+**CreateGroup.** Founder-signed. Fields: `group_id`, `name`, `founder_pid`, `members: Vec<Vec<u8>>`, `epoch=0`, `founder_sig`. Canonical signing bytes:
+```
+DOMAIN || "create" || group_id (32)
+       || name_lp || founder_pid_lp
+       || epoch_be (8)
+       || count_be (4) || sorted_member_lp*
+```
+where `_lp` means length-prefixed (u32-be) and `sorted_member_lp*` is the member set sorted lex byte-order and length-prefixed. Sorting before encoding means semantically-equal member sets produce byte-identical signatures.
+
+Recipient checks: (a) `founder_sig` verifies against `founder_pid`'s embedded Ed25519 pubkey; (b) the DR transport sender PID equals `founder_pid` (a stranger can't spoof the founder field); (c) the recipient is in `members` (silent ignore otherwise).
+
+**MembershipUpdate.** Founder-signed. Fields: `group_id`, `added: Vec<Vec<u8>>`, `removed: Vec<Vec<u8>>`, `epoch`, `founder_sig`. Canonical bytes:
+```
+DOMAIN || "update" || group_id (32) || epoch_be (8)
+       || added_count_be || sorted_added_lp*
+       || removed_count_be || sorted_removed_lp*
+```
+
+Founder PID is NOT carried inside the variant — receivers re-attach the locally-stored `groups.founder_pid` at verify time via `verify_membership_update(founder_pid)`. The plain `verify_signature` deliberately returns `BadSignature` for MembershipUpdate so a careless caller can't accept an unverified update. Recipients additionally enforce `epoch > stored_epoch` (replay-protect against stale captured updates).
+
+**SenderKeyDistribution.** Carries a `SenderKeyBundle` (§12.3). NO inner signature — the outer 1:1 DR session already authenticates the sender. Recipients additionally check that the DR-verified sender is in the local `group_members` list before installing the bundle (defence-in-depth against stale group state).
+
+**Leave.** Self-signed by the leaver's Ed25519 identity. Fields: `group_id`, `leaver_pid`, `epoch` (current at the time of leave), `leaver_sig`. Canonical bytes:
+```
+DOMAIN || "leave" || group_id (32) || leaver_pid_lp || epoch_be (8)
+```
+Self-signing lets other members verify the announcement even if a relay forwarded it from a peer who isn't currently a peer of theirs at the moment they see it.
+
+Files:
+- `src/protocol/group.rs::GroupControl` + `canonical_*_bytes` helpers + `GroupControl::verify_signature` / `verify_membership_update`.
+- `src/core/node.rs::process_group_control` — recipient state mutation (apply add/remove diffs, install bundles, etc.).
+
+### 12.5. Group send / receive flow
+
+**Send** (`src/core/node.rs::group_send`):
+1. Load (or create) my `SenderChain` for the group. If it's fresh, broadcast a `SenderKeyDistribution` to every other member FIRST so they can install the chain at index 0.
+2. Compute `ad = build_group_ad(group_id, my_pid)`.
+3. `encrypted = my_chain.encrypt(plaintext, ad)` — produces `EncryptedGroupMessage { index, ciphertext, signature }` and advances my chain by one step.
+4. Persist advanced chain state (`my_sender_keys.state_blob`) + local plaintext copy (`group_messages`).
+5. Wrap as `GroupMessageEnvelope { group_id, msg: encrypted }`, serialise.
+6. For each member except self: ratchet-encrypt the envelope bytes through the 1:1 DR (`ratchet_encrypt_and_wrap_bytes(peer, envelope, kind=2)`) and `send_request`.
+
+**Receive** (`src/core/node.rs::process_group_message`, called from `dispatch_decrypted_content` kind=2 arm):
+1. Cross-check that the DR-verified `sender` is in local `group_members` (otherwise drop).
+2. Load `their_sender_keys[(group_id, sender)].state_blob` → deserialise `ReceiverChain`. If absent, the SenderKeyDistribution hasn't arrived yet → warn-and-drop.
+3. Compute `ad = build_group_ad(group_id, sender)`.
+4. `receiver.decrypt(envelope.msg, ad)` — verifies the Ed25519 signature, fast-forwards the chain (cachings skipped keys), or pulls from skipped cache for past indices.
+5. Persist advanced chain state + plaintext copy.
+6. Print + emit `GuiEvent::GroupMessageReceived { group_id (hex), sender (base58) }`.
+
+### 12.6. Membership rotation — forward secrecy (Phase 5)
+
+Triggered on remove or leave. Every remaining member generates a fresh `SenderChain` and broadcasts a new `SenderKeyDistribution` to every other remaining member. The old chain key (now cached in the departed peer's `their_sender_keys`) is useless for any post-rotation ciphertext because the chain key is replaced wholesale.
+
+**Founder side** (`handle_group_remove`): bumps `groups.epoch`, applies the diff locally, builds + sends `MembershipUpdate` to remaining members, then calls `rotate_my_sender_chain_and_broadcast`.
+
+**Recipient side** (`process_group_control`):
+- `MembershipUpdate` with `removed.len() > 0`: after applying, rotate own chain.
+- `MembershipUpdate` with `added.len() > 0`: for each added peer, forward my CURRENT bundle (no rotation — adds don't compromise existing chains).
+- `Leave`: after removing the leaver, rotate own chain.
+
+Caveat: rotation is event-driven, not per-message. Messages already in flight at the moment of the rotation event remain decryptable by the departed peer with their cached old chain key — see `audit/INVARIANTS.md` §26 for the exact PFS-best-effort semantics.
+
+Files:
+- `src/core/node.rs::rotate_my_sender_chain_and_broadcast`
+- `src/core/node.rs::send_my_bundle_to`
+- `src/core/node.rs::handle_group_remove` / `handle_group_add` / `process_group_control`
+
+### 12.7. Storage (at-rest)
+
+Five new SQLite tables; sender-chain blobs and group-message plaintext are AEAD-wrapped under the §10 DEK.
+
+```
+groups            (group_id PK, name, founder_pid, epoch, created_at)        -- public metadata
+group_members     ((group_id, peer_id) PK, joined_at)                        -- public metadata
+my_sender_keys    (group_id PK, state_blob AEAD, updated_at)                 -- SECRET — chain state
+their_sender_keys ((group_id, peer_id) PK, state_blob AEAD, updated_at)      -- SECRET — chain state
+group_messages    (id PK, group_id, sender, ciphertext AEAD, ts, ttl)        -- decrypted plaintext history
+```
+
+PeerId columns stay in clear (same query-efficiency-over-metadata-privacy trade-off as §6 / §10). The chain state blobs use the same `encrypt_at_rest` AEAD as `ratchet_sessions.state_blob`.
+
+File: `src/storage/store.rs` — `group_*`, `my_sender_key_*`, `their_sender_key_*`, `group_message_*` methods.
+
+### 12.8. Threat model summary
+
+| Property | Status | Notes |
+|---|---|---|
+| Confidentiality against non-members | ✅ | Group chain key never leaks outside; outer 1:1 DR adds a second layer. |
+| Authenticity against group OUTSIDERS | ✅ | Per-message Ed25519 sig with chain-bound key; canonical bytes domain-separated. |
+| Authenticity against group INSIDERS | ⚠️ partial | Chain key is shared via SenderKeyBundle; a malicious member can forge for THEMSELVES (signing key is bound to chain) but NOT for another member (need that member's Ed25519 private). |
+| Forward secrecy across removes/leaves | ✅ best-effort | Sender-chain rotation on event. Pre-rotation in-flight messages are still decryptable by the departed peer if they receive them — INVARIANTS §26. |
+| Replay resistance | ✅ | Single-use message keys; replay returns `MessageKeyMissing`. Out-of-order within MAX_SKIP=1000 works; outside MAX_SKIP returns `TooManySkipped`. |
+| Membership integrity | ✅ | Founder-signed CreateGroup + MembershipUpdate; epoch monotonic. |
+| Metadata privacy (group membership visible on disk) | ❌ | `group_members.peer_id` is in clear. Same trade-off as DM contacts. |
+
+## 13. Random number generation
 
 All cryptographic randomness comes from `rand::rngs::OsRng`, which on:
 - **Windows:** calls `BCryptGenRandom`.
@@ -487,7 +664,7 @@ All cryptographic randomness comes from `rand::rngs::OsRng`, which on:
 
 `OsRng` is documented in the `rand` crate as a `CryptoRng`. We do not maintain our own PRNG state.
 
-## 13. Dependencies snapshot
+## 14. Dependencies snapshot
 
 | Crate | Version | Used for |
 |---|---|---|

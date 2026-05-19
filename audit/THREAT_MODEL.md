@@ -113,6 +113,21 @@ Post-quantum integration is not on the Phase 4 roadmap; a separate Phase 5 conve
 
 Out of scope — different design space (plausible deniability, ephemeral devices, etc.).
 
+## J. Compromised group member (Phase 5)
+
+**Capability:** a legitimate member of a group whose device is fully compromised — they have the group's `my_sender_keys` row (their own chain) AND every `their_sender_keys` row (every other member's chain). C plus the group context.
+
+| Claim | Status | Where |
+|---|---|---|
+| Can read all past and future group messages. | trivially yes — they're a legitimate group member | n/a |
+| Can mint messages claiming to be themselves. | trivially yes — they own their chain's Ed25519 signing key | n/a |
+| Cannot mint messages claiming to be ANOTHER member of the group. | ✅ | Per-message Ed25519 sig binds to the chain owner's keypair (born with the chain, transmitted in `SenderKeyBundle.verify_pub`). Holding the chain_key isn't enough — forging a sig requires the sign_priv that never travels. See INVARIANTS §24. |
+| Cannot forge a MembershipUpdate. | ✅ unless they're the founder | Only the founder's Ed25519 sig is accepted; the founder is a specific named member. Compromising the founder DOES let an attacker push add/remove ops. See INVARIANTS §25. |
+| Cannot decrypt group messages after they're removed / leave. | ⚠️ partial | All remaining members rotate their `SenderChain` on the remove/leave event; messages encrypted AFTER rotation use chain keys the departed peer never had. Messages already in flight at the moment of the rotation event remain decryptable by them. Defence-in-depth: other members no longer fan out to the departed peer. See INVARIANTS §26. |
+| Can read CONTENT OF MESSAGES FROM OTHER GROUPS that the user is in. | n/a | They don't have the other groups' `their_sender_keys` rows unless they're a member there too. |
+
+**Founder-compromise sub-case.** If the **founder's** device is compromised, the attacker gains MembershipUpdate authority for their groups: they can add Sybils, kick legitimate members, etc. The compromised founder cannot, however, decrypt messages other members exchanged BEFORE the compromise — those used pre-compromise chain keys, and the attacker's cache only contains material from the compromised window. v0 does not implement founder-key rotation as a distinct primitive (would require a CRDT or coordinator vote — design defer to v1).
+
 ## Summary table
 
 | Adversary | Confidentiality | Authenticity | Forward sec. | Post-comp. sec. | Censorship resist. |
@@ -120,9 +135,10 @@ Out of scope — different design space (plausible deniability, ephemeral device
 | A. Passive observer | ✅ | ✅ | ✅ | ✅ | ❌ (Phase 4) |
 | B. Active MITM | ✅ | ✅ | ✅ | ✅ | n/a |
 | C. Compromised peer | n/a (legitimate endpoint) | n/a | n/a | n/a | n/a |
-| D. Offline disk read | ✅ msg/state/otpk | ⚠️ identity.json plaintext | ✅ | ✅ | n/a |
+| D. Offline disk read | ✅ msg/state/otpk/group-chains | ⚠️ identity.json plaintext | ✅ | ✅ | n/a |
 | E. Online local user | ❌ DEK readable | ❌ | n/a | n/a | n/a |
 | F. Bad dependency | depends | depends | depends | depends | depends |
 | G. State DPI | ✅ content | ✅ | ✅ | ✅ | ✅ via `--obfs-key`; ⚠️ statistical / active probing partial |
 | H. Quantum | ❌ | ❌ | ❌ | ❌ | n/a |
 | I. Coercion | ❌ no defense | ❌ | ❌ | ❌ | ❌ |
+| J. Compromised group member | n/a (legitimate) | ✅ cross-member sig unforgeable | ⚠️ rotation-on-remove best-effort | ⚠️ event-driven, not per-msg | n/a |

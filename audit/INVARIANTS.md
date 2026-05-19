@@ -392,6 +392,92 @@ If all four pass, the sender PeerId is authenticated and the message proceeds th
 
 ---
 
+## §24. Per-message Ed25519 signatures prevent cross-member impersonation in groups (Phase 5)
+
+**Statement.** Every group message (`EncryptedPayload.kind = 2`) carries an Ed25519 signature produced under the sender's per-chain signing key, with canonical signing bytes prefixed by `GROUP_MSG_DOMAIN_SEPARATOR = b"zerocenter-group-msg-v1"` and binding `(group_id, sender_pid)` via the associated-data scope. Receivers verify the signature **before any chain state mutation** using the `verify_pub` field of the locally-cached `ReceiverChain` (installed from a `SenderKeyBundle` delivered over the outer 1:1 DR session). Decryption only proceeds on signature success.
+
+**Why.** Each member of a group ends up with every other member's symmetric `chain_key` (it's part of the `SenderKeyBundle` they distribute), so without the Ed25519 sig any member could mint a ciphertext claiming to be from any other chain owner. The per-message signature is the unforgeable bind from "ciphertext at index N on chain X" to "signed by the owner of chain X". The `(group_id, sender_pid)` AD prevents a captured ciphertext from being replayed under a different group context or attributed to a different sender.
+
+**Enforced at.**
+- `src/crypto/megolm.rs::canonical_sign_bytes` — canonical layout `DOMAIN || index_be || ad_len_be || ad || ct_len_be || ct`, every variable-length field length-prefixed.
+- `src/crypto/megolm.rs::SenderChain::encrypt` — Ed25519 sign with `sign_priv` from the chain's birth.
+- `src/crypto/megolm.rs::ReceiverChain::decrypt` — `VerifyingKey::from_bytes` + `verify(canonical, sig)` is step 1, before the past-message lookup or chain-forward walk. A signature failure is a no-op on chain state (the function returns `Err(BadSignature)` immediately).
+- `src/protocol/group.rs::build_group_ad` — `group_id (32) || sender_pid_len_be (4) || sender_pid` AD layout.
+
+**Test coverage.**
+- `crypto::megolm::tests::signature_tamper_rejected_before_state_mutation` — sig flip → `BadSignature` AND chain state unchanged.
+- `crypto::megolm::tests::ciphertext_tamper_rejected_by_signature` — ct flip → `BadSignature` (caught by sig before AEAD).
+- `crypto::megolm::tests::ad_mismatch_rejected_by_signature` — verifier uses a different AD → `BadSignature`.
+- `crypto::megolm::tests::cross_chain_message_rejected_by_signature` — ciphertext from chain A rejected by chain B's verifier.
+- `protocol::group::tests::group_ad_mismatch_breaks_megolm_decrypt` — AD swap on receive side fails verification.
+
+**Suggested attack.** Obtain Bob's `chain_key` (e.g. as a co-member of a group). Mint a ciphertext under that key at some index, signed by your own Ed25519. Send to Carol. Carol's `their_sender_keys[(group_id, bob_pid)].verify_pub` is Bob's verify key, not yours — verify fails before any state mutation. Now try the reverse: substitute Bob's verify_pub into your fake ReceiverChain row. To install that row you'd need to deliver a SenderKeyDistribution claiming to be from Bob over the 1:1 DR channel, which requires Bob's DR session keys (out of scope of in-group attackers).
+
+---
+
+## §25. Group membership state is only valid under founder Ed25519 signature (Phase 5)
+
+**Statement.** Three protocol points enforce the founder authority model:
+
+1. **CreateGroup acceptance.** A recipient installs a `GroupControl::CreateGroup` row only if (a) `founder_sig` verifies against `founder_pid`'s embedded Ed25519 pubkey under `canonical_create_bytes`, (b) the outer DR sender PeerId equals `founder_pid`, and (c) the recipient is in the `members` list. (a) prevents forgery; (b) prevents a stranger from spoofing the founder field; (c) prevents being silently added to a group you're not in.
+
+2. **MembershipUpdate acceptance.** A recipient applies a `GroupControl::MembershipUpdate` only if `founder_sig` verifies against the **locally-stored** `groups.founder_pid` for the named `group_id` (not a founder PID that might be embedded in the update — the update carries no such field). This forces the verifier to use a founder PID they previously committed to via the matching CreateGroup, preventing a stranger from spoofing updates against a group they didn't found.
+
+3. **Epoch monotonicity.** A `MembershipUpdate` with `epoch <= stored_row.epoch` is rejected as a stale replay before any state mutation.
+
+`Leave` is also signed (`leaver_sig` over `canonical_leave_bytes` under the leaver's identity), so other members can verify the announcement even when the leaver isn't currently a peer of theirs at the moment they see the message (e.g. forwarded via a relay).
+
+`SenderKeyDistribution` is the one variant that carries no inner signature — authentication is inherited from the outer 1:1 DR session that already authenticates the sender. Recipients additionally check that the DR-verified sender is in the local `group_members` list before installing the bundle.
+
+**Why.** Without founder authority, anyone could push membership state changes (silently add a Sybil to spy, kick a legitimate member out of fanout). Without epoch monotonicity, an attacker who captured an old MembershipUpdate could replay it after a contradictory update has already been applied, re-introducing a removed member.
+
+**Enforced at.**
+- `src/protocol/group.rs::GROUP_CTRL_DOMAIN_SEPARATOR = b"zerocenter-group-ctrl-v1"` — distinct from §1's DM/sealed domain separators so a captured DM signature can't be replayed as group control authorization.
+- `src/protocol/group.rs::canonical_create_bytes` / `canonical_update_bytes` / `canonical_leave_bytes` — canonical signing bytes with length-prefixed variable fields. Member lists are sorted before encoding so semantically-equal sets produce byte-identical signatures (defends against subtle re-ordering attempts).
+- `src/protocol/group.rs::GroupControl::verify_signature` — covers CreateGroup, Leave, SenderKeyDistribution.
+- `src/protocol/group.rs::GroupControl::verify_membership_update(founder_pid)` — caller MUST supply the locally-stored founder PID; the plain `verify_signature` deliberately returns `BadSignature` for the MembershipUpdate variant so a careless call site can't accept an unverified update.
+- `src/core/node.rs::process_group_control` — three arms (`CreateGroup`, `MembershipUpdate`, `Leave`) each verify the relevant signature; the `MembershipUpdate` arm additionally enforces `epoch > stored_row.epoch`.
+
+**Test coverage.**
+- `protocol::group::tests::create_group_signs_and_verifies` — happy path.
+- `protocol::group::tests::create_group_tampered_member_list_fails` — drop one member → BadSignature.
+- `protocol::group::tests::create_group_member_order_does_not_affect_sig` — sorted-canonical bytes give byte-identical signatures regardless of insert order.
+- `protocol::group::tests::membership_update_verifies_against_founder_pid` — plain `verify_signature` returns BadSignature; `verify_membership_update(founder_pid)` succeeds.
+- `protocol::group::tests::membership_update_wrong_founder_fails` — attaching the wrong founder PID at verify time fails.
+- `protocol::group::tests::leave_signs_and_verifies` and `leave_with_wrong_keypair_fails_verify`.
+
+**Suggested attack.**
+- Replay a CreateGroup with a swapped `founder_pid` field but the same `founder_sig` — `canonical_create_bytes` includes `founder_pid` so the sig binding fails.
+- Mint a MembershipUpdate signed by your own Ed25519, send to a group you're a member of. Recipient looks up the locally-stored `groups.founder_pid` (which is the real founder) and verifies your sig against it → fails.
+- Capture epoch=N from the wire, wait for the founder to issue epoch=N+1 (e.g. removing a Sybil), then replay epoch=N to re-introduce the Sybil — recipient sees `epoch=N <= stored=N+1` and rejects.
+- Issue an unsigned `SenderKeyDistribution` from outside the group — outer DR sender PID is cross-checked against the local `group_members` list and rejected.
+
+---
+
+## §26. Sender-key rotation on remove/leave is forward-secrecy best-effort, not retroactive (Phase 5)
+
+**Statement.** When the founder issues a remove or any member sends a Leave, every other member rotates their own `SenderChain`: a fresh chain key + Ed25519 keypair is generated, the `my_sender_keys` row is overwritten, and a `SenderKeyDistribution` for the new bundle is broadcast to every remaining member. Future messages from each member use chain keys the departed peer never had cached, so even a saved copy of the old `their_sender_keys` blob on the departed peer's disk is useless for any post-rotation ciphertext.
+
+The rotation is event-driven (one rotation per remove/leave event), not per-message. Messages sent BETWEEN the rotation trigger and a given member receiving the new bundle remain decryptable by the departed peer IF the departed peer somehow still receives them — which in normal operation they wouldn't (other members no longer fan out to a peer absent from `group_members`).
+
+**Why.** Without rotation, the symmetric chain key cached by every member is effectively shared with the departed peer forever — they could continue decrypting traffic for the lifetime of each member's chain. Rotation supersedes that cache with material the departed peer cannot acquire.
+
+**Enforced at.**
+- `src/core/node.rs::rotate_my_sender_chain_and_broadcast` — generates a fresh `SenderChain`, overwrites the local `my_sender_keys` row, builds a `SenderKeyDistribution` for the new bundle, and fans out to every remaining group member via the existing 1:1 DR.
+- `src/core/node.rs::handle_group_remove` — founder rotates immediately after broadcasting the MembershipUpdate.
+- `src/core/node.rs::process_group_control` MembershipUpdate arm — non-founder members rotate on receipt if `removed` is non-empty.
+- `src/core/node.rs::process_group_control` Leave arm — every member (other than the leaver) rotates on receipt.
+
+**What this DOES NOT defend against.**
+- **Retroactive decryption.** Messages already in flight (or stored on a relay) at the moment of the rotation event are decryptable by the departed peer with their cached old chain key. True per-message retro-PFS would require chain rotation on every send, multiplying onboarding cost by message rate.
+- **Sloppy fan-out.** If a non-departed member's code accidentally still includes the departed PID in fan-out after applying the MembershipUpdate, rotation doesn't help — the message is delivered with the new chain key wrapped in the 1:1 DR to a peer who has no `their_sender_keys` row for the new chain (so they fail to decrypt anyway). Defence-in-depth: keep the membership check in `group_send`/`deliver_kind_to_member` callers tight.
+- **Member-key compromise before rotation propagates.** A remaining member whose own chain key is cached by the departed peer is at risk until the rotation event arrives at them. In poor-connectivity scenarios this window can be unbounded — there is no liveness guarantee.
+- **No prekey-fetch onboarding for the new joiner.** If a newly-added member has never DM'd existing members before, they have no 1:1 DR session for `deliver_kind_to_member` to ride — the bundle delivery is warn-and-skipped. New joiners must first complete a 1:1 prekey-fetch + first message before group bundle distribution works. v0 limitation.
+
+**Suggested attack.** Position a node so it captures every message on the wire. Join a group, then arrange to be removed (or leave). Continue capturing. Try to decrypt: only ciphertexts sent BEFORE the rotation events propagated to each respective sender are decryptable. Post-rotation ciphertexts produce `MessageKeyMissing` or `BadSignature` (depending on which chain was hit) — because the chain key for that index was never derivable from the bundles you held.
+
+---
+
 ## End of invariants
 
 This list is not exhaustive — it captures what the implementers consider load-bearing. A reviewer should treat anything *not* listed here as also potentially load-bearing and dig in.
