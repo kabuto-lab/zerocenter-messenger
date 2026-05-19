@@ -77,6 +77,25 @@ pub struct P2PNode {
     /// the 2-DH fallback path. Pruned periodically on the cleanup
     /// tick to bound memory.
     recent_otpk_fetches: HashMap<PeerId, i64>,
+    /// Push-refresh channel for the GUI. `None` on the headless CLI path
+    /// (no listener); `Some` when `--gui` wired a receiver via
+    /// [`Self::set_gui_event_sender`]. Sends use `try_send` so a slow
+    /// or stalled webview never blocks the node event loop — dropped
+    /// events just mean the user sees the new message on their next
+    /// manual action (still better than the old "must reopen chat" gap).
+    gui_tx: Option<mpsc::Sender<GuiEvent>>,
+}
+
+/// Events the node pushes to a connected GUI frontend. Currently only
+/// inbound-DM notifications; structured as an enum so adding future
+/// event kinds (connection state, prekey-fetch outcomes, ...) stays
+/// non-breaking on the wire.
+#[derive(Debug, Clone)]
+pub enum GuiEvent {
+    /// A DM from `peer` (base58 PeerId) was just decrypted and stored.
+    /// Tauri side translates this into a `"dm-received"` event with
+    /// `peer` as the payload.
+    DmReceived { peer: String },
 }
 
 /// Inputs that travel only on the first message of a fresh session:
@@ -169,7 +188,23 @@ impl P2PNode {
             pending_record_queries: HashMap::new(),
             pending_ack_queries: HashMap::new(),
             recent_otpk_fetches: HashMap::new(),
+            gui_tx: None,
         })
+    }
+
+    /// Install a push-refresh channel. Call before [`Self::run_with_commands`]
+    /// if a Tauri frontend wants `GuiEvent::DmReceived` notifications;
+    /// the CLI path leaves this `None`.
+    pub fn set_gui_event_sender(&mut self, tx: mpsc::Sender<GuiEvent>) {
+        self.gui_tx = Some(tx);
+    }
+
+    /// Fire-and-forget event push. `try_send` drops on full/closed —
+    /// see the `gui_tx` field comment for why that's intentional.
+    fn emit_gui(&self, ev: GuiEvent) {
+        if let Some(tx) = &self.gui_tx {
+            let _ = tx.try_send(ev);
+        }
     }
 
     /// Start the P2P node (begin listening)
@@ -1861,6 +1896,7 @@ impl P2PNode {
         debug!("Decrypted first DM from {}: {}", peer, text);
         println!("\n🔓 {}: {}", peer, text);
         println!("> ");
+        self.emit_gui(GuiEvent::DmReceived { peer: peer.to_base58() });
         true
     }
 
@@ -1917,6 +1953,7 @@ impl P2PNode {
         debug!("Decrypted DM from {}: {}", peer, text);
         println!("\n🔓 {}: {}", peer, text);
         println!("> ");
+        self.emit_gui(GuiEvent::DmReceived { peer: peer.to_base58() });
         true
     }
 

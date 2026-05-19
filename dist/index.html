@@ -392,6 +392,7 @@
 
     <script>
         const { invoke } = window.__TAURI__.core;
+        const { listen } = window.__TAURI__.event;
 
         let selectedContact = null;
         let contacts = [];
@@ -407,6 +408,19 @@
             }
 
             await loadContacts();
+
+            // Push-refresh: node fires "dm-received" with the sender's
+            // base58 PeerId as payload whenever an inbound DM decrypts.
+            // We always refresh the contacts list (a first-DM-from-stranger
+            // auto-adds a contact node-side), and re-load the open
+            // conversation if it matches.
+            await listen('dm-received', (event) => {
+                const peer = event.payload;
+                loadContacts();
+                if (selectedContact && peer === selectedContact) {
+                    loadMessages(selectedContact);
+                }
+            });
         }
 
         // Load contacts

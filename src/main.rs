@@ -2,7 +2,7 @@ use anyhow::Result;
 use std::path::PathBuf;
 use tokio::sync::mpsc;
 use tracing::{info, error};
-use zerocenter_messenger::core::{Config, Identity, P2PNode, NodeCommand};
+use zerocenter_messenger::core::{Config, GuiEvent, Identity, P2PNode, NodeCommand};
 use zerocenter_messenger::cli::Cli;
 use zerocenter_messenger::crypto::keyring as zc_keyring;
 use libp2p::{PeerId, Multiaddr};
@@ -91,6 +91,16 @@ async fn main() -> Result<()> {
 
     // Initialize P2P node
     let mut node = P2PNode::new(config, identity, dek).await?;
+
+    // GUI push-refresh channel — only wired when --gui is set. CLI
+    // path leaves the sender None so `emit_gui` becomes a no-op.
+    let gui_event_rx = if cli.gui {
+        let (tx, rx) = mpsc::channel::<GuiEvent>(32);
+        node.set_gui_event_sender(tx);
+        Some(rx)
+    } else {
+        None
+    };
 
     // Start listening
     node.start().await?;
@@ -238,7 +248,8 @@ async fn main() -> Result<()> {
     // Foreground UI — either the legacy line-reader CLI or the Tauri
     // webview, depending on `--gui`.
     if cli.gui {
-        run_gui(cmd_tx).await?;
+        let rx = gui_event_rx.expect("gui_event_rx initialized when cli.gui is set");
+        run_gui(cmd_tx, rx).await?;
     } else {
         if let Err(e) = zerocenter_messenger::cli::run_cli_with_handlers(handlers).await {
             error!("CLI error: {}", e);
@@ -259,12 +270,18 @@ async fn main() -> Result<()> {
 /// "rebuild with --features gui" error and exits so the user isn't
 /// left guessing why their flag did nothing.
 #[cfg(feature = "gui")]
-async fn run_gui(cmd_tx: tokio::sync::mpsc::Sender<NodeCommand>) -> Result<()> {
-    zerocenter_messenger::gui::run(cmd_tx).await
+async fn run_gui(
+    cmd_tx: tokio::sync::mpsc::Sender<NodeCommand>,
+    gui_event_rx: tokio::sync::mpsc::Receiver<GuiEvent>,
+) -> Result<()> {
+    zerocenter_messenger::gui::run(cmd_tx, gui_event_rx).await
 }
 
 #[cfg(not(feature = "gui"))]
-async fn run_gui(_cmd_tx: tokio::sync::mpsc::Sender<NodeCommand>) -> Result<()> {
+async fn run_gui(
+    _cmd_tx: tokio::sync::mpsc::Sender<NodeCommand>,
+    _gui_event_rx: tokio::sync::mpsc::Receiver<GuiEvent>,
+) -> Result<()> {
     anyhow::bail!(
         "--gui was passed but this binary was built without the `gui` feature. \
          Rebuild with: cargo build --release --features gui \

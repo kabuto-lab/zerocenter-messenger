@@ -21,10 +21,10 @@
 
 use anyhow::Result;
 use libp2p::PeerId;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 use tokio::sync::{mpsc, oneshot};
 
-use crate::core::NodeCommand;
+use crate::core::{GuiEvent, NodeCommand};
 
 /// State held by Tauri and made available to every `#[tauri::command]`.
 struct AppState {
@@ -33,9 +33,19 @@ struct AppState {
 
 /// Launch the Tauri application. Returns when the webview window is
 /// closed by the user. `cmd_tx` is the same channel `main.rs` would
-/// otherwise hand to `run_cli_with_handlers`.
-pub async fn run(cmd_tx: mpsc::Sender<NodeCommand>) -> Result<()> {
+/// otherwise hand to `run_cli_with_handlers`. `gui_event_rx` carries
+/// node-side push events (e.g. inbound-DM-decrypted) that the frontend
+/// listens for to refresh in real time.
+pub async fn run(
+    cmd_tx: mpsc::Sender<NodeCommand>,
+    gui_event_rx: mpsc::Receiver<GuiEvent>,
+) -> Result<()> {
     let state = AppState { cmd_tx };
+    // The setup closure runs once at startup; it consumes `gui_event_rx`
+    // into a forwarder task. Wrap in Mutex<Option<_>> so the FnMut
+    // signature `setup` requires is satisfied even though we move out
+    // exactly once.
+    let rx_slot = std::sync::Mutex::new(Some(gui_event_rx));
 
     tauri::Builder::default()
         .manage(state)
@@ -46,11 +56,27 @@ pub async fn run(cmd_tx: mpsc::Sender<NodeCommand>) -> Result<()> {
             cmd::send_message,
             cmd::add_contact,
         ])
-        .setup(|app| {
+        .setup(move |app| {
             // Ensure the main window is visible on startup. Tauri 2.x
             // sometimes defers showing if the dev tools attached.
             if let Some(win) = app.get_webview_window("main") {
                 let _ = win.show();
+            }
+
+            // Pump node-side GuiEvents onto the webview's event bus.
+            // AppHandle is Clone+Send, so a tokio task can hold it for
+            // the lifetime of the receiver.
+            if let Some(mut rx) = rx_slot.lock().ok().and_then(|mut g| g.take()) {
+                let handle = app.handle().clone();
+                tokio::spawn(async move {
+                    while let Some(ev) = rx.recv().await {
+                        match ev {
+                            GuiEvent::DmReceived { peer } => {
+                                let _ = handle.emit("dm-received", peer);
+                            }
+                        }
+                    }
+                });
             }
             Ok(())
         })
