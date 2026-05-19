@@ -128,6 +128,62 @@
             background: rgba(0, 240, 255, 0.2);
         }
 
+        .groups-header {
+            padding: 10px 20px 4px;
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            border-top: 1px solid var(--border-color);
+        }
+
+        .group-avatar {
+            width: 40px;
+            height: 40px;
+            border-radius: 8px;
+            background: linear-gradient(135deg, var(--accent-secondary), var(--accent-primary));
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            margin-right: 12px;
+        }
+
+        .group-controls {
+            display: flex;
+            gap: 6px;
+            margin-top: 6px;
+        }
+
+        .group-controls button {
+            padding: 4px 10px;
+            font-size: 0.75rem;
+            border-radius: 6px;
+            border: 1px solid var(--border-color);
+            background: var(--bg-tertiary);
+            color: var(--text-secondary);
+            cursor: pointer;
+        }
+
+        .group-controls button:hover {
+            border-color: var(--accent-primary);
+            color: var(--accent-primary);
+        }
+
+        textarea.modal-textarea {
+            width: 100%;
+            min-height: 90px;
+            padding: 10px;
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            color: var(--text-primary);
+            margin-bottom: 15px;
+            font-family: monospace;
+            font-size: 0.85rem;
+            resize: vertical;
+        }
+
         /* Main chat area */
         .chat-area {
             flex: 1;
@@ -338,6 +394,13 @@
             </div>
 
             <button class="add-contact-btn" onclick="showAddContactModal()">+ Add Contact</button>
+
+            <div class="groups-header">Groups</div>
+            <div class="contacts-list" id="groupsList">
+                <!-- Groups will be rendered here -->
+            </div>
+
+            <button class="add-contact-btn" onclick="showCreateGroupModal()">+ New Group</button>
         </div>
 
         <!-- Chat Area -->
@@ -345,6 +408,7 @@
             <div class="chat-header">
                 <h2 id="chatTitle">Select a contact</h2>
                 <span class="status" id="connectionStatus">● Connected</span>
+                <div id="chatControls"></div>
             </div>
 
             <div class="messages-container" id="messagesContainer">
@@ -373,13 +437,13 @@
     <div class="modal-overlay" id="addContactModal">
         <div class="modal">
             <h3>Add Contact</h3>
-            <input 
-                type="text" 
+            <input
+                type="text"
                 id="contactPeerId"
                 placeholder="Enter Peer ID"
             />
-            <input 
-                type="text" 
+            <input
+                type="text"
                 id="contactAlias"
                 placeholder="Alias (optional)"
             />
@@ -390,12 +454,54 @@
         </div>
     </div>
 
+    <!-- Create Group Modal -->
+    <div class="modal-overlay" id="createGroupModal">
+        <div class="modal">
+            <h3>Create Group</h3>
+            <input type="text" id="newGroupName" placeholder="Group name" />
+            <textarea class="modal-textarea" id="newGroupMembers"
+                placeholder="Member Peer IDs (one per line)"></textarea>
+            <div class="modal-buttons">
+                <button class="modal-btn cancel" onclick="hideCreateGroupModal()">Cancel</button>
+                <button class="modal-btn confirm" onclick="createGroup()">Create</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Add Group Member Modal -->
+    <div class="modal-overlay" id="addGroupMemberModal">
+        <div class="modal">
+            <h3>Add member to group</h3>
+            <input type="text" id="addGroupMemberPid" placeholder="Peer ID to add" />
+            <div class="modal-buttons">
+                <button class="modal-btn cancel" onclick="hideAddGroupMemberModal()">Cancel</button>
+                <button class="modal-btn confirm" onclick="submitAddGroupMember()">Add</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Remove Group Member Modal -->
+    <div class="modal-overlay" id="removeGroupMemberModal">
+        <div class="modal">
+            <h3>Remove member from group</h3>
+            <input type="text" id="removeGroupMemberPid" placeholder="Peer ID to remove" />
+            <div class="modal-buttons">
+                <button class="modal-btn cancel" onclick="hideRemoveGroupMemberModal()">Cancel</button>
+                <button class="modal-btn confirm" onclick="submitRemoveGroupMember()">Remove</button>
+            </div>
+        </div>
+    </div>
+
     <script>
         const { invoke } = window.__TAURI__.core;
         const { listen } = window.__TAURI__.event;
 
+        // 'contact' | 'group' | null — which sidebar entry is open.
+        let selectedMode = null;
         let selectedContact = null;
+        let selectedGroup = null; // { group_id, name, is_founder }
         let contacts = [];
+        let groups = [];
 
         // Initialize app
         async function init() {
@@ -408,17 +514,26 @@
             }
 
             await loadContacts();
+            await loadGroups();
 
-            // Push-refresh: node fires "dm-received" with the sender's
-            // base58 PeerId as payload whenever an inbound DM decrypts.
-            // We always refresh the contacts list (a first-DM-from-stranger
-            // auto-adds a contact node-side), and re-load the open
-            // conversation if it matches.
+            // Push-refresh on inbound DMs.
             await listen('dm-received', (event) => {
                 const peer = event.payload;
                 loadContacts();
-                if (selectedContact && peer === selectedContact) {
+                if (selectedMode === 'contact' && peer === selectedContact) {
                     loadMessages(selectedContact);
+                }
+            });
+
+            // Push-refresh on inbound group messages. Payload is
+            // { group_id: <hex>, sender: <base58> }. We always reload
+            // the groups list (member count or recency may have shifted)
+            // and re-fetch messages when the matching group is open.
+            await listen('group-msg-received', (event) => {
+                const { group_id } = event.payload || {};
+                loadGroups();
+                if (selectedMode === 'group' && selectedGroup && group_id === selectedGroup.group_id) {
+                    loadGroupMessages(selectedGroup.group_id);
                 }
             });
         }
@@ -433,16 +548,43 @@
             }
         }
 
+        async function loadGroups() {
+            try {
+                groups = await invoke('get_groups');
+                renderGroups();
+            } catch (error) {
+                console.error('Error loading groups:', error);
+            }
+        }
+
         // Render contacts list
         function renderContacts() {
             const container = document.getElementById('contactsList');
             container.innerHTML = contacts.map(contact => `
-                <div class="contact-item ${selectedContact === contact.peer_id ? 'active' : ''}" 
-                     onclick="selectContact('${contact.peer_id}', '${contact.alias || contact.peer_id}')">
+                <div class="contact-item ${selectedMode === 'contact' && selectedContact === contact.peer_id ? 'active' : ''}"
+                     onclick="selectContact('${contact.peer_id}', '${escapeHtml(contact.alias || contact.peer_id)}')">
                     <div class="contact-avatar">${(contact.alias || contact.peer_id)[0].toUpperCase()}</div>
                     <div class="contact-info">
-                        <div class="contact-name">${contact.alias || contact.peer_id.slice(0, 8)}</div>
+                        <div class="contact-name">${escapeHtml(contact.alias || contact.peer_id.slice(0, 8))}</div>
                         <div class="contact-status">● Online</div>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        function renderGroups() {
+            const container = document.getElementById('groupsList');
+            if (!groups || groups.length === 0) {
+                container.innerHTML = '';
+                return;
+            }
+            container.innerHTML = groups.map(g => `
+                <div class="contact-item ${selectedMode === 'group' && selectedGroup && selectedGroup.group_id === g.group_id ? 'active' : ''}"
+                     onclick="selectGroup('${g.group_id}', '${escapeHtml(g.name)}', ${g.is_founder})">
+                    <div class="group-avatar">${(g.name || '#')[0].toUpperCase()}</div>
+                    <div class="contact-info">
+                        <div class="contact-name">${escapeHtml(g.name)}</div>
+                        <div class="contact-status">${g.member_count} member(s) · epoch ${g.epoch}${g.is_founder ? ' · founder' : ''}</div>
                     </div>
                 </div>
             `).join('');
@@ -450,10 +592,32 @@
 
         // Select a contact
         function selectContact(peerId, name) {
+            selectedMode = 'contact';
             selectedContact = peerId;
+            selectedGroup = null;
             document.getElementById('chatTitle').textContent = name;
+            document.getElementById('chatControls').innerHTML = '';
             renderContacts();
+            renderGroups();
             loadMessages(peerId);
+        }
+
+        function selectGroup(groupId, name, isFounder) {
+            selectedMode = 'group';
+            selectedGroup = { group_id: groupId, name, is_founder: isFounder };
+            selectedContact = null;
+            document.getElementById('chatTitle').textContent = `👥 ${name}`;
+            const controls = document.getElementById('chatControls');
+            const buttons = [];
+            if (isFounder) {
+                buttons.push('<button onclick="showAddGroupMemberModal()">+ Add member</button>');
+                buttons.push('<button onclick="showRemoveGroupMemberModal()">- Remove member</button>');
+            }
+            buttons.push('<button onclick="leaveGroup()">Leave</button>');
+            controls.innerHTML = `<div class="group-controls">${buttons.join('')}</div>`;
+            renderContacts();
+            renderGroups();
+            loadGroupMessages(groupId);
         }
 
         // Load messages for a contact
@@ -463,6 +627,15 @@
                 renderMessages(messages);
             } catch (error) {
                 console.error('Error loading messages:', error);
+            }
+        }
+
+        async function loadGroupMessages(groupId) {
+            try {
+                const messages = await invoke('get_group_messages', { groupId: groupId });
+                renderMessages(messages);
+            } catch (error) {
+                console.error('Error loading group messages:', error);
             }
         }
 
@@ -492,20 +665,130 @@
             container.scrollTop = container.scrollHeight;
         }
 
-        // Send a message
+        // Send a message into the currently-open chat (contact OR group).
         async function sendMessage() {
             const input = document.getElementById('messageInput');
             const content = input.value.trim();
-            
-            if (!content || !selectedContact) return;
+
+            if (!content) return;
 
             try {
-                await invoke('send_message', { recipient: selectedContact, content });
-                input.value = '';
-                loadMessages(selectedContact);
+                if (selectedMode === 'contact' && selectedContact) {
+                    await invoke('send_message', { recipient: selectedContact, content });
+                    input.value = '';
+                    loadMessages(selectedContact);
+                } else if (selectedMode === 'group' && selectedGroup) {
+                    await invoke('send_group_message', {
+                        groupId: selectedGroup.group_id,
+                        content,
+                    });
+                    input.value = '';
+                    loadGroupMessages(selectedGroup.group_id);
+                }
             } catch (error) {
                 console.error('Error sending message:', error);
             }
+        }
+
+        // ─── Group modals ───
+        function showCreateGroupModal() {
+            document.getElementById('createGroupModal').classList.add('active');
+        }
+        function hideCreateGroupModal() {
+            document.getElementById('createGroupModal').classList.remove('active');
+            document.getElementById('newGroupName').value = '';
+            document.getElementById('newGroupMembers').value = '';
+        }
+        async function createGroup() {
+            const name = document.getElementById('newGroupName').value.trim();
+            const membersRaw = document.getElementById('newGroupMembers').value;
+            if (!name) { alert('Group name is required'); return; }
+            const members = membersRaw
+                .split(/\r?\n/)
+                .map(s => s.trim())
+                .filter(s => s.length > 0);
+            try {
+                await invoke('create_group', { name, members });
+                hideCreateGroupModal();
+                // Group list refresh happens via the next event; trigger
+                // a manual reload too for snappy feedback.
+                setTimeout(loadGroups, 250);
+            } catch (error) {
+                alert('Error creating group: ' + error);
+            }
+        }
+
+        function showAddGroupMemberModal() {
+            if (!selectedGroup) return;
+            document.getElementById('addGroupMemberModal').classList.add('active');
+        }
+        function hideAddGroupMemberModal() {
+            document.getElementById('addGroupMemberModal').classList.remove('active');
+            document.getElementById('addGroupMemberPid').value = '';
+        }
+        async function submitAddGroupMember() {
+            const pid = document.getElementById('addGroupMemberPid').value.trim();
+            if (!selectedGroup || !pid) return;
+            try {
+                await invoke('add_group_member', {
+                    groupId: selectedGroup.group_id,
+                    peerId: pid,
+                });
+                hideAddGroupMemberModal();
+                setTimeout(loadGroups, 250);
+            } catch (error) {
+                alert('Error adding member: ' + error);
+            }
+        }
+
+        function showRemoveGroupMemberModal() {
+            if (!selectedGroup) return;
+            document.getElementById('removeGroupMemberModal').classList.add('active');
+        }
+        function hideRemoveGroupMemberModal() {
+            document.getElementById('removeGroupMemberModal').classList.remove('active');
+            document.getElementById('removeGroupMemberPid').value = '';
+        }
+        async function submitRemoveGroupMember() {
+            const pid = document.getElementById('removeGroupMemberPid').value.trim();
+            if (!selectedGroup || !pid) return;
+            try {
+                await invoke('remove_group_member', {
+                    groupId: selectedGroup.group_id,
+                    peerId: pid,
+                });
+                hideRemoveGroupMemberModal();
+                setTimeout(loadGroups, 250);
+            } catch (error) {
+                alert('Error removing member: ' + error);
+            }
+        }
+
+        async function leaveGroup() {
+            if (!selectedGroup) return;
+            if (!confirm(`Leave group "${selectedGroup.name}"?`)) return;
+            try {
+                await invoke('leave_group', { groupId: selectedGroup.group_id });
+                selectedMode = null;
+                selectedGroup = null;
+                document.getElementById('chatTitle').textContent = 'Select a contact';
+                document.getElementById('chatControls').innerHTML = '';
+                document.getElementById('messagesContainer').innerHTML =
+                    '<div class="empty-state"><div class="icon">💬</div><p>Select a contact to start messaging</p></div>';
+                loadGroups();
+            } catch (error) {
+                alert('Error leaving group: ' + error);
+            }
+        }
+
+        function escapeHtml(s) {
+            if (s == null) return '';
+            return String(s)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
         }
 
         // Handle Enter key

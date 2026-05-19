@@ -55,6 +55,13 @@ pub async fn run(
             cmd::get_messages,
             cmd::send_message,
             cmd::add_contact,
+            cmd::get_groups,
+            cmd::get_group_messages,
+            cmd::create_group,
+            cmd::send_group_message,
+            cmd::add_group_member,
+            cmd::remove_group_member,
+            cmd::leave_group,
         ])
         .setup(move |app| {
             // Ensure the main window is visible on startup. Tauri 2.x
@@ -185,5 +192,112 @@ mod cmd {
         })
         .await?;
         result
+    }
+
+    // ───────────────────── Phase 5 group commands ─────────────────────
+
+    /// Decode a 64-char hex group id into raw 32 bytes. Shared by all
+    /// group commands that take a group id from the webview.
+    fn parse_gid(s: &str) -> Result<crate::protocol::GroupId, String> {
+        let bytes = hex::decode(s.trim())
+            .map_err(|e| format!("group id must be 64 hex chars: {}", e))?;
+        if bytes.len() != 32 {
+            return Err(format!(
+                "group id must be exactly 32 bytes (64 hex chars); got {}",
+                bytes.len()
+            ));
+        }
+        let mut out = [0u8; 32];
+        out.copy_from_slice(&bytes);
+        Ok(out)
+    }
+
+    #[tauri::command]
+    pub async fn get_groups(
+        state: tauri::State<'_, AppState>,
+    ) -> Result<Vec<crate::core::GroupDto>, String> {
+        round_trip(&state, NodeCommand::QueryGroups).await
+    }
+
+    #[tauri::command]
+    pub async fn get_group_messages(
+        state: tauri::State<'_, AppState>,
+        group_id: String,
+    ) -> Result<Vec<crate::core::GroupMessageDto>, String> {
+        let gid = parse_gid(&group_id)?;
+        round_trip(&state, |reply| NodeCommand::QueryGroupMessages(gid, reply)).await
+    }
+
+    #[tauri::command]
+    pub async fn create_group(
+        state: tauri::State<'_, AppState>,
+        name: String,
+        members: Vec<String>,
+    ) -> Result<(), String> {
+        let parsed: Result<Vec<PeerId>, _> =
+            members.iter().map(|s| s.parse::<PeerId>()).collect();
+        let parsed = parsed.map_err(|e| format!("invalid member peer id: {}", e))?;
+        state
+            .cmd_tx
+            .send(NodeCommand::GroupCreate(name, parsed))
+            .await
+            .map_err(err)
+    }
+
+    #[tauri::command]
+    pub async fn send_group_message(
+        state: tauri::State<'_, AppState>,
+        group_id: String,
+        content: String,
+    ) -> Result<(), String> {
+        let gid = parse_gid(&group_id)?;
+        state
+            .cmd_tx
+            .send(NodeCommand::GroupSend(gid, content))
+            .await
+            .map_err(err)
+    }
+
+    #[tauri::command]
+    pub async fn add_group_member(
+        state: tauri::State<'_, AppState>,
+        group_id: String,
+        peer_id: String,
+    ) -> Result<(), String> {
+        let gid = parse_gid(&group_id)?;
+        let peer = peer_id.parse::<PeerId>().map_err(err)?;
+        state
+            .cmd_tx
+            .send(NodeCommand::GroupAdd(gid, peer))
+            .await
+            .map_err(err)
+    }
+
+    #[tauri::command]
+    pub async fn remove_group_member(
+        state: tauri::State<'_, AppState>,
+        group_id: String,
+        peer_id: String,
+    ) -> Result<(), String> {
+        let gid = parse_gid(&group_id)?;
+        let peer = peer_id.parse::<PeerId>().map_err(err)?;
+        state
+            .cmd_tx
+            .send(NodeCommand::GroupRemove(gid, peer))
+            .await
+            .map_err(err)
+    }
+
+    #[tauri::command]
+    pub async fn leave_group(
+        state: tauri::State<'_, AppState>,
+        group_id: String,
+    ) -> Result<(), String> {
+        let gid = parse_gid(&group_id)?;
+        state
+            .cmd_tx
+            .send(NodeCommand::GroupLeave(gid))
+            .await
+            .map_err(err)
     }
 }

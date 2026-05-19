@@ -163,6 +163,10 @@ pub enum NodeCommand {
         alias: Option<String>,
         reply: tokio::sync::oneshot::Sender<Result<(), String>>,
     },
+    /// Phase 5 GUI: return all local groups as GroupDto rows.
+    QueryGroups(tokio::sync::oneshot::Sender<Vec<GroupDto>>),
+    /// Phase 5 GUI: return the message history for `group_id` (newest last).
+    QueryGroupMessages(crate::protocol::GroupId, tokio::sync::oneshot::Sender<Vec<GroupMessageDto>>),
 }
 
 /// DTO returned to the GUI by `QueryContacts`. PeerId becomes a base58
@@ -177,6 +181,31 @@ pub struct ContactDto {
 /// webview pick the "sent" bubble style vs the "received" one.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct MessageDto {
+    pub sender: String,
+    pub content: String,
+    pub timestamp: i64,
+    pub is_own: bool,
+}
+
+/// DTO returned to the GUI by `QueryGroups`. `group_id` is lowercase
+/// hex (64 chars), `founder` is the base58 PeerId of the founder, and
+/// `is_founder` lets the webview show / hide founder-only controls
+/// (add / remove member) without a separate round-trip.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct GroupDto {
+    pub group_id: String,
+    pub name: String,
+    pub founder: String,
+    pub epoch: u64,
+    pub member_count: usize,
+    pub is_founder: bool,
+}
+
+/// DTO returned to the GUI by `QueryGroupMessages`. Mirrors `MessageDto`
+/// (sender base58, content as a UTF-8-lossy string, timestamp seconds,
+/// `is_own` for bubble styling).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct GroupMessageDto {
     pub sender: String,
     pub content: String,
     pub timestamp: i64,
@@ -627,6 +656,14 @@ impl P2PNode {
                         }
                         Some(NodeCommand::GroupLeave(group_id)) => {
                             self.handle_group_leave(&mut swarm, group_id);
+                        }
+                        Some(NodeCommand::QueryGroups(reply)) => {
+                            let dtos = self.query_groups();
+                            let _ = reply.send(dtos);
+                        }
+                        Some(NodeCommand::QueryGroupMessages(group_id, reply)) => {
+                            let dtos = self.query_group_messages(&group_id);
+                            let _ = reply.send(dtos);
                         }
                         None => break, // Channel closed
                     }
@@ -2715,6 +2752,63 @@ impl P2PNode {
             );
         }
         println!("─────────────────────────────────────");
+    }
+
+    /// GUI-shaped read: return every local group as a `GroupDto`.
+    /// `is_founder` is set when the row's founder_pid matches our
+    /// own PeerId so the webview can hide founder-only controls
+    /// without an extra round-trip.
+    fn query_groups(&self) -> Vec<GroupDto> {
+        let Some(store) = self.message_store.as_ref() else {
+            return Vec::new();
+        };
+        let rows = match store.group_list() {
+            Ok(r) => r,
+            Err(_) => return Vec::new(),
+        };
+        let my_pid_bytes = self.identity.peer_id().to_bytes();
+        rows.into_iter()
+            .map(|r| {
+                let founder_pid = PeerId::from_bytes(&r.founder_pid)
+                    .map(|p| p.to_base58())
+                    .unwrap_or_else(|_| "?".to_string());
+                let member_count = store.group_members(&r.group_id).map(|v| v.len()).unwrap_or(0);
+                GroupDto {
+                    group_id: hex::encode(r.group_id),
+                    name: r.name,
+                    founder: founder_pid,
+                    epoch: r.epoch,
+                    member_count,
+                    is_founder: r.founder_pid == my_pid_bytes,
+                }
+            })
+            .collect()
+    }
+
+    /// GUI-shaped read: return the local message history for `group_id`.
+    fn query_group_messages(&self, group_id: &crate::protocol::GroupId) -> Vec<GroupMessageDto> {
+        let Some(store) = self.message_store.as_ref() else {
+            return Vec::new();
+        };
+        let me_bytes = self.identity.peer_id().to_bytes();
+        match store.group_messages_get(group_id) {
+            Ok(rows) => rows
+                .into_iter()
+                .map(|m| {
+                    let is_own = m.sender == me_bytes;
+                    let sender = PeerId::from_bytes(&m.sender)
+                        .map(|p| p.to_base58())
+                        .unwrap_or_else(|_| "?".to_string());
+                    GroupMessageDto {
+                        sender,
+                        content: String::from_utf8_lossy(&m.plaintext).into_owned(),
+                        timestamp: m.timestamp,
+                        is_own,
+                    }
+                })
+                .collect(),
+            Err(_) => Vec::new(),
+        }
     }
 
     /// Founder-side member add. Bumps the local epoch, builds a
