@@ -1,6 +1,6 @@
 # ZeroCenter Messenger — Roadmap
 
-Living document tracking what's done, what's in flight, and what's queued. Last refreshed 2026-05-19.
+Living document tracking what's done, what's in flight, and what's queued. Last refreshed 2026-05-19 (group-chats track complete).
 
 ## Status snapshot
 
@@ -27,10 +27,10 @@ Living document tracking what's done, what's in flight, and what's queued. Last 
 | OTPK rotation under load (Phase 5) | ✅ per-peer 60s cooldown + pool target bumped 20→100 |
 | Self-audit pass (12 findings, 6 actioned) | ✅ `audit/SELF_AUDIT.md` |
 | External security audit | ❌ not started; `audit/` pack ready for reviewer (self-audit done) |
-| Group chats (Megolm-style, founder-signed) | 🚧 in flight (storage schema shipped 94710ba; 7 tasks remaining) |
+| Group chats (Megolm-style, founder-signed) | ✅ full 8-commit track shipped: storage + Megolm crypto + GroupControl wire + send/receive fan-out + CLI + membership rotation + Tauri GUI + audit pack |
 | Deniability | ❌ (intentional non-deniability for v1) |
 
-Build: rustc 1.95 / cargo 1.95 / VS Build Tools. `cargo test --lib`: **93/93** on default features (`--features gui` matches). `cargo build --release` (default, headless CLI) produces a ~9.27 MB `zerocenter.exe`; `cargo build --release --features gui` additionally pulls Tauri 2.x and its webview2 toolchain (Windows). The tracked in-tree `zerocenter.exe` is the default build — the GUI artefact is significantly larger and isn't checked in.
+Build: rustc 1.95 / cargo 1.95 / VS Build Tools. `cargo test --lib`: **117/117** on default features (`--features gui` matches). `cargo build --release` (default, headless CLI) produces a ~9.27 MB `zerocenter.exe`; `cargo build --release --features gui` additionally pulls Tauri 2.x and its webview2 toolchain (Windows). The tracked in-tree `zerocenter.exe` is the default build — the GUI artefact is significantly larger and isn't checked in.
 
 ## Done — chronological commits
 
@@ -38,6 +38,13 @@ Most recent first.
 
 | Commit | Title | What it shipped |
 |---|---|---|
+| 5794f82 | docs(audit): Phase 5 group-chat audit pack — INVARIANTS §24-§26, CRYPTO §12, threat model J | Audit pack refreshed for the group-chat track. New INVARIANTS §24 (per-message Ed25519 cross-member impersonation defence), §25 (founder authority + epoch monotonicity), §26 (rotation FS semantics, best-effort not retroactive). New CRYPTO.md §12 (Megolm sender chains, 8 sub-sections). THREAT_MODEL gained section J (compromised group member). README test count refreshed, source tree + suggested-review-order expanded. Pure docs, no code changes. |
+| d1556c1 | feat(groups): Phase 5 GUI surface for groups + group-msg push-refresh | Two new DTOs (`GroupDto`, `GroupMessageDto`) + two query NodeCommands (`QueryGroups`, `QueryGroupMessages`). Seven new Tauri commands wired (`get_groups`, `get_group_messages`, `create_group`, `send_group_message`, `add_group_member`, `remove_group_member`, `leave_group`). Frontend `dist/index.html` gained a Groups sidebar section, mode-aware chat view (contact vs group), three new modals (Create Group / Add Member / Remove Member), per-mode chat-header controls (founder-only Add/Remove + Leave), and a `listen('group-msg-received')` listener that refreshes the open group conversation. `escapeHtml` added wherever user-controlled strings interpolate into innerHTML. |
+| db1b241 | feat(groups): Phase 5 membership rotation on add/remove/leave | Forward-secrecy gap closed: every remaining member rotates their `SenderChain` on remove/leave so the departed peer's cached chain key is dead-on-arrival for future messages. Threaded `&mut Swarm` through `decrypt_first_message` / `decrypt_and_store` / `bootstrap_responder_and_decrypt` / `dispatch_decrypted_content` / `process_group_control`. New `rotate_my_sender_chain_and_broadcast` + `send_my_bundle_to` helpers. Founder rotates on remove; recipients rotate on receiving `MembershipUpdate(removed)` or `Leave`. On `add`, existing members forward their current bundle to the new joiner (no rotation — adds don't compromise existing chains). Documents PFS-best-effort-not-retroactive semantics inline. |
+| 1973d4e | feat(groups): Phase 5 group CLI — create / list / send / add / remove / leave | Six new fire-and-forget NodeCommand variants. `group <subcommand>` chord installed in `cli.rs` with subcommand parsing; main.rs handler routes to `NodeCommand::GroupCreate/List/Send/Add/Remove/Leave`. New `parse_group_id_hex` helper. Node-side handlers: `handle_group_create` (random 32-byte GroupId via OsRng → signed CreateGroup → install locally + broadcast), `handle_group_list`, `handle_group_add` / `handle_group_remove` (founder-only with signed `MembershipUpdate`, epoch bump, broadcast to remaining members), `handle_group_leave` (self-signed Leave + group_forget). |
+| cc52b4c | feat(groups): Phase 5 group message send/receive — kind=2 fan-out | `GroupMessageEnvelope { group_id, msg: EncryptedGroupMessage }` wire type + `build_group_ad(group_id, sender_pid)`. `ratchet_encrypt_and_wrap_bytes` refactor (existing text helper now a thin forward with kind=0). `deliver_kind_to_member` wraps encrypt + send_request for one fan-out target. `group_send`: load/create my SenderChain → distribute bundle if fresh → Megolm-encrypt once → fan out as kind=2 envelopes via N-1 unicasts. `process_group_message`: cross-check membership, load ReceiverChain, decrypt, persist, emit `GuiEvent::GroupMessageReceived`. dispatch_decrypted_content kind=2 arm wired. |
+| 88c483a | feat(groups): Phase 5 GroupControl envelope + receive-side routing | EncryptedPayload grew `kind: u8` (backward-compatible serde default + skip-if-zero). GroupControl enum (CreateGroup / MembershipUpdate / SenderKeyDistribution / Leave) with founder-signed authority semantics — only the founder mints Create / Update; Leave is self-signed; SenderKeyDistribution inherits authentication from outer DR session. `verify_membership_update(founder_pid)` enforces the locally-stored-founder bind. Recipient routing: dispatch_decrypted_content + process_group_control with full per-variant handlers (member install, epoch monotonicity, sender-key install, leave processing). |
+| 4d0a7b0 | feat(groups): Phase 5 Megolm sender-chain crypto module | New `src/crypto/megolm.rs`. SenderChain (chain advance via HMAC-SHA256 with same constants as DR ratchet, ChaCha20-Poly1305 with zero nonce, per-message Ed25519 sig). ReceiverChain with skipped-keys cache (`VecDeque<SkippedKey>`, `MAX_SKIP=1000`, oldest-first eviction). Signature verified BEFORE chain state mutation so forgeries can't poison the skipped cache. JSON serialization for at-rest persistence. SenderKeyBundle wire type. 12 unit tests covering happy-path, ping-pong, out-of-order, replay → MessageKeyMissing, tamper rejection (sig / ct / AD), MAX_SKIP enforcement, JSON round-trips, late-joiner install, cross-chain rejection. |
 | 94710ba | feat(groups): Phase 5 group-chat storage schema + foundational types | First commit of the Megolm track. 5 new SQLite tables (`groups`, `group_members`, `my_sender_keys`, `their_sender_keys`, `group_messages`), all sender-chain blobs and group-message plaintext AEAD-wrapped under the DEK. New `protocol::group` module with `GroupId = [u8; 32]`, `GROUP_CTRL_DOMAIN_SEPARATOR`, `GROUP_MSG_DOMAIN_SEPARATOR`. 10 new tests. 93/93 (was 83/83). |
 | 4a52acc | feat(gui): Phase 5 GUI v1 push-refresh on inbound DMs | New `GuiEvent::DmReceived { peer }` enum + opt-in `gui_tx: Option<mpsc::Sender<GuiEvent>>` on `P2PNode`. `try_send` so a stalled webview never blocks the swarm loop. Emit on success branches of `decrypt_first_message` + `decrypt_and_store` (covers live, mailbox, bootstrap, pending-drain). Tauri setup spawns a forwarder task → `app.emit("dm-received", peer_base58)`. Frontend re-runs `loadContacts()` and `loadMessages()` on the matching open chat. No new deps; no capability changes. |
 | 2c2b658 | feat(prekey): Phase 5 OTPK pool-drain defence — per-peer rate limit + 100-pool | `recent_otpk_fetches: HashMap<PeerId, i64>` + `should_attach_otpk` gate. 60s per-peer cooldown after a honored OTPK fetch → repeat requesters still get a valid signed-prekey response but `otpk: None`, forcing them into 2-DH fallback. `OTPK_POOL_TARGET` bumped 20 → 100. INVARIANTS §23 covers the Sybil note + what-it-doesn't-defend. |
@@ -61,26 +68,22 @@ Most recent first.
 
 ## In flight
 
-**Phase 5 group chats (Megolm-style, founder-signed authority).** 8-task track, 1 of 8 commits shipped (94710ba). Estimated ~1500-1750 LOC total. Trust model: group founder is the sole authority for membership changes — every `MembershipUpdate` carries founder Ed25519 signature (INVARIANTS §25 will land with task 3).
-
-Task graph (each blocks the next):
-
-1. ✅ **Group storage schema + types** — shipped 94710ba.
-2. 🚧 **Megolm sender-chain crypto module** (`src/crypto/megolm.rs`). `SenderChain::encrypt(plaintext, ad) -> (index, ct, sig)` (HMAC-SHA256 chain advance + ChaCha20-Poly1305 + Ed25519 sign). `ReceiverChain::decrypt` with bounded skipped-keys cache (MAX_SKIP=1000, mirrors DR). Tests for round-trip / ping-pong / out-of-order / MAX_SKIP.
-3. ⏳ **Group control envelope + sender-key distribution.** `GroupControl` enum (`CreateGroup`, `MembershipUpdate`, `SenderKeyDistribution`, `Leave`). Wire: extend `EncryptedPayload` with `kind: u8` (serde default 0=text, 1=group-ctrl, 2=group-msg). Founder Ed25519 signature verified on every `MembershipUpdate`. `process_incoming_dm` routes on `payload.kind` after ratchet-decrypt.
-4. ⏳ **Group message send/receive fan-out.** Send = encrypt-once with own SenderChain → N-1 unicast via existing 1:1 `encrypt_and_send`. Receive = route in `decrypt_and_store` on `payload.kind=2`, look up sender's chain, fast-forward, verify Ed25519, decrypt, store.
-5. ⏳ **Group CLI** — `group create / list / send / add / remove / leave`.
-6. ⏳ **Membership rotation on add/remove/leave** — founder rotates own SenderChain on remove; redistributes only to remaining members. Leaver broadcasts signed `Leave`; others stop fan-out.
-7. ⏳ **Group GUI surface + push-refresh** — new Tauri commands, `GuiEvent::GroupMessageReceived`, frontend groups list / chat / control modal.
-8. ⏳ **Audit pack + INVARIANTS** — §24 (per-message Ed25519 prevents cross-member impersonation), §25 (membership only valid under founder sig), §26 (sender-key rotation is PFS-best-effort, not retro-PFS). CRYPTO.md §12 for Megolm.
+_None._ The Phase 5 group-chats track (94710ba → 5794f82) completed 2026-05-19; ~2500 LOC across 8 commits with full test + audit-pack coverage. Next priorities below.
 
 ## Remaining — prioritised forward plan
 
-### Phase 5 — remaining functional gaps (after group chats land)
+### Phase 5 — remaining functional gaps
 
-- **External security audit.** `audit/` pack is review-ready (README, CRYPTO, THREAT_MODEL, INVARIANTS — 23+ numbered invariants with file:line pointers and suggested attacks, plus `SELF_AUDIT.md` from the self-pass). Find a reviewer; package the repo at a specific commit; receive findings; remediate.
-- **Deniability.** Currently every DM carries an Ed25519 signature over the ciphertext — non-repudiation by design, opposite of Signal. To get deniability we'd replace per-message Ed25519 with a deniable AKE (e.g. SPK signature + per-conversation HMAC). Big crypto change; postponed until external audit lands on the v1 design.
+- **External security audit.** `audit/` pack is review-ready: README, CRYPTO (14 sections incl. §12 Megolm), THREAT_MODEL (10 adversary classes incl. J for compromised group member), INVARIANTS (26 numbered with file:line pointers and suggested attacks), plus `SELF_AUDIT.md` from the self-pass. **The self-audit predates the group-chat track** — §24-§26 and CRYPTO.md §12 are explicitly not-yet-self-audited. Find a reviewer; package the repo at a specific commit; receive findings; remediate.
+- **Deniability.** Currently every DM (and group message) carries an Ed25519 signature over the ciphertext — non-repudiation by design, opposite of Signal. To get deniability we'd replace per-message Ed25519 with a deniable AKE (e.g. SPK signature + per-conversation HMAC). Big crypto change; postponed until external audit lands on the v1 design. Note: the Megolm per-message sig in group chats is load-bearing for cross-member anti-impersonation (INVARIANTS §24), so deniability there has additional design constraints.
 - **Real branded icon** to replace the 1150-byte placeholder at `icons/icon.ico` before any user-facing shipping. Not code work.
+
+### Group-chats v1 (post-v0 polish)
+
+- **Prekey-fetch onboarding for new joiners** (currently warn-and-skip if no prior 1:1 DR with an existing member). Add a flow where `process_group_control / SenderKeyDistribution` triggers a prekey fetch for unknown peers.
+- **Founder-key rotation primitive.** v0 has no way to rotate the founder — compromising the founder gives MembershipUpdate authority indefinitely. Options: dedicated `RotateFounder` control message signed by the outgoing founder, or CRDT-style admin set.
+- **Per-message retro-PFS** (currently event-driven rotation). True retro-PFS would chain-rotate on every send, multiplying onboarding bandwidth by the message rate. Defer unless threat model evolves.
+- **No-op leave on absent group.** Current `handle_group_leave` errors quietly when the group is unknown; could be silent-success for nicer UX.
 
 ### Audit-flagged debt deferred from the self-pass
 
@@ -89,7 +92,7 @@ Task graph (each blocks the next):
 
 ## Known debt (not phase-tagged)
 
-- `audit/README.md` build-status table still says "48/48 on rustc 1.95" — pre-existing drift; the real count is 93/93 after the Phase 5 group-storage commit. Refresh due with task 8 of the group-chats track.
+- `audit/README.md` test count was refreshed to 117/117 by commit 5794f82.
 - `pending_sends` / `pending_recvs` / `cached_otpks` on `P2PNode` are in-memory only (INVARIANTS §16). A `send` issued mid-prekey-fetch is lost on restart. Persistent table would fix; see INVARIANTS §16 for the trade-off.
 - `info!`-level log lines still mention PeerIds verbatim everywhere. Plaintext is fixed (INVARIANTS §19) but PeerIds are still metadata. For high-paranoia deployments we'd want a config to redact those too.
 - QUIC re-enable: `[[project-quic-disabled]]` blocker may already be obsolete on current MSVC toolchain — needs a real test. Re-enable `quic` in `Cargo.toml`, restore `.with_quic()` in `node.rs::start` after `with_other_transport(...)`, run two-peer smoke.
