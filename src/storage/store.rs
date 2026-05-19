@@ -228,12 +228,103 @@ impl MessageStore {
             [],
         )?;
 
+        // Phase 5 group chats. Five tables: `groups` and
+        // `group_members` are public metadata (member PeerIds in clear
+        // — same trade-off as `messages.sender/recipient`, query-
+        // efficiency over metadata privacy). `my_sender_keys` and
+        // `their_sender_keys` carry Megolm chain state and are AEAD-
+        // wrapped at rest under the DEK exactly like
+        // `ratchet_sessions.state_blob`. `group_messages` carries the
+        // decrypted plaintext for the user's local conversation view,
+        // also AEAD-wrapped.
+        //
+        // The schema is deliberately separate from the DM `messages`
+        // table — group-message rows have a group_id and no recipient
+        // PeerId in the DM sense (the recipient is the group itself,
+        // and every member has their own local copy).
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS groups (
+                group_id    BLOB PRIMARY KEY,
+                name        TEXT NOT NULL,
+                founder_pid BLOB NOT NULL,
+                epoch       INTEGER NOT NULL,
+                created_at  INTEGER NOT NULL
+            )",
+            [],
+        )?;
+
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS group_members (
+                group_id  BLOB NOT NULL,
+                peer_id   BLOB NOT NULL,
+                joined_at INTEGER NOT NULL,
+                PRIMARY KEY (group_id, peer_id)
+            )",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_group_members_gid ON group_members(group_id)",
+            [],
+        )?;
+
+        // My own per-group sender chain. One row per group I belong to.
+        // `state_blob` is the AEAD-wrapped JSON of `crypto::megolm::
+        // SenderChain` (chain_key + index + ed25519 signing key).
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS my_sender_keys (
+                group_id   BLOB PRIMARY KEY,
+                state_blob BLOB NOT NULL,
+                updated_at INTEGER NOT NULL
+            )",
+            [],
+        )?;
+
+        // Per-(group, member) sender chain that *they* are sending
+        // from. One row per other member of each of my groups.
+        // `state_blob` is the AEAD-wrapped JSON of
+        // `crypto::megolm::ReceiverChain` (chain_key + next-index +
+        // their ed25519 verify key + bounded skipped-keys cache, all
+        // in one blob — mirrors the DR ratchet pattern of carrying its
+        // own skipped queue inside the session blob).
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS their_sender_keys (
+                group_id   BLOB NOT NULL,
+                peer_id    BLOB NOT NULL,
+                state_blob BLOB NOT NULL,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (group_id, peer_id)
+            )",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_their_sender_keys_gid
+             ON their_sender_keys(group_id)",
+            [],
+        )?;
+
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS group_messages (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                group_id   BLOB NOT NULL,
+                sender     BLOB NOT NULL,
+                ciphertext BLOB NOT NULL,
+                timestamp  INTEGER NOT NULL,
+                ttl        INTEGER NOT NULL
+            )",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_group_messages_gid_ts
+             ON group_messages(group_id, timestamp)",
+            [],
+        )?;
+
         // Create indexes
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_recipient ON messages(recipient)",
             [],
         )?;
-        
+
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_timestamp ON messages(timestamp)",
             [],
@@ -871,6 +962,331 @@ impl MessageStore {
             }
         }
     }
+
+    // ───────────────────────── Phase 5 group chats ─────────────────────────
+
+    /// Insert or replace a `groups` row. `epoch=0` on initial create;
+    /// callers bump it themselves on accepted MembershipUpdates.
+    pub fn group_upsert(
+        &self,
+        group_id: &crate::protocol::GroupId,
+        name: &str,
+        founder_pid: &[u8],
+        epoch: u64,
+    ) -> Result<()> {
+        let now = chrono_time();
+        self.conn.execute(
+            "INSERT INTO groups (group_id, name, founder_pid, epoch, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(group_id) DO UPDATE SET
+                 name = excluded.name,
+                 founder_pid = excluded.founder_pid,
+                 epoch = excluded.epoch",
+            params![&group_id[..], name, founder_pid, epoch as i64, now],
+        )?;
+        Ok(())
+    }
+
+    /// Load a single group by id. Returns `None` if not present.
+    pub fn group_get(
+        &self,
+        group_id: &crate::protocol::GroupId,
+    ) -> Result<Option<crate::protocol::GroupRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT group_id, name, founder_pid, epoch, created_at
+             FROM groups WHERE group_id = ?1",
+        )?;
+        let row = stmt
+            .query_row(params![&group_id[..]], group_row_from_db)
+            .ok();
+        Ok(row.and_then(|r| r.ok()))
+    }
+
+    /// List all groups, oldest first.
+    pub fn group_list(&self) -> Result<Vec<crate::protocol::GroupRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT group_id, name, founder_pid, epoch, created_at
+             FROM groups ORDER BY created_at ASC",
+        )?;
+        let rows = stmt
+            .query_map([], group_row_from_db)?
+            .filter_map(|r| r.ok().and_then(|x| x.ok()))
+            .collect();
+        Ok(rows)
+    }
+
+    /// Bump a group's epoch. Called on accepted MembershipUpdates.
+    pub fn group_bump_epoch(
+        &self,
+        group_id: &crate::protocol::GroupId,
+        new_epoch: u64,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE groups SET epoch = ?1 WHERE group_id = ?2",
+            params![new_epoch as i64, &group_id[..]],
+        )?;
+        Ok(())
+    }
+
+    /// Add a member to a group. Idempotent — re-adding leaves the
+    /// original `joined_at` untouched (ON CONFLICT DO NOTHING).
+    pub fn group_member_add(
+        &self,
+        group_id: &crate::protocol::GroupId,
+        peer_id: &[u8],
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO group_members (group_id, peer_id, joined_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(group_id, peer_id) DO NOTHING",
+            params![&group_id[..], peer_id, chrono_time()],
+        )?;
+        Ok(())
+    }
+
+    /// Remove a member from a group. No-op if not present.
+    pub fn group_member_remove(
+        &self,
+        group_id: &crate::protocol::GroupId,
+        peer_id: &[u8],
+    ) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM group_members WHERE group_id = ?1 AND peer_id = ?2",
+            params![&group_id[..], peer_id],
+        )?;
+        Ok(())
+    }
+
+    /// List a group's members as PeerId byte strings.
+    pub fn group_members(
+        &self,
+        group_id: &crate::protocol::GroupId,
+    ) -> Result<Vec<Vec<u8>>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT peer_id FROM group_members WHERE group_id = ?1 ORDER BY joined_at ASC")?;
+        let rows = stmt
+            .query_map(params![&group_id[..]], |r| r.get::<_, Vec<u8>>(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    /// Drop the entire group: removes the `groups` row, all members,
+    /// my sender chain, and all their-sender-chains. Used on `leave`
+    /// (self-leave) and after receiving a remove-me MembershipUpdate.
+    /// Group-message history rows are kept for local audit.
+    pub fn group_forget(&self, group_id: &crate::protocol::GroupId) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM their_sender_keys WHERE group_id = ?1",
+            params![&group_id[..]],
+        )?;
+        self.conn.execute(
+            "DELETE FROM my_sender_keys WHERE group_id = ?1",
+            params![&group_id[..]],
+        )?;
+        self.conn.execute(
+            "DELETE FROM group_members WHERE group_id = ?1",
+            params![&group_id[..]],
+        )?;
+        self.conn.execute(
+            "DELETE FROM groups WHERE group_id = ?1",
+            params![&group_id[..]],
+        )?;
+        Ok(())
+    }
+
+    /// Save my sender-chain state for a group. `state_plaintext` is
+    /// the JSON of `crypto::megolm::SenderChain`; AEAD-wrapped under
+    /// the DEK before write.
+    pub fn my_sender_key_save(
+        &self,
+        group_id: &crate::protocol::GroupId,
+        state_plaintext: &[u8],
+    ) -> Result<()> {
+        let blob = self.encrypt_at_rest(state_plaintext);
+        self.conn.execute(
+            "INSERT OR REPLACE INTO my_sender_keys (group_id, state_blob, updated_at)
+             VALUES (?1, ?2, ?3)",
+            params![&group_id[..], blob, chrono_time()],
+        )?;
+        Ok(())
+    }
+
+    /// Load my sender-chain state. Returns `None` if no row exists.
+    /// AEAD failure is silent-skip (returns `None`) so a single
+    /// corrupt row doesn't block all group work.
+    pub fn my_sender_key_load(
+        &self,
+        group_id: &crate::protocol::GroupId,
+    ) -> Result<Option<Vec<u8>>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT state_blob FROM my_sender_keys WHERE group_id = ?1")?;
+        let blob: Option<Vec<u8>> = stmt
+            .query_row(params![&group_id[..]], |r| r.get(0))
+            .ok();
+        match blob {
+            Some(b) => match self.decrypt_at_rest(&b) {
+                Ok(pt) => Ok(Some(pt)),
+                Err(e) => {
+                    tracing::warn!("Skipping my_sender_keys row: {}", e);
+                    Ok(None)
+                }
+            },
+            None => Ok(None),
+        }
+    }
+
+    /// Save a peer's sender-chain receiver state for a group.
+    pub fn their_sender_key_save(
+        &self,
+        group_id: &crate::protocol::GroupId,
+        peer_id: &[u8],
+        state_plaintext: &[u8],
+    ) -> Result<()> {
+        let blob = self.encrypt_at_rest(state_plaintext);
+        self.conn.execute(
+            "INSERT OR REPLACE INTO their_sender_keys
+             (group_id, peer_id, state_blob, updated_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![&group_id[..], peer_id, blob, chrono_time()],
+        )?;
+        Ok(())
+    }
+
+    /// Load a peer's sender-chain receiver state.
+    pub fn their_sender_key_load(
+        &self,
+        group_id: &crate::protocol::GroupId,
+        peer_id: &[u8],
+    ) -> Result<Option<Vec<u8>>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT state_blob FROM their_sender_keys
+             WHERE group_id = ?1 AND peer_id = ?2",
+        )?;
+        let blob: Option<Vec<u8>> = stmt
+            .query_row(params![&group_id[..], peer_id], |r| r.get(0))
+            .ok();
+        match blob {
+            Some(b) => match self.decrypt_at_rest(&b) {
+                Ok(pt) => Ok(Some(pt)),
+                Err(e) => {
+                    tracing::warn!("Skipping their_sender_keys row: {}", e);
+                    Ok(None)
+                }
+            },
+            None => Ok(None),
+        }
+    }
+
+    /// Drop a peer's sender-chain state. Used when the peer is
+    /// removed from a group or rotates their key (the old chain is
+    /// discarded so future messages must use the new one).
+    pub fn their_sender_key_delete(
+        &self,
+        group_id: &crate::protocol::GroupId,
+        peer_id: &[u8],
+    ) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM their_sender_keys WHERE group_id = ?1 AND peer_id = ?2",
+            params![&group_id[..], peer_id],
+        )?;
+        Ok(())
+    }
+
+    /// Persist a decrypted group message. Returns the row id.
+    pub fn group_message_store(
+        &self,
+        group_id: &crate::protocol::GroupId,
+        sender: &[u8],
+        plaintext: &[u8],
+        ttl_secs: i64,
+    ) -> Result<i64> {
+        let encrypted = self.encrypt_at_rest(plaintext);
+        self.conn.execute(
+            "INSERT INTO group_messages (group_id, sender, ciphertext, timestamp, ttl)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![&group_id[..], sender, encrypted, chrono_time(), ttl_secs],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Load all messages in a group, oldest first. Rows whose at-rest
+    /// blob fails to decrypt are silently skipped (same policy as
+    /// `get_messages`).
+    pub fn group_messages_get(
+        &self,
+        group_id: &crate::protocol::GroupId,
+    ) -> Result<Vec<crate::protocol::GroupStoredMessage>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, group_id, sender, ciphertext, timestamp, ttl
+             FROM group_messages
+             WHERE group_id = ?1
+             ORDER BY timestamp ASC",
+        )?;
+        let rows: Vec<_> = stmt
+            .query_map(params![&group_id[..]], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, Vec<u8>>(1)?,
+                    r.get::<_, Vec<u8>>(2)?,
+                    r.get::<_, Vec<u8>>(3)?,
+                    r.get::<_, i64>(4)?,
+                    r.get::<_, i64>(5)?,
+                ))
+            })?
+            .filter_map(|r| r.ok())
+            .filter_map(|(id, gid_bytes, sender, blob, timestamp, ttl)| {
+                let plaintext = match self.decrypt_at_rest(&blob) {
+                    Ok(pt) => pt,
+                    Err(e) => {
+                        tracing::warn!("Skipping group_messages id={}: {}", id, e);
+                        return None;
+                    }
+                };
+                let mut group_id = [0u8; 32];
+                if gid_bytes.len() != 32 {
+                    return None;
+                }
+                group_id.copy_from_slice(&gid_bytes);
+                Some(crate::protocol::GroupStoredMessage {
+                    id,
+                    group_id,
+                    sender,
+                    plaintext,
+                    timestamp,
+                    ttl,
+                })
+            })
+            .collect();
+        Ok(rows)
+    }
+}
+
+/// Inflate a `groups` row from SQL. Outer `Result` is sqlite's; inner
+/// `Result` flags a bad-shape `group_id` blob length so the caller can
+/// drop the row instead of panicking.
+fn group_row_from_db(
+    r: &rusqlite::Row,
+) -> rusqlite::Result<Result<crate::protocol::GroupRow, ()>> {
+    let gid_bytes: Vec<u8> = r.get(0)?;
+    let name: String = r.get(1)?;
+    let founder_pid: Vec<u8> = r.get(2)?;
+    let epoch: i64 = r.get(3)?;
+    let created_at: i64 = r.get(4)?;
+    if gid_bytes.len() != 32 {
+        return Ok(Err(()));
+    }
+    let mut group_id = [0u8; 32];
+    group_id.copy_from_slice(&gid_bytes);
+    Ok(Ok(crate::protocol::GroupRow {
+        group_id,
+        name,
+        founder_pid,
+        epoch: epoch as u64,
+        created_at,
+    }))
 }
 
 fn chrono_time() -> i64 {
@@ -1256,5 +1672,223 @@ mod tests {
         let store_b = MessageStore::open(dir.path(), [3u8; 32]).unwrap();
         let history = store_b.get_recent_messages(10).unwrap();
         assert!(history.is_empty(), "row encrypted with wrong DEK should be filtered");
+    }
+
+    // ─────────────────── Phase 5 group-chat storage tests ───────────────────
+
+    fn gid(byte: u8) -> [u8; 32] {
+        [byte; 32]
+    }
+
+    #[test]
+    fn group_upsert_and_get_roundtrip() {
+        let dir = tempdir().unwrap();
+        let store = MessageStore::open(dir.path(), test_dek()).unwrap();
+
+        let g = gid(0xA1);
+        assert!(store.group_get(&g).unwrap().is_none());
+
+        store.group_upsert(&g, "team-alpha", &[1u8; 38], 0).unwrap();
+        let row = store.group_get(&g).unwrap().expect("present");
+        assert_eq!(row.group_id, g);
+        assert_eq!(row.name, "team-alpha");
+        assert_eq!(row.founder_pid, vec![1u8; 38]);
+        assert_eq!(row.epoch, 0);
+
+        // Upsert with new epoch + name; row is updated in place.
+        store.group_upsert(&g, "team-alpha-v2", &[1u8; 38], 3).unwrap();
+        let row2 = store.group_get(&g).unwrap().expect("present");
+        assert_eq!(row2.name, "team-alpha-v2");
+        assert_eq!(row2.epoch, 3);
+        assert_eq!(row2.created_at, row.created_at, "created_at preserved on upsert");
+    }
+
+    #[test]
+    fn group_list_returns_all_groups_oldest_first() {
+        let dir = tempdir().unwrap();
+        let store = MessageStore::open(dir.path(), test_dek()).unwrap();
+        store.group_upsert(&gid(1), "first", &[1u8; 38], 0).unwrap();
+        store.group_upsert(&gid(2), "second", &[2u8; 38], 0).unwrap();
+        let list = store.group_list().unwrap();
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].name, "first");
+        assert_eq!(list[1].name, "second");
+    }
+
+    #[test]
+    fn group_bump_epoch_persists() {
+        let dir = tempdir().unwrap();
+        let store = MessageStore::open(dir.path(), test_dek()).unwrap();
+        let g = gid(7);
+        store.group_upsert(&g, "g", &[1u8; 38], 0).unwrap();
+        store.group_bump_epoch(&g, 12).unwrap();
+        assert_eq!(store.group_get(&g).unwrap().unwrap().epoch, 12);
+    }
+
+    #[test]
+    fn group_member_add_remove_idempotent() {
+        let dir = tempdir().unwrap();
+        let store = MessageStore::open(dir.path(), test_dek()).unwrap();
+        let g = gid(1);
+        store.group_upsert(&g, "g", &[0u8; 38], 0).unwrap();
+
+        let alice = [0xAAu8; 38];
+        let bob = [0xBBu8; 38];
+
+        store.group_member_add(&g, &alice).unwrap();
+        store.group_member_add(&g, &bob).unwrap();
+        // Re-adding alice is a no-op (ON CONFLICT DO NOTHING).
+        store.group_member_add(&g, &alice).unwrap();
+
+        let members = store.group_members(&g).unwrap();
+        assert_eq!(members.len(), 2);
+        assert!(members.contains(&alice.to_vec()));
+        assert!(members.contains(&bob.to_vec()));
+
+        store.group_member_remove(&g, &alice).unwrap();
+        // Remove of an absent member is a no-op (idempotent).
+        store.group_member_remove(&g, &alice).unwrap();
+        let members = store.group_members(&g).unwrap();
+        assert_eq!(members, vec![bob.to_vec()]);
+    }
+
+    #[test]
+    fn my_sender_key_roundtrip_and_encrypted_at_rest() {
+        let dir = tempdir().unwrap();
+        let store = MessageStore::open(dir.path(), test_dek()).unwrap();
+        let g = gid(0xCC);
+        let plaintext = b"opaque-chain-state-blob".to_vec();
+
+        assert!(store.my_sender_key_load(&g).unwrap().is_none());
+        store.my_sender_key_save(&g, &plaintext).unwrap();
+        let loaded = store.my_sender_key_load(&g).unwrap().expect("present");
+        assert_eq!(loaded, plaintext);
+
+        // Direct table read returns the AEAD-wrapped bytes, NOT the
+        // plaintext — protects against a "we accidentally stored it
+        // plaintext" regression.
+        let raw: Vec<u8> = store
+            .conn
+            .query_row(
+                "SELECT state_blob FROM my_sender_keys WHERE group_id = ?1",
+                params![&g[..]],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_ne!(raw, plaintext, "state_blob must be ciphertext on disk");
+        assert!(raw.len() > plaintext.len(), "AEAD adds nonce + tag overhead");
+    }
+
+    #[test]
+    fn their_sender_key_roundtrip_per_peer() {
+        let dir = tempdir().unwrap();
+        let store = MessageStore::open(dir.path(), test_dek()).unwrap();
+        let g = gid(0xDD);
+        let alice = [0xAAu8; 38];
+        let bob = [0xBBu8; 38];
+
+        store.their_sender_key_save(&g, &alice, b"alice-chain").unwrap();
+        store.their_sender_key_save(&g, &bob, b"bob-chain").unwrap();
+        assert_eq!(
+            store.their_sender_key_load(&g, &alice).unwrap().as_deref(),
+            Some(&b"alice-chain"[..])
+        );
+        assert_eq!(
+            store.their_sender_key_load(&g, &bob).unwrap().as_deref(),
+            Some(&b"bob-chain"[..])
+        );
+
+        store.their_sender_key_delete(&g, &alice).unwrap();
+        assert!(store.their_sender_key_load(&g, &alice).unwrap().is_none());
+        // Bob's chain is untouched.
+        assert_eq!(
+            store.their_sender_key_load(&g, &bob).unwrap().as_deref(),
+            Some(&b"bob-chain"[..])
+        );
+    }
+
+    #[test]
+    fn group_message_store_and_get_oldest_first() {
+        let dir = tempdir().unwrap();
+        let store = MessageStore::open(dir.path(), test_dek()).unwrap();
+        let g = gid(0xEE);
+        let alice = [0xAAu8; 38];
+        let bob = [0xBBu8; 38];
+
+        store.group_message_store(&g, &alice, b"hello", 60).unwrap();
+        store.group_message_store(&g, &bob, b"hi", 60).unwrap();
+
+        let history = store.group_messages_get(&g).unwrap();
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].plaintext, b"hello");
+        assert_eq!(history[1].plaintext, b"hi");
+        assert_eq!(history[0].sender, alice.to_vec());
+        assert_eq!(history[1].sender, bob.to_vec());
+    }
+
+    #[test]
+    fn group_message_is_encrypted_at_rest() {
+        let dir = tempdir().unwrap();
+        let store = MessageStore::open(dir.path(), test_dek()).unwrap();
+        let g = gid(0xEF);
+        let alice = [0xAAu8; 38];
+        let plaintext = b"sensitive group chat content";
+        store.group_message_store(&g, &alice, plaintext, 60).unwrap();
+
+        let raw: Vec<u8> = store
+            .conn
+            .query_row(
+                "SELECT ciphertext FROM group_messages WHERE group_id = ?1",
+                params![&g[..]],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_ne!(raw, plaintext.to_vec());
+        // Plaintext substring must not appear in the at-rest blob.
+        assert!(
+            raw.windows(plaintext.len()).all(|w| w != plaintext),
+            "plaintext leaked into on-disk row"
+        );
+    }
+
+    #[test]
+    fn group_forget_removes_metadata_keeps_history() {
+        let dir = tempdir().unwrap();
+        let store = MessageStore::open(dir.path(), test_dek()).unwrap();
+        let g = gid(0xF0);
+        let me = [0xAAu8; 38];
+
+        store.group_upsert(&g, "g", &me, 0).unwrap();
+        store.group_member_add(&g, &me).unwrap();
+        store.my_sender_key_save(&g, b"my-chain").unwrap();
+        store.their_sender_key_save(&g, &[0xBBu8; 38], b"their-chain").unwrap();
+        store.group_message_store(&g, &me, b"historical msg", 60).unwrap();
+
+        store.group_forget(&g).unwrap();
+
+        assert!(store.group_get(&g).unwrap().is_none());
+        assert!(store.group_members(&g).unwrap().is_empty());
+        assert!(store.my_sender_key_load(&g).unwrap().is_none());
+        assert!(store
+            .their_sender_key_load(&g, &[0xBBu8; 38])
+            .unwrap()
+            .is_none());
+        // Local message history is intentionally retained for audit.
+        let history = store.group_messages_get(&g).unwrap();
+        assert_eq!(history.len(), 1);
+    }
+
+    #[test]
+    fn group_open_is_idempotent() {
+        // Re-opening an existing db must not error on CREATE TABLE — all
+        // schema statements use IF NOT EXISTS.
+        let dir = tempdir().unwrap();
+        let g = gid(0xAB);
+        {
+            let store = MessageStore::open(dir.path(), test_dek()).unwrap();
+            store.group_upsert(&g, "persist", &[1u8; 38], 0).unwrap();
+        }
+        let store = MessageStore::open(dir.path(), test_dek()).unwrap();
+        assert!(store.group_get(&g).unwrap().is_some());
     }
 }
