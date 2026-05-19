@@ -96,6 +96,11 @@ pub enum GuiEvent {
     /// Tauri side translates this into a `"dm-received"` event with
     /// `peer` as the payload.
     DmReceived { peer: String },
+    /// A group message from `sender` (base58 PeerId) in `group_id`
+    /// (lowercase hex) was just decrypted and stored. Tauri side
+    /// translates this into a `"group-msg-received"` event — see the
+    /// task #7 GUI commit for the forwarder wiring.
+    GroupMessageReceived { group_id: String, sender: String },
 }
 
 /// Inputs that travel only on the first message of a fresh session:
@@ -1128,11 +1133,26 @@ impl P2PNode {
         plaintext: &str,
         hello: Option<FirstMessageHello>,
     ) -> Option<(Vec<u8>, i64)> {
+        self.ratchet_encrypt_and_wrap_bytes(peer, plaintext.as_bytes(), hello, 0)
+    }
+
+    /// Bytes-and-kind variant of [`Self::ratchet_encrypt_and_wrap`].
+    /// Group send paths (Phase 5) use this directly so they can stamp
+    /// the right `kind` (1 = GroupControl, 2 = GroupMessageEnvelope)
+    /// onto the produced `EncryptedPayload`. The legacy text-DM helper
+    /// above forwards here with `kind=0`.
+    fn ratchet_encrypt_and_wrap_bytes(
+        &mut self,
+        peer: PeerId,
+        plaintext: &[u8],
+        hello: Option<FirstMessageHello>,
+        kind: u8,
+    ) -> Option<(Vec<u8>, i64)> {
         let ad = Self::ratchet_ad(&self.identity.peer_id(), &peer);
 
         let ratchet_msg = {
             let session = self.sessions.get_mut(&peer)?;
-            match session.encrypt(plaintext.as_bytes(), &ad) {
+            match session.encrypt(plaintext, &ad) {
                 Ok(m) => m,
                 Err(e) => {
                     error!("Ratchet encrypt failed for {}: {}", peer, e);
@@ -1148,10 +1168,7 @@ impl P2PNode {
             ct: ratchet_msg.ciphertext,
             x3dh_eph: hello.as_ref().map(|h| *h.x3dh_eph.as_bytes()),
             otpk_id: hello.as_ref().and_then(|h| h.otpk_id),
-            // Phase 5: this helper is for text DMs only (kind=0). Group
-            // ops construct their own EncryptedPayloads with kind=1/2 —
-            // see commit 4 of the group track.
-            kind: 0,
+            kind,
         };
 
         let payload_bytes = match payload.to_bytes() {
@@ -1966,16 +1983,10 @@ impl P2PNode {
                 Ok(ctrl) => self.process_group_control(peer, ctrl),
                 Err(e) => warn!("Malformed GroupControl from {}: {}", peer, e),
             },
-            2 => {
-                // Group message envelope — wired in commit 4 of the
-                // group track. For now we record receipt so the
-                // mailbox ACK still fires but don't attempt to decrypt.
-                debug!(
-                    "Received group-message envelope from {} ({} bytes) — not yet routed (task #4)",
-                    peer,
-                    plaintext.len()
-                );
-            }
+            2 => match crate::protocol::GroupMessageEnvelope::from_bytes(plaintext) {
+                Ok(env) => self.process_group_message(peer, env),
+                Err(e) => warn!("Malformed GroupMessageEnvelope from {}: {}", peer, e),
+            },
             unknown => {
                 warn!("Unknown EncryptedPayload.kind={} from {}", unknown, peer);
             }
@@ -2148,6 +2159,330 @@ impl P2PNode {
                 );
             }
         }
+    }
+
+    // ─────────────────── Phase 5 group send / receive ───────────────────
+
+    /// User-facing group send entry point. Loads (or creates) my
+    /// per-group Megolm SenderChain, encrypts the plaintext once,
+    /// fans out the resulting `GroupMessageEnvelope` as N-1 unicasts
+    /// via the existing 1:1 Double Ratchet channel.
+    ///
+    /// When the chain is freshly created (first send to this group),
+    /// a `SenderKeyDistribution` control message is broadcast to
+    /// every other member FIRST so they can install our chain at
+    /// index 0 — without that they'd be unable to decrypt the first
+    /// message. Members without an active DR session at the moment
+    /// of the call are skipped with a warn (membership-rotation
+    /// flows in task #6 cover the new-member prekey-fetch dance).
+    pub fn group_send(
+        &mut self,
+        swarm: &mut Swarm<Behaviour>,
+        group_id: crate::protocol::GroupId,
+        plaintext: &str,
+    ) {
+        // Read-only borrows of the store happen in short scopes so the
+        // subsequent `&mut self` calls (ratchet encrypt, send_request)
+        // don't conflict with them.
+        let group_row = {
+            let Some(store) = self.message_store.as_ref() else {
+                error!("group_send: no message store");
+                return;
+            };
+            match store.group_get(&group_id) {
+                Ok(Some(r)) => r,
+                Ok(None) => {
+                    warn!("group_send: unknown group {}", hex::encode(group_id));
+                    return;
+                }
+                Err(e) => {
+                    warn!("group_send: group_get failed: {}", e);
+                    return;
+                }
+            }
+        };
+        let members = {
+            let Some(store) = self.message_store.as_ref() else { return };
+            match store.group_members(&group_id) {
+                Ok(m) => m,
+                Err(e) => {
+                    warn!("group_send: group_members failed: {}", e);
+                    return;
+                }
+            }
+        };
+
+        // Load or create my SenderChain for this group.
+        let (mut my_chain, fresh) = {
+            let Some(store) = self.message_store.as_ref() else { return };
+            match store.my_sender_key_load(&group_id) {
+                Ok(Some(blob)) => match crate::crypto::megolm::SenderChain::from_json(&blob) {
+                    Ok(c) => (c, false),
+                    Err(e) => {
+                        warn!("group_send: SenderChain deser failed: {}", e);
+                        return;
+                    }
+                },
+                Ok(None) => (crate::crypto::megolm::SenderChain::new(), true),
+                Err(e) => {
+                    warn!("group_send: my_sender_key_load failed: {}", e);
+                    return;
+                }
+            }
+        };
+
+        let my_pid_bytes = self.identity.peer_id().to_bytes();
+
+        // First send to this group: distribute my chain bundle to every
+        // other member before the first message. Recipients without an
+        // active session at this moment are skipped — the chain still
+        // advances on our end and they'll catch up after their session
+        // bootstraps, but they'll see MessageKeyMissing for any messages
+        // we sent before they installed the bundle (chain-install
+        // forward secrecy is the design).
+        if fresh {
+            let bundle = my_chain.current_bundle();
+            let ctrl = crate::protocol::GroupControl::new_sender_key_distribution(
+                group_id,
+                bundle,
+                group_row.epoch,
+            );
+            let ctrl_bytes = match ctrl.to_bytes() {
+                Ok(b) => b,
+                Err(e) => {
+                    warn!("group_send: GroupControl serialize failed: {}", e);
+                    return;
+                }
+            };
+            for member_bytes in &members {
+                if member_bytes == &my_pid_bytes {
+                    continue;
+                }
+                let member_pid = match PeerId::from_bytes(member_bytes) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        warn!("group_send: bad member PID: {}", e);
+                        continue;
+                    }
+                };
+                self.deliver_kind_to_member(swarm, member_pid, 1, &ctrl_bytes);
+            }
+        }
+
+        // Megolm-encrypt the user plaintext.
+        let group_ad = crate::protocol::build_group_ad(&group_id, &my_pid_bytes);
+        let encrypted_msg = my_chain.encrypt(plaintext.as_bytes(), &group_ad);
+
+        // Persist advanced chain state + local plaintext copy.
+        if let Some(store) = self.message_store.as_ref() {
+            if let Ok(blob) = my_chain.to_json() {
+                if let Err(e) = store.my_sender_key_save(&group_id, &blob) {
+                    warn!("group_send: my_sender_key_save failed: {}", e);
+                }
+            }
+            let _ = store.group_message_store(
+                &group_id,
+                &my_pid_bytes,
+                plaintext.as_bytes(),
+                7 * 24 * 3600,
+            );
+        }
+
+        // Wrap as kind=2 envelope and fan out.
+        let envelope = crate::protocol::GroupMessageEnvelope {
+            group_id,
+            msg: encrypted_msg,
+        };
+        let envelope_bytes = match envelope.to_bytes() {
+            Ok(b) => b,
+            Err(e) => {
+                warn!("group_send: envelope serialize failed: {}", e);
+                return;
+            }
+        };
+
+        let mut delivered = 0usize;
+        let mut targeted = 0usize;
+        for member_bytes in &members {
+            if member_bytes == &my_pid_bytes {
+                continue;
+            }
+            targeted += 1;
+            let member_pid = match PeerId::from_bytes(member_bytes) {
+                Ok(p) => p,
+                Err(e) => {
+                    warn!("group_send: bad member PID: {}", e);
+                    continue;
+                }
+            };
+            if self.deliver_kind_to_member(swarm, member_pid, 2, &envelope_bytes) {
+                delivered += 1;
+            }
+        }
+        info!(
+            "Group send to {}: {}/{} member(s) reached",
+            hex::encode(group_id),
+            delivered,
+            targeted
+        );
+        println!(
+            "📨 Group message sent to {}/{} member(s) of {}",
+            delivered,
+            targeted,
+            hex::encode(group_id)
+        );
+    }
+
+    /// Encrypt `body` with the 1:1 DR session to `peer` and send it as
+    /// a request-response message tagged with `kind`. Used by group
+    /// fan-out (kind=2 messages and kind=1 control distribution).
+    ///
+    /// Returns `true` on a successful send (queued onto the libp2p
+    /// outbound queue), `false` if no session exists yet or encrypt
+    /// failed. Group ops drop on `false` rather than mailbox-queueing
+    /// to keep this commit small — task #6 will wire mailbox + outbox
+    /// fallbacks for control-message delivery.
+    fn deliver_kind_to_member(
+        &mut self,
+        swarm: &mut Swarm<Behaviour>,
+        peer: PeerId,
+        kind: u8,
+        body: &[u8],
+    ) -> bool {
+        // Require an established session. Group ops in v0 expect a
+        // live (or persisted-and-restored) DR session with every
+        // member; the CLI surfaces a warning to the user if any are
+        // missing, and task #6 wires the prekey-fetch onboarding for
+        // new members.
+        let have_session = self.sessions.contains_key(&peer)
+            || self.restore_session_if_persisted(&peer);
+        if !have_session {
+            warn!(
+                "deliver_kind: no session with {} (kind={}); group payload dropped",
+                peer, kind
+            );
+            return false;
+        }
+        let Some((wire_bytes, _ttl)) =
+            self.ratchet_encrypt_and_wrap_bytes(peer, body, None, kind)
+        else {
+            return false;
+        };
+        swarm
+            .behaviour_mut()
+            .request_response
+            .send_request(&peer, DirectMessageRequest(wire_bytes));
+        self.persist_session(&peer);
+        true
+    }
+
+    /// Handle an inbound `GroupMessageEnvelope` after the outer 1:1 DR
+    /// has decrypted it (kind=2). Sender is the DR-verified peer
+    /// identity — we trust that bind. Verifies sender is a member of
+    /// the group, loads the cached `ReceiverChain` for their sender
+    /// chain, decrypts the Megolm payload (which itself verifies the
+    /// per-message Ed25519 signature), persists the advanced chain
+    /// state + plaintext copy, prints + emits GUI event.
+    fn process_group_message(
+        &mut self,
+        sender: PeerId,
+        env: crate::protocol::GroupMessageEnvelope,
+    ) {
+        let Some(store) = self.message_store.as_ref() else { return };
+        let sender_bytes = sender.to_bytes();
+
+        // Membership cross-check: non-members can't send into the group.
+        let members = match store.group_members(&env.group_id) {
+            Ok(m) => m,
+            Err(e) => {
+                warn!("process_group_message: group_members: {}", e);
+                return;
+            }
+        };
+        if !members.iter().any(|m| m == &sender_bytes) {
+            warn!(
+                "Group message from non-member {} in group {} — dropping",
+                sender,
+                hex::encode(env.group_id)
+            );
+            return;
+        }
+
+        // Load sender's ReceiverChain. If absent, we haven't been told
+        // their bundle yet — this happens when a message races ahead of
+        // its SenderKeyDistribution. Drop with warn; sender will retry
+        // (in v0, sender's perspective is "send succeeded" but
+        // recipient saw chain-not-installed).
+        let blob = match store.their_sender_key_load(&env.group_id, &sender_bytes) {
+            Ok(Some(b)) => b,
+            Ok(None) => {
+                warn!(
+                    "No sender-key for {} in group {} — dropping (their distribution hasn't arrived?)",
+                    sender,
+                    hex::encode(env.group_id)
+                );
+                return;
+            }
+            Err(e) => {
+                warn!("their_sender_key_load: {}", e);
+                return;
+            }
+        };
+        let mut receiver = match crate::crypto::megolm::ReceiverChain::from_json(&blob) {
+            Ok(r) => r,
+            Err(e) => {
+                warn!("ReceiverChain deserialize: {}", e);
+                return;
+            }
+        };
+
+        let ad = crate::protocol::build_group_ad(&env.group_id, &sender_bytes);
+        let plaintext = match receiver.decrypt(&env.msg, &ad) {
+            Ok(p) => p,
+            Err(e) => {
+                warn!(
+                    "Megolm decrypt failed from {} in group {}: {}",
+                    sender,
+                    hex::encode(env.group_id),
+                    e
+                );
+                return;
+            }
+        };
+
+        // Persist advanced chain + plaintext copy.
+        if let Ok(blob) = receiver.to_json() {
+            if let Err(e) = store.their_sender_key_save(&env.group_id, &sender_bytes, &blob) {
+                warn!("their_sender_key_save failed: {}", e);
+            }
+        }
+        let _ = store.group_message_store(
+            &env.group_id,
+            &sender_bytes,
+            &plaintext,
+            7 * 24 * 3600,
+        );
+
+        let text = String::from_utf8_lossy(&plaintext);
+        debug!(
+            "Decrypted group msg from {} in {}: {}",
+            sender,
+            hex::encode(env.group_id),
+            text
+        );
+        // Print a short group-id prefix to disambiguate concurrent groups
+        // in the CLI terminal. The full hex hits debug-level only.
+        println!(
+            "\n👥 [{}] {}: {}",
+            hex::encode(&env.group_id[..4]),
+            sender,
+            text
+        );
+        println!("> ");
+        self.emit_gui(GuiEvent::GroupMessageReceived {
+            group_id: hex::encode(env.group_id),
+            sender: sender.to_base58(),
+        });
     }
 
     /// Drain any queued sends / recvs that were waiting on this prekey.

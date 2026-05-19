@@ -13,7 +13,7 @@ use libp2p::identity::Keypair;
 use libp2p::PeerId;
 use serde::{Deserialize, Serialize};
 
-use crate::crypto::megolm::SenderKeyBundle;
+use crate::crypto::megolm::{EncryptedGroupMessage, SenderKeyBundle};
 use crate::protocol::message::extract_inline_pubkey;
 use crate::protocol::ProtocolError;
 
@@ -70,6 +70,45 @@ pub struct GroupStoredMessage {
     pub plaintext: Vec<u8>,
     pub timestamp: i64,
     pub ttl: i64,
+}
+
+// ──────────────────── GroupMessage envelope (kind=2) ──────────────────────
+
+/// Wire-form of a single group message: a `(group_id, encrypted_message)`
+/// pair. Serialized as the kind=2 plaintext of the outer
+/// `EncryptedPayload`. The inner `EncryptedGroupMessage` is the Megolm
+/// sender-chain output (index + AEAD ciphertext + Ed25519 signature).
+///
+/// Each recipient receives one of these per group message — N-1
+/// unicasts via the existing 1:1 DR channel — and decrypts
+/// independently against their cached `ReceiverChain` for the sending
+/// peer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroupMessageEnvelope {
+    pub group_id: GroupId,
+    pub msg: EncryptedGroupMessage,
+}
+
+impl GroupMessageEnvelope {
+    pub fn to_bytes(&self) -> Result<Vec<u8>, serde_json::Error> {
+        serde_json::to_vec(self)
+    }
+    pub fn from_bytes(data: &[u8]) -> Result<Self, serde_json::Error> {
+        serde_json::from_slice(data)
+    }
+}
+
+/// Build the associated-data bytes bound into the Megolm AEAD and
+/// signature for a group message. Layout: `group_id (32) ||
+/// sender_pid_len_be (4) || sender_pid`. Binding the AD to both
+/// fields means a captured ciphertext can't be replayed under a
+/// different group context or attributed to a different sender.
+pub fn build_group_ad(group_id: &GroupId, sender_pid: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(32 + 4 + sender_pid.len());
+    out.extend_from_slice(group_id);
+    out.extend_from_slice(&(sender_pid.len() as u32).to_be_bytes());
+    out.extend_from_slice(sender_pid);
+    out
 }
 
 // ─────────────────────── GroupControl wire types ────────────────────────
@@ -576,5 +615,56 @@ mod tests {
         let bytes = ctrl.to_bytes().unwrap();
         let back = GroupControl::from_bytes(&bytes).unwrap();
         back.verify_signature().unwrap();
+    }
+
+    #[test]
+    fn group_message_envelope_wire_roundtrip_and_decrypt() {
+        use crate::crypto::megolm::{ReceiverChain, SenderChain};
+        let group_id = gid();
+        let (_kp, sender_pid) = pair_keypair_and_pid();
+        let ad = build_group_ad(&group_id, &sender_pid);
+
+        let mut sender_chain = SenderChain::new();
+        let mut receiver_chain = ReceiverChain::from_bundle(&sender_chain.current_bundle());
+
+        let encrypted = sender_chain.encrypt(b"hello group", &ad);
+        let envelope = GroupMessageEnvelope {
+            group_id,
+            msg: encrypted,
+        };
+
+        let wire = envelope.to_bytes().unwrap();
+        let back = GroupMessageEnvelope::from_bytes(&wire).unwrap();
+        assert_eq!(back.group_id, group_id);
+        // After wire round-trip, recipient can still decrypt cleanly.
+        let pt = receiver_chain.decrypt(&back.msg, &ad).unwrap();
+        assert_eq!(pt, b"hello group");
+    }
+
+    #[test]
+    fn build_group_ad_binds_both_fields() {
+        let g1 = [1u8; 32];
+        let g2 = [2u8; 32];
+        let pid_a = vec![0xAAu8; 38];
+        let pid_b = vec![0xBBu8; 38];
+        assert_ne!(build_group_ad(&g1, &pid_a), build_group_ad(&g2, &pid_a));
+        assert_ne!(build_group_ad(&g1, &pid_a), build_group_ad(&g1, &pid_b));
+    }
+
+    #[test]
+    fn group_ad_mismatch_breaks_megolm_decrypt() {
+        use crate::crypto::megolm::{ReceiverChain, SenderChain};
+        let group_id = gid();
+        let (_kp, sender_pid) = pair_keypair_and_pid();
+        let (_kp2, other_pid) = pair_keypair_and_pid();
+        let send_ad = build_group_ad(&group_id, &sender_pid);
+        let wrong_ad = build_group_ad(&group_id, &other_pid);
+
+        let mut sender_chain = SenderChain::new();
+        let mut receiver_chain = ReceiverChain::from_bundle(&sender_chain.current_bundle());
+        let encrypted = sender_chain.encrypt(b"x", &send_ad);
+        // Sender signature covers (DOMAIN || index || ad || ct); an AD
+        // swap on the receive side breaks the signature first.
+        assert!(receiver_chain.decrypt(&encrypted, &wrong_ad).is_err());
     }
 }
