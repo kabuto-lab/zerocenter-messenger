@@ -1148,6 +1148,10 @@ impl P2PNode {
             ct: ratchet_msg.ciphertext,
             x3dh_eph: hello.as_ref().map(|h| *h.x3dh_eph.as_bytes()),
             otpk_id: hello.as_ref().and_then(|h| h.otpk_id),
+            // Phase 5: this helper is for text DMs only (kind=0). Group
+            // ops construct their own EncryptedPayloads with kind=1/2 —
+            // see commit 4 of the group track.
+            kind: 0,
         };
 
         let payload_bytes = match payload.to_bytes() {
@@ -1879,24 +1883,8 @@ impl P2PNode {
             }
         };
 
-        if let Some(ref store) = self.message_store {
-            let _ = store.add_contact(&peer.to_bytes(), &peer.to_bytes(), None);
-            let _ = store.store_message(
-                &peer.to_bytes(),
-                &self.identity.peer_id().to_bytes(),
-                &plaintext,
-                7 * 24 * 3600,
-            );
-        }
         self.persist_session(&peer);
-
-        let text = String::from_utf8_lossy(&plaintext);
-        // Plaintext stays at debug; the println! below is the user-facing
-        // terminal output. INVARIANTS §19.
-        debug!("Decrypted first DM from {}: {}", peer, text);
-        println!("\n🔓 {}: {}", peer, text);
-        println!("> ");
-        self.emit_gui(GuiEvent::DmReceived { peer: peer.to_base58() });
+        self.dispatch_decrypted_content(peer, payload.kind, &plaintext);
         true
     }
 
@@ -1931,30 +1919,235 @@ impl P2PNode {
             }
         };
 
-        // Auto-persist contact + plaintext copy + updated session.
-        if let Some(ref store) = self.message_store {
-            if let Err(e) = store.add_contact(&peer.to_bytes(), &peer.to_bytes(), None) {
-                warn!("Failed to persist contact: {}", e);
+        self.persist_session(&peer);
+        self.dispatch_decrypted_content(peer, payload.kind, &plaintext);
+        true
+    }
+
+    /// Route a successfully ratchet-decrypted plaintext to its
+    /// per-`kind` handler. Centralises the post-decrypt logic that
+    /// previously lived in two near-identical tail blocks across
+    /// `decrypt_first_message` and `decrypt_and_store`.
+    ///
+    /// kind=0: text DM — auto-add contact, persist plaintext, print,
+    ///         emit DmReceived to the GUI.
+    /// kind=1: GroupControl — parse JSON, verify signatures, install
+    ///         membership / sender-key state.
+    /// kind=2: GroupMessageEnvelope — wired in commit 4 of the group
+    ///         track; debug-log for now.
+    /// other:  warn and drop.
+    fn dispatch_decrypted_content(&mut self, peer: PeerId, kind: u8, plaintext: &[u8]) {
+        match kind {
+            0 => {
+                if let Some(ref store) = self.message_store {
+                    if let Err(e) = store.add_contact(&peer.to_bytes(), &peer.to_bytes(), None) {
+                        warn!("Failed to persist contact: {}", e);
+                    }
+                    if let Err(e) = store.store_message(
+                        &peer.to_bytes(),
+                        &self.identity.peer_id().to_bytes(),
+                        plaintext,
+                        7 * 24 * 3600,
+                    ) {
+                        warn!("Failed to store plaintext copy: {}", e);
+                    }
+                }
+                let text = String::from_utf8_lossy(plaintext);
+                // Plaintext stays at debug; the println! below is the
+                // user-facing terminal output (INVARIANTS §19).
+                debug!("Decrypted DM from {}: {}", peer, text);
+                println!("\n🔓 {}: {}", peer, text);
+                println!("> ");
+                self.emit_gui(GuiEvent::DmReceived {
+                    peer: peer.to_base58(),
+                });
             }
-            if let Err(e) = store.store_message(
-                &peer.to_bytes(),
-                &self.identity.peer_id().to_bytes(),
-                &plaintext,
-                7 * 24 * 3600,
-            ) {
-                warn!("Failed to store plaintext copy: {}", e);
+            1 => match crate::protocol::GroupControl::from_bytes(plaintext) {
+                Ok(ctrl) => self.process_group_control(peer, ctrl),
+                Err(e) => warn!("Malformed GroupControl from {}: {}", peer, e),
+            },
+            2 => {
+                // Group message envelope — wired in commit 4 of the
+                // group track. For now we record receipt so the
+                // mailbox ACK still fires but don't attempt to decrypt.
+                debug!(
+                    "Received group-message envelope from {} ({} bytes) — not yet routed (task #4)",
+                    peer,
+                    plaintext.len()
+                );
+            }
+            unknown => {
+                warn!("Unknown EncryptedPayload.kind={} from {}", unknown, peer);
             }
         }
-        self.persist_session(&peer);
+    }
 
-        let text = String::from_utf8_lossy(&plaintext);
-        // Plaintext stays at debug; the println! below is the user-facing
-        // terminal output. INVARIANTS §19.
-        debug!("Decrypted DM from {}: {}", peer, text);
-        println!("\n🔓 {}: {}", peer, text);
-        println!("> ");
-        self.emit_gui(GuiEvent::DmReceived { peer: peer.to_base58() });
-        true
+    /// Handle an inbound GroupControl after signature checks. The
+    /// outer 1:1 DR channel already authenticates `sender` — we trust
+    /// that bind. Inner signatures (founder / leaver) are verified
+    /// against the relevant PID's inlined Ed25519 pubkey before any
+    /// state mutation.
+    fn process_group_control(&mut self, sender: PeerId, ctrl: crate::protocol::GroupControl) {
+        use crate::protocol::GroupControl;
+        match &ctrl {
+            GroupControl::CreateGroup {
+                group_id,
+                name,
+                founder_pid,
+                members,
+                epoch,
+                founder_sig: _,
+            } => {
+                if let Err(e) = ctrl.verify_signature() {
+                    warn!("CreateGroup from {} failed signature: {}", sender, e);
+                    return;
+                }
+                if sender.to_bytes() != *founder_pid {
+                    warn!(
+                        "CreateGroup from {} doesn't match founder field — rejecting",
+                        sender
+                    );
+                    return;
+                }
+                let my_pid = self.identity.peer_id().to_bytes();
+                if !members.iter().any(|m| m == &my_pid) {
+                    debug!(
+                        "CreateGroup {} excludes me — ignoring",
+                        hex::encode(group_id)
+                    );
+                    return;
+                }
+                let Some(ref store) = self.message_store else { return };
+                if let Err(e) = store.group_upsert(group_id, name, founder_pid, *epoch) {
+                    warn!("group_upsert failed: {}", e);
+                    return;
+                }
+                for m in members {
+                    if let Err(e) = store.group_member_add(group_id, m) {
+                        warn!("group_member_add failed: {}", e);
+                    }
+                }
+                info!(
+                    "Joined group '{}' (id={}, founder={})",
+                    name,
+                    hex::encode(group_id),
+                    sender
+                );
+            }
+            GroupControl::MembershipUpdate {
+                group_id,
+                added,
+                removed,
+                epoch,
+                founder_sig: _,
+            } => {
+                let Some(ref store) = self.message_store else { return };
+                let row = match store.group_get(group_id) {
+                    Ok(Some(r)) => r,
+                    Ok(None) => {
+                        debug!(
+                            "MembershipUpdate for unknown group {} — ignoring",
+                            hex::encode(group_id)
+                        );
+                        return;
+                    }
+                    Err(e) => {
+                        warn!("group_get failed: {}", e);
+                        return;
+                    }
+                };
+                if *epoch <= row.epoch {
+                    warn!(
+                        "MembershipUpdate epoch {} <= stored {} for group {} — rejecting stale update",
+                        epoch,
+                        row.epoch,
+                        hex::encode(group_id)
+                    );
+                    return;
+                }
+                if let Err(e) = ctrl.verify_membership_update(&row.founder_pid) {
+                    warn!("MembershipUpdate from {} failed signature: {}", sender, e);
+                    return;
+                }
+                for m in added {
+                    let _ = store.group_member_add(group_id, m);
+                }
+                for m in removed {
+                    let _ = store.group_member_remove(group_id, m);
+                    let _ = store.their_sender_key_delete(group_id, m);
+                }
+                if let Err(e) = store.group_bump_epoch(group_id, *epoch) {
+                    warn!("group_bump_epoch failed: {}", e);
+                }
+                info!(
+                    "Applied MembershipUpdate to group {} (epoch -> {}, +{} -{})",
+                    hex::encode(group_id),
+                    epoch,
+                    added.len(),
+                    removed.len()
+                );
+            }
+            GroupControl::SenderKeyDistribution {
+                group_id,
+                bundle,
+                epoch: _,
+            } => {
+                let Some(ref store) = self.message_store else { return };
+                let members = match store.group_members(group_id) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        warn!("group_members failed: {}", e);
+                        return;
+                    }
+                };
+                let sender_bytes = sender.to_bytes();
+                if !members.iter().any(|m| m == &sender_bytes) {
+                    warn!(
+                        "SenderKeyDistribution from {} who isn't a member of group {} — ignoring",
+                        sender,
+                        hex::encode(group_id)
+                    );
+                    return;
+                }
+                let receiver = crate::crypto::megolm::ReceiverChain::from_bundle(bundle);
+                let blob = match receiver.to_json() {
+                    Ok(b) => b,
+                    Err(e) => {
+                        warn!("Failed to serialize ReceiverChain: {}", e);
+                        return;
+                    }
+                };
+                if let Err(e) = store.their_sender_key_save(group_id, &sender_bytes, &blob) {
+                    warn!("their_sender_key_save failed: {}", e);
+                    return;
+                }
+                info!(
+                    "Installed sender-key from {} in group {} at index {}",
+                    sender,
+                    hex::encode(group_id),
+                    bundle.index
+                );
+            }
+            GroupControl::Leave {
+                group_id,
+                leaver_pid,
+                epoch: _,
+                leaver_sig: _,
+            } => {
+                if let Err(e) = ctrl.verify_signature() {
+                    warn!("Leave from {} failed signature: {}", sender, e);
+                    return;
+                }
+                let Some(ref store) = self.message_store else { return };
+                let _ = store.group_member_remove(group_id, leaver_pid);
+                let _ = store.their_sender_key_delete(group_id, leaver_pid);
+                info!(
+                    "Removed member {} from group {} (Leave)",
+                    hex::encode(leaver_pid),
+                    hex::encode(group_id)
+                );
+            }
+        }
     }
 
     /// Drain any queued sends / recvs that were waiting on this prekey.

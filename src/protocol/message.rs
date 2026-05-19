@@ -27,6 +27,12 @@ const SEALED_DOMAIN_SEPARATOR: &[u8] = b"zerocenter-sealed-dm-v1";
 /// session — it's the initiator's ephemeral X25519 pubkey that the
 /// responder needs to derive the same shared secret via X3DH-lite. After
 /// the responder has been bootstrapped it is omitted (and ignored if seen).
+///
+/// `kind` (Phase 5) discriminates the decrypted plaintext: 0 = raw user
+/// text (default for backward compat with pre-Phase-5 senders), 1 =
+/// `protocol::group::GroupControl` (cbor-or-json — currently json), 2 =
+/// `protocol::group::GroupMessageEnvelope`. Recipients sniff this AFTER
+/// ratchet-decrypt and route accordingly.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EncryptedPayload {
     /// Sender's current DH ratchet pubkey.
@@ -49,6 +55,19 @@ pub struct EncryptedPayload {
     /// the 2-DH variant of X3DH was used.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub otpk_id: Option<i64>,
+
+    /// Content discriminator for the decrypted plaintext:
+    /// `0` = direct-DM text (default for backward compat),
+    /// `1` = `GroupControl`, `2` = `GroupMessageEnvelope`.
+    /// `#[serde(default)]` so old envelopes (no field) decode as 0,
+    /// and `skip_serializing_if` keeps wire bytes byte-identical for
+    /// the zero case — pre-Phase-5 senders observe no change.
+    #[serde(default, skip_serializing_if = "is_zero_u8")]
+    pub kind: u8,
+}
+
+fn is_zero_u8(v: &u8) -> bool {
+    *v == 0
 }
 
 impl EncryptedPayload {
@@ -410,7 +429,9 @@ fn pop_bytes(cur: &mut &[u8]) -> Result<Vec<u8>, String> {
 /// Extract a libp2p `PublicKey` from an inlined-pubkey PeerId.
 /// Returns `NoInlinePublicKey` for hash-coded PeerIds (multihash code
 /// != 0), which require an out-of-band pubkey lookup we don't yet do.
-fn extract_inline_pubkey(peer_id: &PeerId) -> Result<libp2p::identity::PublicKey, ProtocolError> {
+pub(crate) fn extract_inline_pubkey(
+    peer_id: &PeerId,
+) -> Result<libp2p::identity::PublicKey, ProtocolError> {
     let multihash = peer_id.as_ref();
     if multihash.code() != 0 {
         return Err(ProtocolError::NoInlinePublicKey);
