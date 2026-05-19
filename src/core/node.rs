@@ -1792,7 +1792,7 @@ impl P2PNode {
 
         // Step 5: route to the right decrypt path.
         if self.restore_session_if_persisted(&verified_sender) {
-            return self.decrypt_and_store(verified_sender, &payload);
+            return self.decrypt_and_store(swarm, verified_sender, &payload);
         }
 
         // No session yet — need responder bootstrap. We need both the
@@ -1808,6 +1808,7 @@ impl P2PNode {
 
         if let Some(initiator_x25519) = self.cached_prekey(&verified_sender) {
             self.bootstrap_responder_and_decrypt(
+                swarm,
                 verified_sender,
                 eph_bytes,
                 initiator_x25519,
@@ -1838,6 +1839,7 @@ impl P2PNode {
     /// success/fail up to the Phase 5 mailbox ACK loop.
     fn bootstrap_responder_and_decrypt(
         &mut self,
+        swarm: &mut Swarm<Behaviour>,
         peer: PeerId,
         eph_bytes: [u8; 32],
         initiator_x25519: X25519Pub,
@@ -1889,7 +1891,7 @@ impl P2PNode {
         // Audit F9: install the session ONLY if first-message decrypt
         // succeeds.
         self.sessions.insert(peer, session);
-        let decrypted_ok = self.decrypt_first_message(peer, payload);
+        let decrypted_ok = self.decrypt_first_message(swarm, peer, payload);
         if !decrypted_ok {
             self.sessions.remove(&peer);
             return false;
@@ -1913,7 +1915,12 @@ impl P2PNode {
     /// Variant of `decrypt_and_store` that returns a bool — used by the
     /// responder bootstrap path which needs to know whether the first
     /// message decrypted (to decide whether to clean up the OTPK row).
-    fn decrypt_first_message(&mut self, peer: PeerId, payload: &EncryptedPayload) -> bool {
+    fn decrypt_first_message(
+        &mut self,
+        swarm: &mut Swarm<Behaviour>,
+        peer: PeerId,
+        payload: &EncryptedPayload,
+    ) -> bool {
         let ad = Self::ratchet_ad(&peer, &self.identity.peer_id());
         let ratchet_msg = crate::crypto::ratchet::RatchetMessage {
             header: crate::crypto::ratchet::Header {
@@ -1936,13 +1943,18 @@ impl P2PNode {
         };
 
         self.persist_session(&peer);
-        self.dispatch_decrypted_content(peer, payload.kind, &plaintext);
+        self.dispatch_decrypted_content(swarm, peer, payload.kind, &plaintext);
         true
     }
 
     /// Returns `true` iff the message was successfully ratchet-
     /// decrypted and stored. Phase 5 mailbox ACK path uses this signal.
-    fn decrypt_and_store(&mut self, peer: PeerId, payload: &EncryptedPayload) -> bool {
+    fn decrypt_and_store(
+        &mut self,
+        swarm: &mut Swarm<Behaviour>,
+        peer: PeerId,
+        payload: &EncryptedPayload,
+    ) -> bool {
         let ad = Self::ratchet_ad(&peer, &self.identity.peer_id());
 
         let ratchet_msg = crate::crypto::ratchet::RatchetMessage {
@@ -1972,7 +1984,7 @@ impl P2PNode {
         };
 
         self.persist_session(&peer);
-        self.dispatch_decrypted_content(peer, payload.kind, &plaintext);
+        self.dispatch_decrypted_content(swarm, peer, payload.kind, &plaintext);
         true
     }
 
@@ -1988,7 +2000,13 @@ impl P2PNode {
     /// kind=2: GroupMessageEnvelope — wired in commit 4 of the group
     ///         track; debug-log for now.
     /// other:  warn and drop.
-    fn dispatch_decrypted_content(&mut self, peer: PeerId, kind: u8, plaintext: &[u8]) {
+    fn dispatch_decrypted_content(
+        &mut self,
+        swarm: &mut Swarm<Behaviour>,
+        peer: PeerId,
+        kind: u8,
+        plaintext: &[u8],
+    ) {
         match kind {
             0 => {
                 if let Some(ref store) = self.message_store {
@@ -2015,7 +2033,7 @@ impl P2PNode {
                 });
             }
             1 => match crate::protocol::GroupControl::from_bytes(plaintext) {
-                Ok(ctrl) => self.process_group_control(peer, ctrl),
+                Ok(ctrl) => self.process_group_control(swarm, peer, ctrl),
                 Err(e) => warn!("Malformed GroupControl from {}: {}", peer, e),
             },
             2 => match crate::protocol::GroupMessageEnvelope::from_bytes(plaintext) {
@@ -2033,7 +2051,12 @@ impl P2PNode {
     /// that bind. Inner signatures (founder / leaver) are verified
     /// against the relevant PID's inlined Ed25519 pubkey before any
     /// state mutation.
-    fn process_group_control(&mut self, sender: PeerId, ctrl: crate::protocol::GroupControl) {
+    fn process_group_control(
+        &mut self,
+        swarm: &mut Swarm<Behaviour>,
+        sender: PeerId,
+        ctrl: crate::protocol::GroupControl,
+    ) {
         use crate::protocol::GroupControl;
         match &ctrl {
             GroupControl::CreateGroup {
@@ -2087,51 +2110,78 @@ impl P2PNode {
                 epoch,
                 founder_sig: _,
             } => {
-                let Some(ref store) = self.message_store else { return };
-                let row = match store.group_get(group_id) {
-                    Ok(Some(r)) => r,
-                    Ok(None) => {
-                        debug!(
-                            "MembershipUpdate for unknown group {} — ignoring",
+                // Phase A: pre-flight + apply, all under an immutable
+                // self-borrow. We collect what we need to react in
+                // Phase B (rotation + onboarding) into owned locals so
+                // the store borrow ends before the mutable calls.
+                let group_id_local: crate::protocol::GroupId = *group_id;
+                let new_epoch: u64 = *epoch;
+                let added_local: Vec<Vec<u8>> = added.clone();
+                let removed_nonempty = !removed.is_empty();
+                {
+                    let Some(ref store) = self.message_store else { return };
+                    let row = match store.group_get(group_id) {
+                        Ok(Some(r)) => r,
+                        Ok(None) => {
+                            debug!(
+                                "MembershipUpdate for unknown group {} — ignoring",
+                                hex::encode(group_id)
+                            );
+                            return;
+                        }
+                        Err(e) => {
+                            warn!("group_get failed: {}", e);
+                            return;
+                        }
+                    };
+                    if *epoch <= row.epoch {
+                        warn!(
+                            "MembershipUpdate epoch {} <= stored {} for group {} — rejecting stale update",
+                            epoch,
+                            row.epoch,
                             hex::encode(group_id)
                         );
                         return;
                     }
-                    Err(e) => {
-                        warn!("group_get failed: {}", e);
+                    if let Err(e) = ctrl.verify_membership_update(&row.founder_pid) {
+                        warn!("MembershipUpdate from {} failed signature: {}", sender, e);
                         return;
                     }
-                };
-                if *epoch <= row.epoch {
-                    warn!(
-                        "MembershipUpdate epoch {} <= stored {} for group {} — rejecting stale update",
+                    for m in added {
+                        let _ = store.group_member_add(group_id, m);
+                    }
+                    for m in removed {
+                        let _ = store.group_member_remove(group_id, m);
+                        let _ = store.their_sender_key_delete(group_id, m);
+                    }
+                    if let Err(e) = store.group_bump_epoch(group_id, *epoch) {
+                        warn!("group_bump_epoch failed: {}", e);
+                    }
+                    info!(
+                        "Applied MembershipUpdate to group {} (epoch -> {}, +{} -{})",
+                        hex::encode(group_id),
                         epoch,
-                        row.epoch,
-                        hex::encode(group_id)
+                        added.len(),
+                        removed.len()
                     );
-                    return;
                 }
-                if let Err(e) = ctrl.verify_membership_update(&row.founder_pid) {
-                    warn!("MembershipUpdate from {} failed signature: {}", sender, e);
-                    return;
+
+                // Phase B: forward-secrecy rotation on remove + onboarding
+                // distribution on add. Both need &mut self for the
+                // swarm-touching deliver_kind_to_member call.
+                if removed_nonempty {
+                    self.rotate_my_sender_chain_and_broadcast(
+                        swarm,
+                        &group_id_local,
+                        new_epoch,
+                    );
                 }
-                for m in added {
-                    let _ = store.group_member_add(group_id, m);
+                for added_pid_bytes in &added_local {
+                    let Ok(added_pid) = PeerId::from_bytes(added_pid_bytes) else {
+                        continue;
+                    };
+                    self.send_my_bundle_to(swarm, &group_id_local, added_pid);
                 }
-                for m in removed {
-                    let _ = store.group_member_remove(group_id, m);
-                    let _ = store.their_sender_key_delete(group_id, m);
-                }
-                if let Err(e) = store.group_bump_epoch(group_id, *epoch) {
-                    warn!("group_bump_epoch failed: {}", e);
-                }
-                info!(
-                    "Applied MembershipUpdate to group {} (epoch -> {}, +{} -{})",
-                    hex::encode(group_id),
-                    epoch,
-                    added.len(),
-                    removed.len()
-                );
             }
             GroupControl::SenderKeyDistribution {
                 group_id,
@@ -2184,13 +2234,31 @@ impl P2PNode {
                     warn!("Leave from {} failed signature: {}", sender, e);
                     return;
                 }
-                let Some(ref store) = self.message_store else { return };
-                let _ = store.group_member_remove(group_id, leaver_pid);
-                let _ = store.their_sender_key_delete(group_id, leaver_pid);
-                info!(
-                    "Removed member {} from group {} (Leave)",
-                    hex::encode(leaver_pid),
-                    hex::encode(group_id)
+                let group_id_local: crate::protocol::GroupId = *group_id;
+                let rotation_epoch = {
+                    let Some(ref store) = self.message_store else { return };
+                    let _ = store.group_member_remove(group_id, leaver_pid);
+                    let _ = store.their_sender_key_delete(group_id, leaver_pid);
+                    info!(
+                        "Removed member {} from group {} (Leave)",
+                        hex::encode(leaver_pid),
+                        hex::encode(group_id)
+                    );
+                    store
+                        .group_get(group_id)
+                        .ok()
+                        .flatten()
+                        .map(|r| r.epoch)
+                        .unwrap_or(0)
+                };
+                // Forward-secrecy: rotate my chain so the leaver's
+                // cached copy of my chain key can't decrypt anything
+                // we send post-Leave. Reuses the existing epoch (no
+                // bump — Leave isn't a founder-issued state change).
+                self.rotate_my_sender_chain_and_broadcast(
+                    swarm,
+                    &group_id_local,
+                    rotation_epoch,
                 );
             }
         }
@@ -2730,6 +2798,15 @@ impl P2PNode {
                 delivered += 1;
             }
         }
+
+        // Onboarding: if I (the founder) already have a SenderChain
+        // for this group, send my current bundle to the new joiner
+        // straight away so they can decrypt my next message without
+        // waiting for my next `group send` to trigger fresh-chain
+        // distribution. Other current members react symmetrically on
+        // receiving the MembershipUpdate (see process_group_control).
+        self.send_my_bundle_to(swarm, &group_id, new_member);
+
         println!(
             "✅ Added {} to group {} (epoch {} → {}); broadcast to {}/{} member(s)",
             new_member,
@@ -2823,8 +2900,15 @@ impl P2PNode {
                 delivered += 1;
             }
         }
+
+        // Forward-secrecy step: rotate MY sender chain so the removed
+        // peer's cached chain key is dead-on-arrival for any future
+        // message of mine. Remaining members rotate themselves in
+        // response to the MembershipUpdate (see process_group_control).
+        self.rotate_my_sender_chain_and_broadcast(swarm, &group_id, new_epoch);
+
         println!(
-            "✅ Removed {} from group {} (epoch {} → {}); broadcast to {}/{} remaining member(s)",
+            "✅ Removed {} from group {} (epoch {} → {}); broadcast to {}/{} remaining member(s); rotated my chain",
             gone,
             hex::encode(group_id),
             row.epoch,
@@ -2915,6 +2999,120 @@ impl P2PNode {
         );
     }
 
+    // ────────────────── Phase 5 membership rotation (task #6) ──────────────────
+
+    /// Rotate my SenderChain for `group_id`: drop the old chain,
+    /// generate a fresh one, overwrite the stored `my_sender_keys`
+    /// row, and broadcast the new bundle as a kind=1
+    /// `SenderKeyDistribution` to every other member. Called on
+    /// remove / leave events so the removed-or-departed peer can no
+    /// longer decrypt our future messages even if they cached the
+    /// old chain key.
+    ///
+    /// `new_epoch` is stamped onto the SenderKeyDistribution.epoch
+    /// field so recipients can spot a distribution that pre-dates a
+    /// MembershipUpdate they haven't seen yet.
+    ///
+    /// Members without an active 1:1 DR session are skipped with a
+    /// warn — same v0 limitation as the rest of group fan-out.
+    fn rotate_my_sender_chain_and_broadcast(
+        &mut self,
+        swarm: &mut Swarm<Behaviour>,
+        group_id: &crate::protocol::GroupId,
+        new_epoch: u64,
+    ) {
+        let new_chain = crate::crypto::megolm::SenderChain::new();
+        let bundle = new_chain.current_bundle();
+        let blob = match new_chain.to_json() {
+            Ok(b) => b,
+            Err(e) => {
+                warn!("rotate: SenderChain serialize failed: {}", e);
+                return;
+            }
+        };
+
+        // Phase A: write under a short immutable self.message_store borrow.
+        let members = {
+            let Some(store) = self.message_store.as_ref() else { return };
+            if let Err(e) = store.my_sender_key_save(group_id, &blob) {
+                warn!("rotate: my_sender_key_save failed: {}", e);
+                return;
+            }
+            store.group_members(group_id).unwrap_or_default()
+        };
+
+        let ctrl = crate::protocol::GroupControl::new_sender_key_distribution(
+            *group_id, bundle, new_epoch,
+        );
+        let ctrl_bytes = match ctrl.to_bytes() {
+            Ok(b) => b,
+            Err(e) => {
+                warn!("rotate: SenderKeyDistribution serialize failed: {}", e);
+                return;
+            }
+        };
+
+        // Phase B: mutable fan-out.
+        let my_pid_bytes = self.identity.peer_id().to_bytes();
+        let mut delivered = 0usize;
+        for m_bytes in &members {
+            if m_bytes == &my_pid_bytes {
+                continue;
+            }
+            let member_pid = match PeerId::from_bytes(m_bytes) {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+            if self.deliver_kind_to_member(swarm, member_pid, 1, &ctrl_bytes) {
+                delivered += 1;
+            }
+        }
+        info!(
+            "Rotated sender-chain for group {} at epoch {}; redistributed bundle to {} member(s)",
+            hex::encode(group_id),
+            new_epoch,
+            delivered
+        );
+    }
+
+    /// Send my CURRENT (non-rotated) SenderChain bundle for
+    /// `group_id` to `peer` as kind=1 SenderKeyDistribution. Used on
+    /// member-add: existing members onboard the new joiner by
+    /// forwarding their current bundle. No-op if I don't have a
+    /// chain for the group yet — the new joiner will pick it up
+    /// from the freshman bundle distribution on my next `group_send`.
+    fn send_my_bundle_to(
+        &mut self,
+        swarm: &mut Swarm<Behaviour>,
+        group_id: &crate::protocol::GroupId,
+        peer: PeerId,
+    ) -> bool {
+        let (bundle, epoch) = {
+            let Some(store) = self.message_store.as_ref() else { return false };
+            let row = match store.group_get(group_id) {
+                Ok(Some(r)) => r,
+                _ => return false,
+            };
+            let blob = match store.my_sender_key_load(group_id) {
+                Ok(Some(b)) => b,
+                _ => return false,
+            };
+            let chain = match crate::crypto::megolm::SenderChain::from_json(&blob) {
+                Ok(c) => c,
+                Err(_) => return false,
+            };
+            (chain.current_bundle(), row.epoch)
+        };
+        let ctrl = crate::protocol::GroupControl::new_sender_key_distribution(
+            *group_id, bundle, epoch,
+        );
+        let bytes = match ctrl.to_bytes() {
+            Ok(b) => b,
+            Err(_) => return false,
+        };
+        self.deliver_kind_to_member(swarm, peer, 1, &bytes)
+    }
+
     /// Drain any queued sends / recvs that were waiting on this prekey.
     /// Called after [`Self::verify_and_store_prekey`] succeeds.
     fn process_pending(
@@ -2929,9 +3127,9 @@ impl P2PNode {
         if let Some(payloads) = self.pending_recvs.remove(&peer) {
             for payload in payloads {
                 if self.restore_session_if_persisted(&peer) {
-                    self.decrypt_and_store(peer, &payload);
+                    self.decrypt_and_store(swarm, peer, &payload);
                 } else if let Some(eph_bytes) = payload.x3dh_eph {
-                    self.bootstrap_responder_and_decrypt(peer, eph_bytes, prekey_pub, &payload);
+                    self.bootstrap_responder_and_decrypt(swarm, peer, eph_bytes, prekey_pub, &payload);
                 } else {
                     warn!(
                         "Pending recv from {} has no x3dh_eph and no session; dropping",
