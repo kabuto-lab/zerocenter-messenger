@@ -1934,14 +1934,21 @@ impl P2PNode {
             return false;
         }
 
-        // Success path: delete the consumed OTPK row so it can't be
-        // reused even by ourselves. (Failure path above doesn't touch
-        // the OTPK row — it stays marked consumed by `pop_unused_otpk`
-        // and is now blocked from re-load by the audit-F3 consumed_at
-        // gate in `load_otpk_private`, so even a future replay of the
-        // same first-message can't re-bootstrap. One OTPK burned per
-        // bad-first-message is also mild DoS resistance.)
+        // Success path: the OTPK has now done its one job. Mark it
+        // consumed — the audit-F3 replay gate, since `load_otpk_private`
+        // refuses a spent OTPK, so a replay of this first message can't
+        // re-bootstrap and overwrite chain progress — then GC the row.
+        // The mark is the security-relevant step; the delete is pure
+        // hygiene, hence a delete failure is only a warning.
+        //
+        // The failure path above intentionally leaves the OTPK
+        // served-but-not-consumed: a deterministic re-attempt of the
+        // same bad first message simply fails again, and the wasted
+        // OTPK is what the pool size budgets for.
         if let (Some(id), Some(store)) = (payload.otpk_id, self.message_store.as_ref()) {
+            if let Err(e) = store.mark_otpk_consumed(id) {
+                warn!("Failed to mark OTPK id={} consumed: {}", id, e);
+            }
             if let Err(e) = store.delete_otpk(id) {
                 warn!("Failed to delete consumed OTPK id={}: {}", id, e);
             }

@@ -122,8 +122,22 @@ impl MessageStore {
         // send even when we are offline at handshake time).
         //
         // The private bytes are AEAD-encrypted at rest with the DEK.
-        // `consumed_at` is NULL while the OTPK is still available; set
-        // to the consumption timestamp after a successful first decrypt.
+        //
+        // An OTPK moves through three states, tracked by two nullable
+        // timestamp columns:
+        //   - both NULL       → fresh, available to hand out
+        //   - served_at set   → handed to an initiator in a prekey
+        //                       response; must not be served again, but
+        //                       the private key is STILL needed to
+        //                       complete the responder X3DH when that
+        //                       initiator's first message lands
+        //   - consumed_at set → that first message has been decrypted;
+        //                       the key is spent and a replay of the
+        //                       first message must be rejected
+        // Collapsing "served" and "consumed" into one column was the bug
+        // behind dropped first DMs: `pop_unused_otpk` marked the row at
+        // serve time, so `load_otpk_private` (gated on the spent state)
+        // refused the key for the very first legitimate use.
         conn.execute(
             "CREATE TABLE IF NOT EXISTS my_otpks (
                 id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -131,8 +145,34 @@ impl MessageStore {
                 x25519_pub    BLOB NOT NULL,
                 signature     BLOB NOT NULL,
                 created_at    INTEGER NOT NULL,
+                served_at     INTEGER,
                 consumed_at   INTEGER
             )",
+            [],
+        )?;
+
+        // Pre-fix databases predate the `served_at` column and used
+        // `consumed_at` as the serve-time marker. Add the column (the
+        // "duplicate column" error is ignored exactly like the
+        // outbox.is_wire_bytes migration below), then backfill: a row
+        // the old code marked `consumed_at` was really only *served* —
+        // the collapsed-state bug meant no 3-DH first message ever
+        // actually completed — so treat it as served. `consumed_at`
+        // stays set, which correctly keeps `load_otpk_private` gating
+        // out that dead handshake. New databases get `served_at` at
+        // CREATE time and the backfill matches nothing.
+        if let Err(e) = conn.execute(
+            "ALTER TABLE my_otpks ADD COLUMN served_at INTEGER",
+            [],
+        ) {
+            let msg = format!("{}", e);
+            if !msg.contains("duplicate column") {
+                return Err(e.into());
+            }
+        }
+        conn.execute(
+            "UPDATE my_otpks SET served_at = consumed_at
+              WHERE consumed_at IS NOT NULL AND served_at IS NULL",
             [],
         )?;
 
@@ -587,36 +627,39 @@ impl MessageStore {
         Ok(self.conn.last_insert_rowid())
     }
 
-    /// Count OTPKs that have not yet been published-and-consumed.
+    /// Count OTPKs still available to hand out — never served to any
+    /// initiator. Drives `P2PNode::replenish_otpk_pool`.
     pub fn unused_otpk_count(&self) -> Result<i64> {
         let n: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM my_otpks WHERE consumed_at IS NULL",
+            "SELECT COUNT(*) FROM my_otpks WHERE served_at IS NULL",
             [],
             |row| row.get(0),
         )?;
         Ok(n)
     }
 
-    /// Atomically pop the oldest unused OTPK and mark it consumed.
+    /// Atomically pop the oldest never-served OTPK and mark it served.
     /// Returns `(id, public_bytes, signature)`. The private bytes stay
-    /// in the row for later look-up by `load_otpk_private(id)`.
+    /// in the row — `load_otpk_private(id)` retrieves them when the
+    /// initiator's first message lands, and `mark_otpk_consumed(id)`
+    /// retires the row only then.
     ///
-    /// Marking consumed at pop time (rather than after the responder
+    /// Marking served at pop time (rather than after the responder
     /// confirms) is the conservative choice: a single OTPK is never
-    /// reused across two different initiator handshakes, even under
+    /// served to two different initiator handshakes, even under
     /// concurrent prekey-fetch races. The cost is wasted OTPKs when an
     /// initiator fetches but never sends — pool size compensates.
     pub fn pop_unused_otpk(&self) -> Result<Option<(i64, [u8; 32], [u8; 64])>> {
         let now = chrono_time();
-        // Single round-trip: pick the oldest unused row, return its
-        // public+signature, mark it consumed. UPDATE ... RETURNING is
+        // Single round-trip: pick the oldest never-served row, return
+        // its public+signature, mark it served. UPDATE ... RETURNING is
         // a sqlite 3.35+ feature; bundled rusqlite ships current sqlite.
         let mut stmt = self.conn.prepare(
             "UPDATE my_otpks
-                SET consumed_at = ?1
+                SET served_at = ?1
               WHERE id = (
                     SELECT id FROM my_otpks
-                     WHERE consumed_at IS NULL
+                     WHERE served_at IS NULL
                      ORDER BY id ASC
                      LIMIT 1
               )
@@ -645,13 +688,17 @@ impl MessageStore {
     }
 
     /// Load and decrypt the private bytes for the OTPK with the given id.
-    /// Returns `None` if the id is unknown OR if the row already has
-    /// `consumed_at` set — the audit's F3 finding. Gating on
-    /// `consumed_at IS NULL` defends against a replay of a first-
-    /// message where the OTPK row is still present (not yet GC'd by
-    /// `delete_otpk`) but has been used. Without the gate, the replay
-    /// would re-derive the same SK and a fresh `RatchetState::new_responder`
-    /// would overwrite any in-memory chain progress on this peer.
+    /// Returns `None` if the id is unknown OR if the row is already spent
+    /// (`consumed_at` set) — the audit's F3 finding.
+    ///
+    /// The gate is `consumed_at IS NULL`, NOT `served_at IS NULL`: a
+    /// served-but-not-yet-spent OTPK MUST still load, because completing
+    /// the responder X3DH for the initiator's first message is exactly
+    /// what `served_at` was set in anticipation of. Gating on the spent
+    /// state defends against a replay of that first message — the replay
+    /// would otherwise re-derive the same SK and a fresh
+    /// `RatchetState::new_responder` would overwrite in-memory chain
+    /// progress on this peer.
     pub fn load_otpk_private(&self, id: i64) -> Result<Option<[u8; 32]>> {
         let row = self.conn.query_row(
             "SELECT x25519_priv FROM my_otpks WHERE id = ?1 AND consumed_at IS NULL",
@@ -670,9 +717,24 @@ impl MessageStore {
         Ok(Some(arr))
     }
 
-    /// Permanently delete a consumed OTPK row (after first-decrypt-success).
-    /// Optional: keeps the table small. Not strictly required — the row
-    /// already has `consumed_at` set so it won't be popped again.
+    /// Mark an OTPK spent after a successful responder first-decrypt.
+    /// This is the replay gate: once `consumed_at` is set,
+    /// `load_otpk_private` refuses the key, so a replayed first message
+    /// can no longer re-bootstrap a responder session. Distinct from
+    /// `delete_otpk` (physical GC) — keeping the consumed marker means a
+    /// replay stays rejected even if the row outlives a failed delete.
+    pub fn mark_otpk_consumed(&self, id: i64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE my_otpks SET consumed_at = ?1 WHERE id = ?2",
+            params![chrono_time(), id],
+        )?;
+        Ok(())
+    }
+
+    /// Permanently delete an OTPK row — pure GC after `mark_otpk_consumed`.
+    /// Optional: keeps the table small. Not strictly required — the
+    /// `consumed_at` marker already blocks re-load and `served_at` blocks
+    /// re-pop, so a row that survives a failed delete is still safe.
     pub fn delete_otpk(&self, id: i64) -> Result<()> {
         self.conn.execute("DELETE FROM my_otpks WHERE id = ?1", params![id])?;
         Ok(())
@@ -1338,15 +1400,17 @@ mod tests {
     }
 
     #[test]
-    fn load_otpk_private_skips_consumed_rows() {
-        // F3 regression: prior to the fix, `load_otpk_private(id)`
-        // returned the private bytes as long as the row existed,
-        // regardless of `consumed_at`. A replay of a first-message
-        // could then re-bootstrap a responder session even after the
-        // OTPK was consumed, wiping any subsequent chain progress.
-        // Now the SQL guards `consumed_at IS NULL` so a consumed row
-        // looks identical to "row was already GC'd" — caller drops
-        // the message.
+    fn otpk_lifecycle_serve_then_consume() {
+        // The OTPK three-state lifecycle, end to end:
+        //   fresh        → load_otpk_private returns the key
+        //   served (pop) → STILL returns the key (the responder needs
+        //                  it to complete X3DH for the initiator's
+        //                  first DM)
+        //   consumed     → returns None — the F3 replay gate
+        // Regression guard: an earlier version collapsed "served" and
+        // "consumed" into one column, so pop() alone made
+        // load_otpk_private return None and EVERY 3-DH first message
+        // was dropped with "OTPK id=N not found in our store".
         let dir = tempdir().unwrap();
         let store = MessageStore::open(dir.path(), test_dek()).unwrap();
 
@@ -1355,20 +1419,37 @@ mod tests {
         let sig = [9u8; 64];
         let id = store.add_my_otpk(&priv_bytes, &pub_bytes, &sig).unwrap();
 
-        // Pre-consume: loadable.
+        // Fresh: loadable, and counted as available.
+        assert_eq!(store.unused_otpk_count().unwrap(), 1);
         assert_eq!(
             store.load_otpk_private(id).unwrap().as_ref(),
             Some(&priv_bytes)
         );
 
-        // Consume via pop. The row stays in the table (consumed_at set);
-        // `delete_otpk` would remove it physically — F3 covers the
-        // window in between.
+        // Serve via pop: the row leaves the available pool, but the
+        // private key MUST still load — this is the bug fix.
         let (popped_id, _, _) = store.pop_unused_otpk().unwrap().unwrap();
         assert_eq!(popped_id, id);
+        assert_eq!(store.unused_otpk_count().unwrap(), 0);
+        assert_eq!(
+            store.load_otpk_private(id).unwrap().as_ref(),
+            Some(&priv_bytes),
+            "served-but-not-spent OTPK must still load"
+        );
 
-        // Post-consume: load returns None even though the row still
-        // exists — confirming the consumed_at gate.
+        // A second pop must not hand out the same OTPK again.
+        assert!(store.pop_unused_otpk().unwrap().is_none());
+
+        // Consume after a successful first-decrypt: the F3 replay gate
+        // now kicks in and the key is no longer retrievable.
+        store.mark_otpk_consumed(id).unwrap();
+        assert!(
+            store.load_otpk_private(id).unwrap().is_none(),
+            "consumed OTPK must not load (F3 replay gate)"
+        );
+
+        // delete_otpk is pure GC; load stays None afterwards.
+        store.delete_otpk(id).unwrap();
         assert!(store.load_otpk_private(id).unwrap().is_none());
     }
 
