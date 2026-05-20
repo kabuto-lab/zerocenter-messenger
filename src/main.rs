@@ -17,6 +17,13 @@ async fn main() -> Result<()> {
     // Parse CLI arguments
     let cli = Cli::parse();
 
+    // GUI is the default surface; `--cli` forces the headless REPL. On
+    // a binary built without the `gui` feature there is no webview to
+    // launch, so fall back to the REPL unless `--gui` was explicitly
+    // passed — in which case `run_gui` surfaces the "rebuild with
+    // --features gui" error rather than silently dropping to the CLI.
+    let use_gui = !cli.cli && (cfg!(feature = "gui") || cli.gui);
+
     // Get profile directory
     let profile_dir = get_profile_dir(&cli.profile)?;
 
@@ -92,9 +99,9 @@ async fn main() -> Result<()> {
     // Initialize P2P node
     let mut node = P2PNode::new(config, identity, dek).await?;
 
-    // GUI push-refresh channel — only wired when --gui is set. CLI
-    // path leaves the sender None so `emit_gui` becomes a no-op.
-    let gui_event_rx = if cli.gui {
+    // GUI push-refresh channel — only wired when the GUI surface runs.
+    // CLI path leaves the sender None so `emit_gui` becomes a no-op.
+    let gui_event_rx = if use_gui {
         let (tx, rx) = mpsc::channel::<GuiEvent>(32);
         node.set_gui_event_sender(tx);
         Some(rx)
@@ -323,8 +330,8 @@ async fn main() -> Result<()> {
 
     // Foreground UI — either the legacy line-reader CLI or the Tauri
     // webview, depending on `--gui`.
-    if cli.gui {
-        let rx = gui_event_rx.expect("gui_event_rx initialized when cli.gui is set");
+    if use_gui {
+        let rx = gui_event_rx.expect("gui_event_rx initialized when use_gui is set");
         run_gui(cmd_tx, rx).await?;
     } else {
         if let Err(e) = zerocenter_messenger::cli::run_cli_with_handlers(handlers).await {

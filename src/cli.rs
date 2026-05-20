@@ -42,11 +42,17 @@ pub struct Cli {
     #[arg(long = "obfs-jitter-ms", value_name = "MAX_MS")]
     pub obfs_jitter_ms: Option<u32>,
 
-    /// Launch the Tauri webview UI instead of the CLI. Requires the
-    /// crate to be built with the `gui` feature enabled. Without it,
-    /// passing this flag prints a helpful error and exits.
+    /// Launch the Tauri webview UI. The GUI is the **default** surface
+    /// on a binary built with the `gui` feature, so this flag is now
+    /// only useful to force the explicit "rebuild with --features gui"
+    /// error out of a headless build. See also `--cli`.
     #[arg(long = "gui")]
     pub gui: bool,
+
+    /// Force the headless line-based REPL even on a GUI-capable build.
+    /// Used by the `bats/` test scripts and the TEST_GUIDE flow.
+    #[arg(long = "cli")]
+    pub cli: bool,
 }
 
 impl Cli {
