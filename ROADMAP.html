@@ -45,25 +45,25 @@
   .commit-list li.warn    { border-left-color: var(--partial); }
   .commit-list li b { color: var(--fg); }
   .commit-list li .tag { font-size: 11px; color: var(--muted); margin-left: 6px; }
+  .commit-list li code { background:#1a1f26; padding:0 4px; border-radius:3px; }
 
   .note { font-size: 12px; color: var(--muted); margin-top: 4px; }
-  .stack { color: var(--muted); font-size: 12px; }
   .kbd { background:#1a1f26; padding: 1px 6px; border-radius:4px; border:1px solid var(--line); font-size: 12px; }
   a { color: var(--accent); }
-  .now { color: var(--inprog); font-weight: 600; }
   .col2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
   @media (max-width: 760px) { .col2 { grid-template-columns: 1fr; } }
-  .quiet { color: var(--muted); }
 </style>
 </head>
 <body>
 <div class="wrap">
 
-<h1>ZeroCenter Messenger — Roadmap <small>generated 2026-05-16</small></h1>
+<h1>ZeroCenter Messenger — Roadmap <small>updated 2026-05-20</small></h1>
 <div class="sub">Censorship-resistant, zero-trust, leaderless P2P messenger. Rust + libp2p 0.53.
-  Source of truth lives in <span class="kbd">README.md</span>; this page is a visual snapshot.</div>
+  Source of truth is <span class="kbd">plans/ROADMAP.md</span>; this page is a visual snapshot of it.</div>
 
-<div class="progress" title="overall completeness — eyeballed"><div style="width: 95%"></div></div>
+<div class="progress" title="implementation completeness — external audit not counted"><div style="width: 98%"></div></div>
+<div class="sub">Phases 1 → 5 implemented and test-green. Outstanding: external security audit (needs a third party)
+  and deniability (intentionally deferred for v1). <span class="kbd">cargo test --lib</span>: <b>117 / 117</b>.</div>
 
 <h2>Phase 1 — Foundations <span class="pill done">Done</span></h2>
 <table>
@@ -71,121 +71,126 @@
   <tr><td>Ed25519 identity (persistent)</td><td class="s"><span class="badge done">done</span></td>
       <td>Per-profile <span class="kbd">identity.json</span> under <span class="kbd">%LOCALAPPDATA%\ZeroCenter\&lt;profile&gt;\</span></td></tr>
   <tr><td>libp2p transport</td><td class="s"><span class="badge done">done</span></td>
-      <td>TCP + Noise + Yamux. <b>QUIC parked</b> — <span class="kbd">ring</span> build script crashes <span class="kbd">cl.exe</span> on this MSVC toolchain.</td></tr>
-  <tr><td>Kademlia DHT</td><td class="s"><span class="badge done">done</span></td>
-      <td>Protocol <span class="kbd">/zerocenter/kad/1.0.0</span></td></tr>
-  <tr><td>mDNS LAN discovery</td><td class="s"><span class="badge done">done</span></td><td>Auto-finds peers on the same LAN</td></tr>
-  <tr><td>Gossipsub (idle)</td><td class="s"><span class="badge done">done</span></td>
-      <td>Subscribed to <span class="kbd">/zerocenter/global</span>, kept for future public channels — <b>not</b> used for DMs.</td></tr>
-  <tr><td>Multi-profile</td><td class="s"><span class="badge done">done</span></td><td><span class="kbd">--profile alice</span> / <span class="kbd">--profile bob</span></td></tr>
-  <tr><td>SQLite storage</td><td class="s"><span class="badge done">done</span></td><td><span class="kbd">messages</span>, <span class="kbd">contacts</span>, <span class="kbd">channels</span> tables</td></tr>
+      <td>TCP + Noise + Yamux, + DNS + Kademlia + mDNS + identify.
+      <b>QUIC parked</b> — <span class="kbd">ring</span> build script crashes <span class="kbd">cl.exe</span> on this MSVC toolchain.</td></tr>
+  <tr><td>Kademlia DHT + mDNS LAN discovery</td><td class="s"><span class="badge done">done</span></td>
+      <td>Auto-finds peers on the same LAN; DHT used for the mailbox store-and-forward.</td></tr>
+  <tr><td>Multi-profile + SQLite storage</td><td class="s"><span class="badge done">done</span></td>
+      <td><span class="kbd">--profile alice</span> / <span class="kbd">--profile bob</span>; per-profile encrypted <span class="kbd">messages.db</span>.</td></tr>
 </table>
 
-<h2>Phase 2 — Direct messaging <span class="pill done">Done — hardened 2026-05-16</span></h2>
+<h2>Phase 2 — Direct messaging <span class="pill done">Done</span></h2>
 <table>
   <tr><th>Item</th><th>Status</th><th>Notes</th></tr>
   <tr><td>DM transport</td><td class="s"><span class="badge done">done</span></td>
-      <td>Dedicated request-response protocol <span class="kbd">/zerocenter/direct-message/1.0.0</span>.
-      Gossipsub fallback was removed — it leaked plaintext to every subscriber.</td></tr>
-  <tr><td>Signed envelope</td><td class="s"><span class="badge done">done</span></td>
-      <td>Ed25519 over a domain-separated canonical layout (<span class="kbd">zerocenter-dm-v1</span>). Transport-peer ↔ signed-sender cross-check on receive.</td></tr>
+      <td>Dedicated request-response protocol <span class="kbd">/zerocenter/direct-message/2.0.0</span>.
+      Gossipsub fallback removed — it leaked plaintext to every subscriber.</td></tr>
+  <tr><td>Signed envelope + cross-check</td><td class="s"><span class="badge done">done</span></td>
+      <td>Ed25519 over a domain-separated canonical layout. Transport-peer ↔ signed-sender cross-check on receive.</td></tr>
   <tr><td>Local storage + TTL sweep</td><td class="s"><span class="badge done">done</span></td>
-      <td>Hourly <span class="kbd">cleanup_expired()</span> tick (added today).</td></tr>
-  <tr><td>Contact persistence</td><td class="s"><span class="badge partial">partial</span></td>
-      <td>Auto-saved on first verified DM. No aliasing / manual add / remove.</td></tr>
+      <td>Hourly <span class="kbd">cleanup_expired()</span> tick.</td></tr>
   <tr><td>CLI</td><td class="s"><span class="badge done">done</span></td>
-      <td><span class="kbd">connect</span> / <span class="kbd">send</span> / <span class="kbd">peers</span> / <span class="kbd">contacts</span> / <span class="kbd">history</span></td></tr>
-  <tr><td>Payload confidentiality</td><td class="s"><span class="badge todo">no</span></td>
-      <td><b>Plaintext on the wire and at rest.</b> Phase 3 fixes this.</td></tr>
+      <td><span class="kbd">connect</span> / <span class="kbd">send</span> / <span class="kbd">peers</span> / <span class="kbd">contacts</span> / <span class="kbd">history</span> / <span class="kbd">whoami</span> / <span class="kbd">addr</span> / <span class="kbd">safety</span> / <span class="kbd">group</span></td></tr>
 </table>
 
-<h2>Phase 3 — End-to-end encryption <span class="pill done">Done (7 / 7 commits)</span></h2>
-<div class="sub">Hand-rolled Double Ratchet on primitives already in the dep tree (x25519-dalek, chacha20poly1305, hkdf, sha2, hmac, zeroize, subtle). No new crates compiled. Full plan in <span class="kbd">C:\Users\a3\.claude\plans\phase3-e2ee.md</span>.</div>
-
-<ul class="commit-list">
-  <li class="done"><b>① Identity prekey</b> <span class="tag">done</span><br>
-    X25519 signed prekey added to <span class="kbd">Identity</span>; lazy migration of old <span class="kbd">identity.json</span>; tests cover roundtrip, migration, tamper-and-regenerate. <span class="kbd">x25519-dalek</span> "static_secrets" feature enabled.</li>
-  <li class="done"><b>② Prekey exchange protocol</b> <span class="tag">done</span><br>
-    New libp2p request-response <span class="kbd">/zerocenter/prekey/1.0.0</span>; <span class="kbd">prekeys_seen</span> SQLite table with <span class="kbd">save_prekey</span> / <span class="kbd">load_prekey</span>; <span class="kbd">NodeCommand::FetchPrekey</span> dispatches the request; inbound responses are signature-verified against the responder's PeerId-embedded Ed25519 key before caching.</li>
-  <li class="done"><b>③ Ratchet + X3DH-lite modules</b> <span class="tag">done</span><br>
-    <span class="kbd">src/crypto/x3dh.rs</span> (two-DH initial agreement) + <span class="kbd">src/crypto/ratchet.rs</span> (full Double Ratchet per Signal spec: KDF_RK / KDF_CK, DH ratchet step, skipped-key cache with MAX_SKIP=1000, ChaCha20-Poly1305 AEAD with header bound into AAD, JSON state serialization). 13 unit tests cover X3DH agreement + ratchet roundtrip + out-of-order within / across ratchet step + tamper / wrong-AD / cross-session isolation / skipped-cap / JSON roundtrip.</li>
-  <li class="done"><b>④ Wire-format flip</b> <span class="tag">done — irreversible change landed</span><br>
-    <span class="kbd">EncryptedPayload</span> (dh + pn + n + ct + optional x3dh_eph) added to <span class="kbd">protocol/message.rs</span>; protocol bumped to <span class="kbd">/zerocenter/direct-message/2.0.0</span>; <span class="kbd">node.rs</span> rewritten with pending-sends / pending-recvs queues that fire prekey-fetch on demand and drain on response. Send: existing session → encrypt; cached prekey → X3DH-initiator + first-message x3dh_eph; neither → queue+fetch. Recv: existing session → decrypt; payload has x3dh_eph + cached prekey → X3DH-responder bootstrap + decrypt; neither → queue+fetch. AEAD AD = length-prefixed sender_pid || recipient_pid.</li>
-  <li class="done"><b>⑤ Session persistence</b> <span class="tag">done — bundled with ④</span><br>
-    <span class="kbd">ratchet_sessions</span> SQLite table; <span class="kbd">save_session</span>/<span class="kbd">load_session</span>; <span class="kbd">persist_session()</span> fires after every encrypt and decrypt; <span class="kbd">restore_session_if_persisted()</span> lazily loads on first lookup. Plaintext-at-rest caveat documented in code; encryption-at-rest deferred to Phase 3.5.</li>
-  <li class="todo"><b>⑥ Local plaintext history</b> <span class="tag">deferred — folded into ④</span><br>
-    Decided to keep storing plaintext in existing <span class="kbd">messages.ciphertext</span> column (it always was meant as "local view of conversation"). A separate <span class="kbd">messages_plaintext_local</span> table is unnecessary churn for now; will revisit when commit ⑦ updates docs.</li>
-  <li class="done"><b>⑦ README + threat-model section</b> <span class="tag">done</span><br>
-    README rewritten: Phase 3 Complete section documents Double Ratchet + X3DH-lite + prekey protocol + session persistence. New <b>Threat Model</b> section explicitly lists what an on-wire attacker cannot do, what they still can (initial-DM MITM, no async first message, no deniability, traffic analysis, DHT metadata), and what local-file access exposes (history / identity key / ratchet state — all plaintext at rest until Phase 3.5). Adds explicit "gap to Signal-equivalent" list and a flag that <b>this codebase has not been audited</b>.</li>
-</ul>
-
-<div class="note">Open decisions I'm making unless redirected: zero-nonce per message key · MAX_SKIP=1000 · <span class="kbd">serde_json</span> for state blobs · session-state encryption deferred to Phase 3.5 · protocol version bumps to <span class="kbd">2.0.0</span>.</div>
-
-<h2>Phase 3.5 — At-rest hardening <span class="pill done">Done (4 / 4)</span></h2>
+<h2>Phase 3 + 3.5 — E2EE &amp; at-rest hardening <span class="pill done">Done</span></h2>
 <table>
   <tr><th>Item</th><th>Status</th><th>Notes</th></tr>
-  <tr><td>Encrypt ratchet state at rest</td><td class="s"><span class="badge done">done</span></td>
-      <td>New <span class="kbd">crypto::keyring</span> module: per-profile DEK in OS keyring (Windows Credential Manager / macOS Keychain / Linux secret-service via the <span class="kbd">keyring</span> crate). <span class="kbd">MessageStore</span> AEAD-encrypts <span class="kbd">ratchet_sessions.state_blob</span> with ChaCha20-Poly1305 + random 12-byte nonce + version-byte prefix. Tests cover roundtrip, "actually-encrypted-at-rest" (scans raw row), wrong-DEK-fails-decrypt.</td></tr>
-  <tr><td>Encrypt local plaintext store (<span class="kbd">messages</span> table)</td><td class="s"><span class="badge done">done</span></td>
-      <td>Generalized <span class="kbd">encrypt_at_rest</span>/<span class="kbd">decrypt_at_rest</span>. <span class="kbd">store_message</span> AEAD-encrypts content before INSERT; <span class="kbd">get_recent_messages</span> / <span class="kbd">get_conversation</span> / <span class="kbd">get_messages</span> decrypt on read and skip rows that fail to decrypt (logged at warn). Two new tests: plaintext-marker check and wrong-DEK-rows-are-skipped-not-errored.</td></tr>
-  <tr><td>One-time prekeys</td><td class="s"><span class="badge done">done</span></td>
-      <td>New SQLite table <span class="kbd">my_otpks</span>; pop-and-consume atomic via SQLite UPDATE...RETURNING. <span class="kbd">PrekeyResponse</span> gains optional <span class="kbd">otpk: Option&lt;OneTimePrekey&gt;</span>; <span class="kbd">EncryptedPayload</span> gains optional <span class="kbd">otpk_id: Option&lt;i64&gt;</span>. <span class="kbd">x3dh::initiator_derive_with_otpk</span> + <span class="kbd">responder_derive_with_otpk</span> implement 3-DH variant with distinct domain separator <span class="kbd">zerocenter-x3dh-otpk-v1</span>. Pool of 20 unused OTPKs maintained automatically. Backwards-compatible: pre-3.5 peers (no OTPK in their response) just fall back to 2-DH.</td></tr>
-  <tr><td>Safety-number UI</td><td class="s"><span class="badge done">done</span></td>
-      <td>New CLI command <span class="kbd">safety &lt;peer_id&gt;</span> (aliases <span class="kbd">verify</span>, <span class="kbd">sn</span>). SHA-256 over a domain-separated, length-prefixed sorted concat of the two PeerIds → first 20 bytes → 40 hex chars in 8 groups of 5. Both sides print identical fingerprint; out-of-band comparison detects MITM on the long-term identity layer.</td></tr>
+  <tr><td>Double Ratchet E2EE (Signal spec)</td><td class="s"><span class="badge done">done</span></td>
+      <td>Hand-rolled on in-tree primitives (x25519-dalek, chacha20poly1305, hkdf, sha2, hmac). KDF_RK / KDF_CK, DH ratchet step, skipped-key cache (MAX_SKIP=1000).</td></tr>
+  <tr><td>X3DH-lite handshake + one-time prekeys</td><td class="s"><span class="badge done">done</span></td>
+      <td>2-DH base + 3-DH OTPK variant (distinct domain separator). Asynchronous first-message delivery.</td></tr>
+  <tr><td>At-rest AEAD (DEK in OS keyring)</td><td class="s"><span class="badge done">done</span></td>
+      <td>ChaCha20-Poly1305 over messages / ratchet sessions / OTPK privates / outbox / mailbox drops / group sender keys. DEK in Windows Credential Manager.</td></tr>
+  <tr><td>Session persistence + safety-number UI</td><td class="s"><span class="badge done">done</span></td>
+      <td><span class="kbd">ratchet_sessions</span> table; <span class="kbd">safety &lt;pid&gt;</span> prints an order-independent SHA-256 fingerprint for out-of-band MITM detection.</td></tr>
 </table>
 
-<h2>Phase 4 — Reach & censorship resistance <span class="pill inprog">In progress (2 of N)</span></h2>
+<h2>Phase 4 — Reach &amp; censorship resistance <span class="pill done">Done</span></h2>
 <div class="col2">
   <table>
     <tr><th>Item</th><th>Status</th></tr>
-    <tr><td>Bootstrap-node CLI flag</td><td class="s"><span class="badge done">done</span></td></tr>
-    <tr><td><span class="kbd">whoami</span> / <span class="kbd">addr</span> commands</td><td class="s"><span class="badge done">done</span></td></tr>
-    <tr><td>Delayed-delivery outbox (sender-online case)</td><td class="s"><span class="badge done">done</span></td></tr>
-    <tr><td>DHT mailbox — design + storage scaffolding</td><td class="s"><span class="badge done">done</span></td></tr>
-    <tr><td>DHT mailbox — Kad publish/poll wiring</td><td class="s"><span class="badge todo">todo</span></td></tr>
-    <tr><td>4a: ScrambleStream + obfs-key CLI (DPI-baseline)</td><td class="s"><span class="badge done">done</span></td></tr>
-    <tr><td>4b: wire ScrambleStream into libp2p Transport</td><td class="s"><span class="badge todo">todo</span></td></tr>
-    <tr><td>4c: full Obfs4 (NTOR + IAT + padding)</td><td class="s"><span class="badge todo">todo</span></td></tr>
+    <tr><td>Bootstrap-node CLI flag + <span class="kbd">whoami</span>/<span class="kbd">addr</span></td><td class="s"><span class="badge done">done</span></td></tr>
+    <tr><td>Persistent outbox (drained on connect / mDNS)</td><td class="s"><span class="badge done">done</span></td></tr>
+    <tr><td>4a/4b: ScrambleStream wired into libp2p Transport</td><td class="s"><span class="badge done">done</span></td></tr>
+    <tr><td>4c.1: NTOR-style hidden-nonce handshake (elligator2)</td><td class="s"><span class="badge done">done</span></td></tr>
   </table>
   <table>
     <tr><th>Item</th><th>Status</th></tr>
-    <tr><td>Tauri GUI — bridge skeleton + plan</td><td class="s"><span class="badge done">done</span></td></tr>
-    <tr><td>Tauri GUI — add tauri dep, build script, ship installer</td><td class="s"><span class="badge todo">todo</span></td></tr>
-    <tr><td>Group chats (Megolm-style)</td><td class="s"><span class="badge todo">todo</span></td></tr>
-    <tr><td>File / voice messages</td><td class="s"><span class="badge todo">todo</span></td></tr>
-    <tr><td>External audit pack (CRYPTO+THREAT_MODEL+INVARIANTS)</td><td class="s"><span class="badge done">done</span></td></tr>
-    <tr><td>External security audit — engage reviewer</td><td class="s"><span class="badge todo">todo</span></td></tr>
+    <tr><td>4c.2: 256-byte frame padding</td><td class="s"><span class="badge done">done</span></td></tr>
+    <tr><td>4c.2′: opt-in IAT jitter (<span class="kbd">--obfs-jitter-ms</span>)</td><td class="s"><span class="badge done">done</span></td></tr>
+    <tr><td>4c.3: <span class="kbd">ScrambleStream::pending</span> buffer bound</td><td class="s"><span class="badge done">done</span></td></tr>
+    <tr><td>GUI (Tauri 2.x) — build wired + push-refresh</td><td class="s"><span class="badge done">done</span></td></tr>
   </table>
 </div>
-<div class="sub" style="margin-top:8px"><b>Phase 4 progress:</b>
-  <span class="kbd">--bootstrap /ip4/.../tcp/.../p2p/&lt;pid&gt;</span> seeds Kademlia at startup; <span class="kbd">whoami</span> prints local PeerId; <span class="kbd">addr</span> prints shareable listen-addrs with <span class="kbd">/p2p/&lt;me&gt;</span> suffix. <b>Outbox:</b> AEAD-at-rest table; <span class="kbd">send</span> to disconnected peer queues; drains on <span class="kbd">ConnectionEstablished</span>/mDNS <span class="kbd">Discovered</span>.
-  <b>Obfs4 4a:</b> <span class="kbd">--obfs-key &lt;HEX64&gt;</span> CLI flag; <span class="kbd">src/network/scramble.rs</span> ships <span class="kbd">ScrambleStream&lt;S&gt;</span> with roundtrip + wire-bytes-not-plaintext tests. Wiring into libp2p Transport is Phase 4b. See <span class="kbd">plans/phase4-obfs4.md</span>.
-  <b>GUI bridge:</b> <span class="kbd">--gui</span> CLI flag (gated on <span class="kbd">gui</span> Cargo feature); new <span class="kbd">NodeCommand::Query{PeerId,Contacts,Messages}</span> + <span class="kbd">AddContact</span> with <span class="kbd">oneshot</span> reply channels; <span class="kbd">ContactDto</span>/<span class="kbd">MessageDto</span> JSON-shaped for the existing <span class="kbd">dist/index.html</span> Tauri 2.x JS. <span class="kbd">src/gui/app.rs</span> rewritten to proper Tauri 2.x shape with async <span class="kbd">round_trip</span> helper. <b>Tauri dep NOT added</b> — needs cargo to validate feature set + tauri.conf.json migration to 2.x schema. See <span class="kbd">plans/phase4-gui.md</span>.</div>
+
+<h2>Phase 5 — Mailbox, sealed sender &amp; group chats <span class="pill done">Done</span></h2>
+<table>
+  <tr><th>Item</th><th>Status</th><th>Notes</th></tr>
+  <tr><td>DHT mailbox store-and-forward</td><td class="s"><span class="badge done">done</span></td>
+      <td>Closes the "both never simultaneously online" gap. SHA-256-keyed slots; republish/poll ticks.</td></tr>
+  <tr><td>Mailbox encrypt-once + ACK loop</td><td class="s"><span class="badge done">done</span></td>
+      <td>Same ciphertext bytes shared between outbox and DHT drop (ratchet dedup makes the second arrival a no-op). Recipient ACKs; sender skips republish.</td></tr>
+  <tr><td>Sealed sender</td><td class="s"><span class="badge done">done</span></td>
+      <td>ECIES-encrypted sender cert; envelope is sealed whenever the recipient's prekey is cached.</td></tr>
+  <tr><td>OTPK pool-drain defence</td><td class="s"><span class="badge done">done</span></td>
+      <td>Per-peer 60s cooldown; pool target bumped 20 → 100.</td></tr>
+  <tr><td>Group chats (Megolm-style, founder-signed)</td><td class="s"><span class="badge done">done</span></td>
+      <td>8-commit track: storage + Megolm sender chains + GroupControl wire + send/receive fan-out + CLI + membership rotation (forward secrecy on remove/leave) + Tauri GUI + audit pack.</td></tr>
+  <tr><td>Self-audit pass</td><td class="s"><span class="badge done">done</span></td>
+      <td>12 findings, 6 actioned. <span class="kbd">audit/SELF_AUDIT.md</span>. (Predates the group-chat track — §24-§26 not yet self-audited.)</td></tr>
+  <tr><td>OTPK serve/consume regression fix</td><td class="s"><span class="badge done">done</span></td>
+      <td><b>2026-05-20</b> — see "Where we are right now" below.</td></tr>
+  <tr><td>External security audit</td><td class="s"><span class="badge todo">todo</span></td>
+      <td><span class="kbd">audit/</span> pack is review-ready; needs an external reviewer engaged.</td></tr>
+  <tr><td>Deniability</td><td class="s"><span class="badge todo">deferred</span></td>
+      <td>Intentional non-deniability for v1 — every message carries an Ed25519 signature. Deniable AKE is a post-audit crypto change.</td></tr>
+</table>
 
 <h2>Where we are right now</h2>
 <div class="commit-list">
-  <li class="done"><b>Phase 3 is complete.</b> All 7 planned commits are on disk: identity prekey → prekey-fetch protocol → ratchet+X3DH modules → wire-format flip → session persistence → (⑥ folded into ④) → README+threat-model.</li>
-  <li class="warn"><b>Wire format is now <span class="kbd">/zerocenter/direct-message/2.0.0</span></b> — peers still on 1.0.0 will fail libp2p protocol negotiation cleanly. Pre-Phase-3 <span class="kbd">messages.db</span> rows are still readable as the local view; new rows store local plaintext while the bytes on the wire are ChaCha20-Poly1305 ciphertext.</li>
-  <li class="todo"><b>Not yet built with cargo</b> — Rust toolchain isn't available in this session, so no module has been compiler-checked. Expect to fix a handful of small issues on the first <span class="kbd">cargo check</span>.</li>
-  <li class="todo"><b>Codebase has not been audited.</b> Phase 3 implements known-good algorithms (Signal Double Ratchet, X3DH-lite, vetted primitives) but the integration is hand-rolled and only covered by the in-tree unit tests. Treat as research-grade until external review.</li>
-  <li class="done"><b>Phase 3.5 is complete.</b> Encryption-at-rest covers ratchet state, message history, and OTPK private keys. OTPKs enable asynchronous first-message delivery. Safety-number UI ships for out-of-band identity verification.</li>
-  <li class="done"><b>Phase 4 quick wins done.</b> <span class="kbd">--bootstrap</span> CLI flag (repeatable), <span class="kbd">whoami</span>/<span class="kbd">me</span> command, <span class="kbd">addr</span>/<span class="kbd">addrs</span>/<span class="kbd">a</span> command.</li>
-  <li class="done"><b>Audit pack shipped.</b> See <span class="kbd">audit/README.md</span>, <span class="kbd">audit/CRYPTO.md</span>, <span class="kbd">audit/THREAT_MODEL.md</span>, <span class="kbd">audit/INVARIANTS.md</span>. ~1500 lines of structured spec, threat-model, and 20 numbered invariants pointing to file:line for each enforcement site.</li>
-  <li class="inprog"><b>Remaining work:</b>
-    <ul>
-      <li><b>Engage a real external reviewer.</b> The pack is the deliverable; landing actual feedback requires an external party.</li>
-      <li><b>Tauri GUI ship</b> — add tauri/tauri-build deps + migrate tauri.conf.json + icons (next cargo session).</li>
-      <li><b>Obfs4 4b</b> — wire ScrambleStream into libp2p Transport.</li>
-      <li><b>Relay-based store-and-forward (DHT mailbox)</b> — closes the "both never simultaneously online" gap.</li>
-      <li><b>Group chats (Megolm-style)</b>, file/voice messages — larger feature work.</li>
-    </ul>
-  </li>
+  <li class="done"><b>Phases 1 → 5 are implemented and test-green.</b> Transport, E2EE, at-rest hardening,
+    obfuscation, DHT mailbox, sealed sender, and Megolm-style group chats are all on disk with unit-test
+    and audit-pack coverage. <span class="kbd">cargo test --lib</span>: 117 / 117.</li>
+  <li class="warn"><b>OTPK serve/consume regression — found in live DM testing, fixed 2026-05-20</b>
+    <span class="tag">commit b365be4</span><br>
+    The audit-F3 fix (835c299) gated <code>load_otpk_private</code> on <code>consumed_at IS NULL</code>, but
+    <code>pop_unused_otpk</code> sets <code>consumed_at</code> at <i>serve</i> time — so the private OTPK was
+    refused for the very first legitimate responder X3DH, and every 3-DH first message was dropped with
+    <code>OTPK id=N not found in our store</code>, permanently desyncing the session. The lifecycle is now
+    split across two columns: <code>served_at</code> (set on pop, blocks re-serving) and
+    <code>consumed_at</code> (set after a successful first-decrypt — the F3 replay gate). Migrates pre-fix
+    DBs via <code>ALTER TABLE</code> + backfill. The F3 unit test that encoded the bug was replaced with a
+    full serve → load → consume lifecycle test.</li>
+  <li class="inprog"><b>Branch <code>fix/otpk-serve-consume-lifecycle</code> awaits merge.</b>
+    Commit b365be4 is not yet on <code>main</code> — merge it or open a PR before the next release tag.</li>
+  <li class="todo"><b>Codebase has not had an external audit.</b> Phase 3-5 implement known-good algorithms
+    (Signal Double Ratchet, X3DH-lite, Megolm-style sender chains, vetted primitives) but the integration
+    is hand-rolled. Treat as research-grade until third-party review.</li>
 </div>
 
-<div class="note">Verification commands once Rust toolchain is available:
-  <span class="kbd">cargo test --lib</span> · <span class="kbd">cargo build --release</span> ·
-  two-window run: <span class="kbd">target\release\zerocenter.exe --profile alice</span> / <span class="kbd">--profile bob</span>.
+<h2>Remaining — prioritised</h2>
+<div class="commit-list">
+  <li class="todo"><b>External security audit.</b> The <span class="kbd">audit/</span> pack (README, CRYPTO
+    incl. §12 Megolm, THREAT_MODEL incl. adversary class J, 26 numbered INVARIANTS, SELF_AUDIT) is
+    review-ready. Engage a reviewer; package at a fixed commit; remediate findings.</li>
+  <li class="todo"><b>Deniability.</b> Replace per-message Ed25519 with a deniable AKE. Big crypto change;
+    constrained by the load-bearing Megolm per-message signature (anti-impersonation, INVARIANTS §24).
+    Postponed until the external audit lands on the v1 design.</li>
+  <li class="todo"><b>Group-chats v1 polish.</b> Prekey-fetch onboarding for new joiners (currently
+    warn-and-skip), a founder-key rotation primitive, no-op leave on an absent group.</li>
+  <li class="todo"><b>Audit-flagged debt.</b> F4 — bound <span class="kbd">pending_recvs</span> duplicates
+    (~30 LOC). F12 — HMAC the plaintext <span class="kbd">outbox.peer_id</span> column (~50 LOC + migration).</li>
+  <li class="todo"><b>Re-test QUIC.</b> The <span class="kbd">ring</span>-on-MSVC blocker may already be
+    obsolete; re-enable the <span class="kbd">quic</span> feature and run a two-peer smoke.</li>
+  <li class="todo"><b>Real branded icon</b> to replace the 1150-byte placeholder at
+    <span class="kbd">icons/icon.ico</span> before any user-facing shipping. Not code work.</li>
 </div>
+
+<div class="note">Verification: <span class="kbd">cargo test --lib</span> · <span class="kbd">cargo build --release</span> ·
+  two-window run via <span class="kbd">bats\alice.bat</span> / <span class="kbd">bats\bob.bat</span>
+  (or <span class="kbd">target\release\zerocenter.exe --profile &lt;name&gt;</span>). Full commit log and
+  conventions live in <span class="kbd">plans/ROADMAP.md</span>.</div>
 
 </div>
 </body>
