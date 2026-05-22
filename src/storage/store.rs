@@ -3,9 +3,11 @@ use chacha20poly1305::{
     aead::{Aead, KeyInit, Payload},
     ChaCha20Poly1305, Key, Nonce,
 };
+use hmac::{digest::KeyInit as HmacKeyInit, Hmac, Mac};
 use rand::RngCore;
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
+use sha2::Sha256;
 use std::path::Path;
 use tracing::info;
 
@@ -15,6 +17,11 @@ use tracing::info;
 const AT_REST_VERSION: u8 = 1;
 /// ChaCha20-Poly1305 nonce length.
 const NONCE_LEN: usize = 12;
+
+/// Domain separator for the `outbox.peer_id` HMAC tag (audit finding
+/// F12). A dedicated constant keeps this DEK-keyed MAC from ever
+/// colliding with another at-rest MAC the codebase might add later.
+const OUTBOX_PEER_DOMAIN: &[u8] = b"zerocenter-outbox-peer-v1";
 
 /// Encrypted message stored locally
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -179,7 +186,9 @@ impl MessageStore {
         // Outbox: messages we wanted to send but the recipient wasn't
         // connected at the time. Drained when ConnectionEstablished
         // fires for that peer. Plaintext is AEAD-encrypted at rest so
-        // a disk-read attacker can't see queued messages.
+        // a disk-read attacker can't see queued messages; `peer_id`
+        // holds an HMAC tag (not the raw PeerId) so the same attacker
+        // also can't see *who* has mail queued — see `outbox_peer_tag`.
         conn.execute(
             "CREATE TABLE IF NOT EXISTS outbox (
                 id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -214,6 +223,35 @@ impl MessageStore {
             if !msg.contains("duplicate column") {
                 return Err(e.into());
             }
+        }
+
+        // F12 (audit) — outbox.peer_id at-rest hardening. Pre-F12
+        // databases stored the recipient PeerId in the clear in
+        // `outbox.peer_id`, leaking who-has-mail-queued to a disk-read
+        // attacker even though the message body was encrypted. The
+        // column now holds an HMAC tag (see `outbox_peer_tag`); re-tag
+        // any rows left over from a pre-F12 build exactly once. Gated
+        // on `PRAGMA user_version` so a normal startup — and a fresh
+        // database, which has no rows anyway — skips the table scan.
+        let schema_version: i64 =
+            conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        if schema_version < 1 {
+            let legacy_rows: Vec<(i64, Vec<u8>)> = {
+                let mut stmt = conn.prepare("SELECT id, peer_id FROM outbox")?;
+                let collected = stmt
+                    .query_map([], |r| {
+                        Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?))
+                    })?
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                collected
+            };
+            for (id, raw_peer) in legacy_rows {
+                conn.execute(
+                    "UPDATE outbox SET peer_id = ?1 WHERE id = ?2",
+                    params![outbox_peer_tag(&dek, &raw_peer), id],
+                )?;
+            }
+            conn.execute("PRAGMA user_version = 1", [])?;
         }
 
         // DHT-mailbox drops we have published on behalf of the local
@@ -750,7 +788,7 @@ impl MessageStore {
         self.conn.execute(
             "INSERT INTO outbox (peer_id, ciphertext, created_at, ttl, is_wire_bytes)
              VALUES (?1, ?2, ?3, ?4, 0)",
-            params![peer_id, enc, chrono_time(), ttl_secs],
+            params![outbox_peer_tag(&self.dek, peer_id), enc, chrono_time(), ttl_secs],
         )?;
         Ok(self.conn.last_insert_rowid())
     }
@@ -773,7 +811,7 @@ impl MessageStore {
         self.conn.execute(
             "INSERT INTO outbox (peer_id, ciphertext, created_at, ttl, is_wire_bytes)
              VALUES (?1, ?2, ?3, ?4, 1)",
-            params![peer_id, enc, chrono_time(), ttl_secs],
+            params![outbox_peer_tag(&self.dek, peer_id), enc, chrono_time(), ttl_secs],
         )?;
         Ok(self.conn.last_insert_rowid())
     }
@@ -794,7 +832,7 @@ impl MessageStore {
              FROM outbox WHERE peer_id = ?1 ORDER BY id ASC",
         )?;
         let rows: Vec<(i64, Vec<u8>, bool)> = stmt
-            .query_map(params![peer_id], |row| {
+            .query_map(params![outbox_peer_tag(&self.dek, peer_id)], |row| {
                 Ok((
                     row.get::<_, i64>(0)?,
                     row.get::<_, Vec<u8>>(1)?,
@@ -1358,6 +1396,35 @@ fn chrono_time() -> i64 {
         .as_secs() as i64
 }
 
+/// Deterministically tag a recipient `PeerId` for storage in the
+/// `outbox.peer_id` column (audit finding F12).
+///
+/// Pre-F12 the column held the raw `PeerId` bytes, so a disk-read
+/// attacker without the OS-keyring DEK could enumerate exactly who had
+/// undelivered mail queued — the message body was encrypted, the
+/// recipient was not. The stored value is now
+/// `HMAC-SHA256(DEK, OUTBOX_PEER_DOMAIN || peer_id)`:
+///
+/// - keyed by the DEK, so the mapping is opaque without the keyring;
+/// - deterministic (unlike `encrypt_at_rest`, which uses a random
+///   nonce), so the equality lookup in `outbox_get_for` and the
+///   `idx_outbox_peer` index keep working unchanged;
+/// - one-way, which is sufficient: `drain_outbox_for` is only ever
+///   called with a `PeerId` already in hand, so the column never
+///   needs to be reversed.
+///
+/// An attacker who already holds the DEK can confirm a *guessed*
+/// PeerId by recomputing the tag — but that same attacker can already
+/// decrypt every queued body, so this draws the line at the DEK
+/// boundary, matching the rest of the at-rest model.
+fn outbox_peer_tag(dek: &[u8; 32], peer_id: &[u8]) -> Vec<u8> {
+    let mut mac = <Hmac<Sha256> as HmacKeyInit>::new_from_slice(dek)
+        .expect("HMAC-SHA256 accepts a key of any length");
+    mac.update(OUTBOX_PEER_DOMAIN);
+    mac.update(peer_id);
+    mac.finalize().into_bytes().to_vec()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1601,13 +1668,13 @@ mod tests {
         let marker = b"outbox-secret-marker-fnord";
         store.outbox_add(&peer, marker, 60).unwrap();
 
+        // peer_id is HMAC-tagged at rest (F12), so a by-peer filter on
+        // the raw peer would no longer match; the single row is enough.
         let mut stmt = store
             .conn
-            .prepare("SELECT ciphertext FROM outbox WHERE peer_id = ?1")
+            .prepare("SELECT ciphertext FROM outbox")
             .unwrap();
-        let raw: Vec<u8> = stmt
-            .query_row(params![&peer[..]], |row| row.get(0))
-            .unwrap();
+        let raw: Vec<u8> = stmt.query_row([], |row| row.get(0)).unwrap();
         assert!(!contains_subslice(&raw, marker), "outbox ciphertext leaks plaintext");
         assert_eq!(raw[0], AT_REST_VERSION);
     }
@@ -1620,18 +1687,100 @@ mod tests {
 
         // Add a row with a very old created_at to simulate expiry.
         let _id = store.outbox_add(&peer, b"old", 1).unwrap();
-        // Backdate the row directly so it's already expired.
+        // Backdate the row directly so it's already expired. (peer_id
+        // is HMAC-tagged at rest now, so backdate the lone row outright
+        // rather than filtering by the raw peer.)
         store
             .conn
-            .execute(
-                "UPDATE outbox SET created_at = 0 WHERE peer_id = ?1",
-                params![&peer[..]],
-            )
+            .execute("UPDATE outbox SET created_at = 0", [])
             .unwrap();
 
         let deleted = store.outbox_cleanup_expired().unwrap();
         assert_eq!(deleted, 1);
         assert!(store.outbox_get_for(&peer).unwrap().is_empty());
+    }
+
+    #[test]
+    fn outbox_peer_id_is_hmac_tagged_at_rest() {
+        // F12: the recipient PeerId must not sit in the clear in the
+        // outbox.peer_id column. After an add, the stored value is the
+        // 32-byte HMAC tag — not the raw peer — and lookup still works.
+        let dir = tempdir().unwrap();
+        let store = MessageStore::open(dir.path(), test_dek()).unwrap();
+        let peer = [13u8; 38];
+
+        store.outbox_add(&peer, b"queued for later", 60).unwrap();
+
+        let stored: Vec<u8> = store
+            .conn
+            .query_row("SELECT peer_id FROM outbox", [], |r| r.get(0))
+            .unwrap();
+        assert_ne!(stored, peer.to_vec(), "raw PeerId must not be on disk");
+        assert_eq!(stored.len(), 32, "stored peer_id is an HMAC-SHA256 tag");
+        assert_eq!(stored, outbox_peer_tag(&test_dek(), &peer));
+
+        // Lookup by the original peer still resolves the row.
+        let queued = store.outbox_get_for(&peer).unwrap();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].1, b"queued for later");
+
+        // A different DEK produces a different tag — the mapping is
+        // opaque without the keyring key.
+        assert_ne!(
+            outbox_peer_tag(&[7u8; 32], &peer),
+            outbox_peer_tag(&test_dek(), &peer),
+        );
+    }
+
+    #[test]
+    fn outbox_peer_id_migration_retags_legacy_rows() {
+        // A pre-F12 database has raw PeerId bytes in outbox.peer_id and
+        // user_version = 0. Re-opening the store must re-tag those rows
+        // so drain still finds them — without the migration, mail
+        // queued before the upgrade would be silently orphaned.
+        let dir = tempdir().unwrap();
+        let peer = [21u8; 38];
+
+        {
+            let store = MessageStore::open(dir.path(), test_dek()).unwrap();
+            // Simulate a pre-F12 row: raw peer_id in the column, and
+            // rewind the schema marker so the next open re-migrates.
+            let body = store.encrypt_at_rest(b"legacy queued message");
+            store
+                .conn
+                .execute(
+                    "INSERT INTO outbox
+                       (peer_id, ciphertext, created_at, ttl, is_wire_bytes)
+                     VALUES (?1, ?2, ?3, ?4, 0)",
+                    params![&peer[..], body, chrono_time(), 3600],
+                )
+                .unwrap();
+            store.conn.execute("PRAGMA user_version = 0", []).unwrap();
+        }
+
+        // Re-open: the F12 migration runs and re-tags the legacy row.
+        let store = MessageStore::open(dir.path(), test_dek()).unwrap();
+
+        let stored: Vec<u8> = store
+            .conn
+            .query_row("SELECT peer_id FROM outbox", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(stored, outbox_peer_tag(&test_dek(), &peer));
+
+        // The legacy row is now reachable through the normal API.
+        let queued = store.outbox_get_for(&peer).unwrap();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].1, b"legacy queued message");
+
+        // The migration is one-shot: user_version is bumped, so a
+        // second open must not double-tag the (now 32-byte) value.
+        drop(store);
+        let store = MessageStore::open(dir.path(), test_dek()).unwrap();
+        let again: Vec<u8> = store
+            .conn
+            .query_row("SELECT peer_id FROM outbox", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(again, outbox_peer_tag(&test_dek(), &peer));
     }
 
     #[test]

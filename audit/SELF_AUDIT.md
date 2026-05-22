@@ -405,6 +405,16 @@ peer_hmac = ?". Same query performance, no peer-id leak on disk read.
 **Recommendation.** Not urgent. Track for Phase 5 sealed-sender or
 metadata-privacy work.
 
+**Status — ACTIONED (2026-05-22).** `outbox.peer_id` now stores
+`HMAC-SHA256(DEK, "zerocenter-outbox-peer-v1" || peer_id)` instead of
+the raw PeerId (`store.rs::outbox_peer_tag`). The HMAC is deterministic
+so the by-peer equality lookup and `idx_outbox_peer` index are
+unchanged; it is one-way, which is sufficient because `drain_outbox_for`
+always already holds the `PeerId`. A `PRAGMA user_version`-gated
+migration re-tags rows from pre-F12 databases on first open. Two tests
+added (`outbox_peer_id_is_hmac_tagged_at_rest`,
+`outbox_peer_id_migration_retags_legacy_rows`).
+
 ---
 
 ## Invariants verified clean
