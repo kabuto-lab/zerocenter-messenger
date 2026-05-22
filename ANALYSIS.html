@@ -1,0 +1,646 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ZeroCenter Messenger — In-Depth Analysis &amp; Code Audit</title>
+<style>
+  :root {
+    --bg:#0e1116; --panel:#11161d; --panel2:#161c25; --fg:#e6e6e6; --muted:#9aa3ad;
+    --line:#222a33; --done:#3fb950; --partial:#d29922; --todo:#f85149; --inprog:#58a6ff;
+    --accent:#a371f7; --crit:#f85149; --high:#fa7970; --med:#d29922; --low:#58a6ff; --info:#9aa3ad;
+  }
+  * { box-sizing: border-box; }
+  html,body { background:var(--bg); color:var(--fg); margin:0; padding:0;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; line-height:1.5; }
+  .wrap { max-width: 1120px; margin: 0 auto; padding: 32px 28px 90px; }
+  h1 { font-size: 23px; margin: 0 0 4px; letter-spacing: 0.4px; }
+  h1 small { color: var(--muted); font-weight: normal; font-size: 13px; }
+  h2 { font-size: 16px; margin: 38px 0 10px; padding-bottom: 6px; border-bottom: 1px solid var(--line); }
+  h3 { font-size: 14px; margin: 22px 0 6px; color: var(--accent); }
+  p { margin: 8px 0; }
+  .sub { color: var(--muted); font-size: 13px; margin: 2px 0 0; }
+  code { background:#1a1f26; padding:0 4px; border-radius:3px; font-size:12.5px; }
+  a { color: var(--accent); }
+  .lead { font-size: 13.5px; }
+
+  .meta { display:flex; flex-wrap:wrap; gap:8px; margin:16px 0 4px; }
+  .meta span { background:var(--panel); border:1px solid var(--line); border-radius:5px;
+    padding:4px 10px; font-size:12px; color:var(--muted); }
+  .meta span b { color:var(--fg); font-weight:600; }
+
+  table { border-collapse: collapse; width: 100%; margin: 10px 0 18px; font-size: 12.5px; }
+  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
+  tr:hover td { background: #0f141b; }
+  td.n { white-space: nowrap; color: var(--muted); }
+  td.r { text-align:right; white-space:nowrap; }
+
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:7px;
+    padding:14px 16px; margin:12px 0; font-size:13px; }
+  .panel.tip { border-left:3px solid var(--inprog); }
+  .panel.warn { border-left:3px solid var(--partial); }
+
+  .badge { font-size:10.5px; padding:1px 7px; border-radius:8px; font-weight:600;
+    text-transform:uppercase; letter-spacing:0.3px; white-space:nowrap; }
+  .b-done    { background:#0d2e15; color:var(--done); }
+  .b-partial { background:#3a2c08; color:var(--partial); }
+  .b-todo    { background:#3a1416; color:var(--todo); }
+  .b-crit { background:#3a1416; color:var(--crit); border:1px solid #6e1f24; }
+  .b-high { background:#3a1c18; color:var(--high); border:1px solid #6e3326; }
+  .b-med  { background:#3a2c08; color:var(--med);  border:1px solid #6e530b; }
+  .b-low  { background:#0c2237; color:var(--low);  border:1px solid #1c4878; }
+  .b-info { background:#1a1f26; color:var(--info); border:1px solid var(--line); }
+
+  /* layered architecture diagram */
+  .arch { margin:14px 0 20px; }
+  .layer { background:var(--panel); border:1px solid var(--line); border-radius:6px;
+    padding:9px 13px; margin:6px 0; font-size:12.5px; }
+  .layer .lt { color:var(--accent); font-weight:600; font-size:11px; text-transform:uppercase;
+    letter-spacing:0.5px; }
+  .layer .ld { color:var(--muted); }
+  .flowarrow { text-align:center; color:var(--line); font-size:13px; margin:-2px 0; }
+
+  ul.tight { margin:6px 0; padding-left:20px; font-size:13px; }
+  ul.tight li { margin:3px 0; }
+
+  .findings td:first-child { font-weight:600; }
+  .sevbar { display:flex; gap:6px; flex-wrap:wrap; margin:10px 0 4px; }
+  .sevbar div { flex:1; min-width:90px; background:var(--panel); border:1px solid var(--line);
+    border-radius:6px; padding:8px 10px; text-align:center; }
+  .sevbar div .num { font-size:20px; font-weight:700; display:block; }
+  .sevbar div .lbl { font-size:10.5px; text-transform:uppercase; color:var(--muted); letter-spacing:0.5px; }
+
+  .finding { background:var(--panel); border:1px solid var(--line); border-radius:7px;
+    margin:12px 0; padding:0; overflow:hidden; }
+  .finding > .fh { padding:9px 14px; background:var(--panel2); border-bottom:1px solid var(--line);
+    display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+  .finding > .fh .fid { font-weight:700; }
+  .finding > .fh .ft { flex:1; min-width:200px; }
+  .finding > .fb { padding:10px 14px; font-size:12.5px; }
+  .finding > .fb dl { margin:0; display:grid; grid-template-columns:104px 1fr; gap:3px 12px; }
+  .finding > .fb dt { color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:0.3px; }
+  .finding > .fb dd { margin:0; }
+  .toc { columns:2; column-gap:28px; font-size:13px; }
+  @media (max-width:760px){ .toc{columns:1;} .finding>.fb dl{grid-template-columns:1fr;} }
+  .foot { margin-top:40px; padding-top:14px; border-top:1px solid var(--line);
+    color:var(--muted); font-size:11.5px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>ZeroCenter Messenger <small>— In-Depth Analysis &amp; Code Audit</small></h1>
+<p class="sub">A censorship-resistant, leaderless, zero-trust peer-to-peer encrypted messenger written in Rust.</p>
+
+<div class="meta">
+  <span><b>Repo</b> F:\__Qwen1\ME55</span>
+  <span><b>Branch</b> main @ <b>aa48e40</b></span>
+  <span><b>Language</b> Rust 2021 (rustc 1.95)</span>
+  <span><b>Size</b> 12,131 LOC · 25 files</span>
+  <span><b>Tests</b> 119 / 119 green</span>
+  <span><b>Commits</b> 40 (since 2026-04-15)</span>
+  <span><b>Report date</b> 2026-05-23</span>
+</div>
+
+<div class="panel tip">
+This document has two parts. <b>Part A — Analysis</b> (§1–§9) maps the architecture, modules,
+cryptography and data flows. <b>Part B — Security Code Audit</b> (§10–§11) records the findings of a
+line-by-line review of every security-sensitive source file. Severity ratings follow the
+Critical / High / Medium / Low / Informational scale.
+</div>
+
+<h2>Contents</h2>
+<div class="toc">
+§1 &nbsp;Executive Summary<br>
+§2 &nbsp;System Architecture<br>
+§3 &nbsp;Module Map<br>
+§4 &nbsp;Technology Stack<br>
+§5 &nbsp;Cryptographic Design<br>
+§6 &nbsp;Core Data Flows<br>
+§7 &nbsp;Runtime State &amp; Storage<br>
+§8 &nbsp;Build, Test &amp; Code Quality<br>
+§9 &nbsp;Project Timeline<br>
+§10 Security Code Audit<br>
+§11 Conclusions &amp; Remediation Priority<br>
+</div>
+
+<!-- ============================== PART A ============================== -->
+<h2>§1 — Executive Summary</h2>
+<p class="lead">
+ZeroCenter Messenger is a fully decentralised instant messenger: there is no server, no leader
+node, no operator and no directory. Every participant runs the same single binary
+(<code>zerocenter.exe</code>, ~9.3&nbsp;MB), discovers peers over a Kademlia DHT plus mDNS, and
+exchanges messages directly over authenticated, encrypted libp2p streams. The threat model it
+targets is a Signal/Tor-class adversary: a network observer who can see, block and tamper with
+traffic, and who would like to learn <i>who is talking to whom</i>.
+</p>
+<p class="lead">
+The project is mature for its age. In 40 commits over five weeks it has shipped five development
+phases: a libp2p transport, signed direct messaging, full Signal-style end-to-end encryption
+(Double Ratchet + X3DH), at-rest encryption keyed from the OS secret store, a pluggable wire-
+obfuscation transport that defeats DPI fingerprinting, a DHT store-and-forward mailbox for offline
+delivery, sealed-sender metadata protection, and Megolm-style group chats. It carries its own
+four-document audit pack (<code>INVARIANTS.md</code>, <code>CRYPTO.md</code>,
+<code>THREAT_MODEL.md</code>, <code>SELF_AUDIT.md</code>) and 119 unit tests.
+</p>
+
+<h3>Strengths</h3>
+<ul class="tight">
+  <li><b>Disciplined cryptographic engineering.</b> Every signature and KDF call carries an explicit
+      domain-separator string; AEAD associated data binds sender/recipient identity; signature
+      verification is ordered before state mutation in the ratchet and sender-chain code.</li>
+  <li><b>Defence in depth.</b> Message bodies are encrypted on the wire <i>and</i> again at rest;
+      the wire is optionally obfuscated against DPI; sender identity is sealed from network
+      observers; the audit finding F12 (just landed) now even HMACs recipient PeerIds in the outbox.</li>
+  <li><b>Honest self-documentation.</b> The <code>audit/</code> pack enumerates 26 load-bearing
+      invariants with file:line pointers and documents what the system explicitly does <i>not</i>
+      protect.</li>
+</ul>
+<h3>Areas of attention</h3>
+<ul class="tight">
+  <li><b>One 3,576-line file.</b> <code>core/node.rs</code> concentrates the entire protocol
+      state machine — the natural place for subtle bugs and the priority of the audit in §10.</li>
+  <li><b>No external review yet.</b> The cryptography composes well-known primitives, but the
+      <i>integration</i> is hand-rolled and has never been examined by a third party.</li>
+  <li><b>Metadata residue.</b> Recipient PeerIds, slot identifiers and ACK records still leak
+      who-talks-to-whom to a DHT observer; this is documented, not yet closed.</li>
+</ul>
+
+<h2>§2 — System Architecture</h2>
+<p>The node is a single async <code>tokio</code> process. A foreground UI thread (Tauri webview or
+a line-reader CLI) feeds <code>NodeCommand</code>s over an mpsc channel into a background swarm
+task that owns all networking and cryptographic state. The layers, top (application) to bottom
+(wire):</p>
+
+<div class="arch">
+  <div class="layer"><span class="lt">UI</span> &nbsp;<span class="ld">Tauri 2 webview (<code>gui/app.rs</code>, <code>dist/index.html</code>) — default; or headless CLI REPL (<code>cli.rs</code>). Both emit <code>NodeCommand</code> over mpsc.</span></div>
+  <div class="flowarrow">&#8595;</div>
+  <div class="layer"><span class="lt">Node / Orchestration</span> &nbsp;<span class="ld"><code>core/node.rs</code> — the swarm event loop, DM/group send-receive-bootstrap state machine, prekey &amp; OTPK lifecycle, mailbox scheduler.</span></div>
+  <div class="flowarrow">&#8595;</div>
+  <div class="layer"><span class="lt">Protocol &amp; Crypto</span> &nbsp;<span class="ld"><code>protocol/</code> wire envelopes · <code>crypto/</code> Double Ratchet, X3DH, Megolm sender chains, sealed sender, at-rest DEK.</span></div>
+  <div class="flowarrow">&#8595;</div>
+  <div class="layer"><span class="lt">Storage</span> &nbsp;<span class="ld"><code>storage/store.rs</code> — SQLite (<code>messages.db</code>), every sensitive blob AEAD-wrapped under the per-profile DEK.</span></div>
+  <div class="flowarrow">&#8595;</div>
+  <div class="layer"><span class="lt">Network behaviour</span> &nbsp;<span class="ld"><code>network/behaviour.rs</code> — libp2p Kademlia + gossipsub + mDNS + identify + two request-response protocols · <code>network/mailbox.rs</code> DHT store-and-forward.</span></div>
+  <div class="flowarrow">&#8595;</div>
+  <div class="layer"><span class="lt">Transport</span> &nbsp;<span class="ld">TCP &#8594; <code>network/scramble.rs</code> ScrambleStream obfuscation (optional) &#8594; Noise (auth+encrypt) &#8594; Yamux (mux). QUIC disabled on this toolchain.</span></div>
+</div>
+
+<p>Two design decisions are load-bearing and worth calling out:</p>
+<ul class="tight">
+  <li><b>DMs are request-response, not gossipsub.</b> A gossipsub fallback was deliberately removed
+      to avoid broadcasting (even encrypted) direct messages to the whole mesh. DMs require a live
+      connection or the DHT mailbox; gossipsub now carries only a vestigial global topic.</li>
+  <li><b>The transport stack is custom.</b> The ScrambleStream is spliced in via
+      <code>SwarmBuilder::with_other_transport</code>, not the stock <code>with_tcp</code>, so the
+      obfuscation handshake runs on the raw socket <i>before</i> the Noise upgrade.</li>
+</ul>
+
+<h2>§3 — Module Map</h2>
+<table>
+  <tr><th>File</th><th class="r">LOC</th><th>Responsibility</th></tr>
+  <tr><td><code>core/node.rs</code></td><td class="r">3,576</td><td>Swarm event loop; DM &amp; group send/receive/bootstrap; prekey + OTPK lifecycle; mailbox publish/poll/ACK; ~50 functions, 64 unit tests.</td></tr>
+  <tr><td><code>storage/store.rs</code></td><td class="r">~2,124</td><td>SQLite store; at-rest ChaCha20-Poly1305; 10+ tables; idempotent migrations incl. the F12 <code>user_version</code> migration.</td></tr>
+  <tr><td><code>network/scramble.rs</code></td><td class="r">1,217</td><td>ScrambleStream DPI-obfuscation transport: ChaCha20 keystream, 256-byte framed padding, IAT jitter, NTOR/elligator2 hidden-nonce handshake.</td></tr>
+  <tr><td><code>crypto/ratchet.rs</code></td><td class="r">695</td><td>Double Ratchet (Signal spec): DH ratchet, symmetric KDF chains, skipped-key cache (MAX_SKIP 1000, oldest-first eviction).</td></tr>
+  <tr><td><code>protocol/message.rs</code></td><td class="r">676</td><td>DM wire envelope <code>ProtocolMessage</code> / <code>EncryptedPayload</code>; Ed25519 signing, sealed-sender routing, expiry.</td></tr>
+  <tr><td><code>protocol/group.rs</code></td><td class="r">670</td><td>Group control wire types (Create / MembershipUpdate / SenderKeyDistribution / Leave); founder-signed authority; canonical bytes.</td></tr>
+  <tr><td><code>crypto/megolm.rs</code></td><td class="r">572</td><td>Megolm-style group sender chains: HMAC-SHA256 chain advance, per-message Ed25519 signature, receiver skipped-key cache.</td></tr>
+  <tr><td><code>core/identity.rs</code></td><td class="r">360</td><td>Ed25519 long-term identity + signed X25519 prekey; on-disk <code>identity.json</code>; lazy migration of pre-Phase-3 files.</td></tr>
+  <tr><td><code>crypto/x3dh.rs</code></td><td class="r">337</td><td>X3DH-lite handshake — 2-DH and 3-DH (one-time-prekey) variants with distinct info tags.</td></tr>
+  <tr><td><code>gui/app.rs</code></td><td class="r">303</td><td>Tauri command surface; 7 group commands + DM/contact queries; GUI-event forwarder.</td></tr>
+  <tr><td><code>cli.rs</code></td><td class="r">258</td><td>Headless line-reader REPL; command parsing &amp; dispatch.</td></tr>
+  <tr><td><code>crypto/sealed.rs</code></td><td class="r">235</td><td>Sealed sender — ECIES (ephemeral X25519 + HKDF + ChaCha20-Poly1305) over the sender certificate.</td></tr>
+  <tr><td><code>network/mailbox.rs</code></td><td class="r">230</td><td>DHT store-and-forward: slot / drop / ACK Kademlia key derivation (SHA-256, domain-separated).</td></tr>
+  <tr><td><code>network/behaviour.rs</code></td><td class="r">170</td><td>Composed libp2p <code>NetworkBehaviour</code>; protocol-string definitions; prekey request/response types.</td></tr>
+  <tr><td><code>crypto/keyring.rs</code></td><td class="r">91</td><td>Per-profile data-encryption key in the OS secret store (Windows Credential Manager / Keychain / secret-service).</td></tr>
+  <tr><td><code>serde_helpers.rs</code></td><td class="r">85</td><td>Serde adapters for 64-byte signature arrays (serde lacks native &gt;32 array support).</td></tr>
+  <tr><td><code>main.rs</code> · <code>core/config.rs</code> · <code>lib.rs</code> · <code>*/mod.rs</code></td><td class="r">~510</td><td>Entry point, CLI surface, config struct, module wiring.</td></tr>
+</table>
+
+<h2>§4 — Technology Stack</h2>
+<table>
+  <tr><th>Concern</th><th>Crate(s)</th><th>Notes</th></tr>
+  <tr><td>Async runtime</td><td><code>tokio 1.35</code> (full)</td><td>Single multi-threaded runtime; the swarm loop is one spawned task.</td></tr>
+  <tr><td>P2P networking</td><td><code>libp2p 0.53</code></td><td>tcp · noise · yamux · kad · gossipsub · mdns · identify · relay · dns · request-response/cbor. <b>QUIC disabled</b> — its <code>ring</code> dependency crashes <code>cl.exe</code> on this MSVC toolchain.</td></tr>
+  <tr><td>Signatures</td><td><code>ed25519-dalek 2.1</code></td><td><code>verify_strict</code> used throughout (rejects non-canonical / small-order).</td></tr>
+  <tr><td>Key agreement</td><td><code>x25519-dalek 2.0</code></td><td><code>static_secrets</code> feature for the serialisable long-term prekey.</td></tr>
+  <tr><td>AEAD / stream cipher</td><td><code>chacha20poly1305 0.10</code>, <code>chacha20 0.9</code></td><td>AEAD for messages &amp; at-rest; raw ChaCha20 keystream for the obfuscation layer.</td></tr>
+  <tr><td>KDF / MAC / hash</td><td><code>hkdf 0.12</code>, <code>hmac 0.12</code>, <code>sha2 0.10</code></td><td>HKDF-SHA256 handshakes; HMAC-SHA256 ratchet/sender-chain advance + F12 outbox tags.</td></tr>
+  <tr><td>Obfuscation handshake</td><td><code>curve25519-elligator2 0.1.0-alpha.2</code></td><td>Alpha crate, pinned; only <code>to_representative</code>/<code>from_representative</code> used — uniform-random ephemeral encoding for the NTOR handshake.</td></tr>
+  <tr><td>Storage</td><td><code>rusqlite 0.30</code> (bundled)</td><td>SQLite compiled in; no system dependency.</td></tr>
+  <tr><td>Secret hygiene</td><td><code>zeroize 1</code>, <code>keyring 3</code></td><td>Zeroizing wrappers; DEK in the OS-native secret store.</td></tr>
+  <tr><td>UI</td><td><code>tauri 2</code> (optional <code>gui</code> feature)</td><td>Off by default — the headless build skips Tauri's ~100-crate tree and its build script.</td></tr>
+</table>
+<p class="sub">Cargo.lock pins 670 dependency entries. Release profile: LTO on, one codegen unit, symbols stripped.</p>
+
+<h2>§5 — Cryptographic Design</h2>
+<p>The system layers five independent cryptographic constructions. Each uses a distinct
+domain-separator string, which is the project's primary defence against cross-protocol
+signature/key reuse.</p>
+<table>
+  <tr><th>Construction</th><th>Primitive</th><th>Domain separator</th><th>Purpose</th></tr>
+  <tr><td>Identity &amp; prekey</td><td>Ed25519 sign over X25519 pubkey</td><td><code>zerocenter-prekey-v1</code></td><td>Long-term identity; PeerId-verifiable signed prekey.</td></tr>
+  <tr><td>X3DH-lite handshake</td><td>HKDF-SHA256 over 2 or 3 DH outputs</td><td><code>zerocenter-x3dh-v1</code> / <code>-otpk-v1</code></td><td>Asynchronous first-message key agreement.</td></tr>
+  <tr><td>Double Ratchet</td><td>DH-ratchet + HMAC-SHA256 KDF chains; ChaCha20-Poly1305</td><td><code>zerocenter-rk-v1</code> + chain constants</td><td>Per-message forward secrecy &amp; break-in recovery for 1:1 DMs.</td></tr>
+  <tr><td>Megolm group chains</td><td>HMAC-SHA256 chain; ChaCha20-Poly1305 zero-nonce; per-msg Ed25519</td><td><code>zerocenter-group-msg-v1</code></td><td>Scalable group messaging; the per-message signature blocks cross-member impersonation.</td></tr>
+  <tr><td>Sealed sender</td><td>ECIES: ephemeral X25519 + HKDF-SHA256 + ChaCha20-Poly1305</td><td><code>zerocenter-sealed-sender-v1</code></td><td>Hides the sender PeerId from network observers.</td></tr>
+  <tr><td>At-rest storage</td><td>ChaCha20-Poly1305 under the keyring DEK</td><td><code>[ver‖nonce‖ct+tag]</code></td><td>Message bodies, sessions, OTPK privates, outbox, mailbox drops.</td></tr>
+  <tr><td>Wire obfuscation</td><td>ChaCha20 keystream; NTOR/elligator2 handshake</td><td><code>zerocenter-ntor-v1</code>, <code>zc-chacha-{d2l,l2d}-v1</code></td><td>Defeats DPI: uniform-random handshake, 256-byte framed padding, optional IAT jitter.</td></tr>
+  <tr><td>Safety number</td><td>SHA-256 over sorted PeerIds</td><td><code>zerocenter-safety-v1</code></td><td>Out-of-band anti-MITM fingerprint (160-bit, 8&times;5 hex groups).</td></tr>
+</table>
+
+<h2>§6 — Core Data Flows</h2>
+
+<h3>6.1 First DM to a stranger (X3DH bootstrap)</h3>
+<ol class="tight">
+  <li>User runs <code>send &lt;peer&gt; &lt;text&gt;</code>. No ratchet session exists.</li>
+  <li>Node fires a <code>PrekeyRequest</code> on <code>/zerocenter/prekey/1.0.0</code>; the plaintext is buffered in <code>pending_sends</code>.</li>
+  <li>Responder returns a signed X25519 prekey, optionally with a one-time prekey (OTPK).</li>
+  <li>Initiator verifies the Ed25519 signature against the responder's PeerId, runs X3DH-lite (3-DH if an OTPK was supplied, else 2-DH), derives the root key, and builds an initiator <code>RatchetState</code>.</li>
+  <li>The buffered message is ratchet-encrypted, wrapped in a signed (or sealed) <code>ProtocolMessage</code>, and sent — or queued to the outbox + DHT mailbox if the peer is offline.</li>
+</ol>
+
+<h3>6.2 Receiving a DM</h3>
+<ol class="tight">
+  <li><code>process_incoming_dm</code> rejects expired envelopes first, then verifies the Ed25519 signature.</li>
+  <li>For non-sealed envelopes it cross-checks the libp2p transport peer against the signed sender; for sealed envelopes that check is deliberately skipped (the transport peer is decoupled by design).</li>
+  <li>If no session exists, the first-message header (X3DH ephemeral + OTPK id) drives a responder X3DH bootstrap; the new session is committed to memory only after the first decrypt succeeds.</li>
+  <li>Plaintext is stored AEAD-encrypted; a GUI <code>DmReceived</code> event fires; for mailbox-fetched messages an ACK record is published to the DHT.</li>
+</ol>
+
+<h3>6.3 Group message (Megolm fan-out)</h3>
+<ol class="tight">
+  <li>Sender loads or creates its own SenderChain for the group; if fresh, the sender-key bundle is distributed to every member over their 1:1 ratchet sessions.</li>
+  <li>The message is Megolm-encrypted <i>once</i> (chain key advance + ChaCha20-Poly1305 + per-message Ed25519 signature).</li>
+  <li>The single ciphertext is fanned out as N&minus;1 unicast <code>kind=2</code> envelopes — confidentiality from Megolm, transport security from each 1:1 session.</li>
+  <li>On remove/leave, every remaining member rotates its SenderChain so a departed peer's cached key is dead for future messages (forward secrecy, best-effort, not retroactive).</li>
+</ol>
+
+<h3>6.4 Offline delivery (DHT mailbox)</h3>
+<ol class="tight">
+  <li>When a peer is unreachable, the already-encrypted wire bytes go to both the on-disk outbox and a Kademlia record at <code>drop_kad_key(recipient, sender, slot)</code>; the sender also <code>start_providing</code>s the slot key.</li>
+  <li>Recipients poll <code>get_providers</code> for recent hourly slots, fetch each drop, and route it through the normal receive pipeline.</li>
+  <li>On successful decrypt the recipient publishes an ACK record; the sender stops republishing that drop (else it republishes until a 7-day cap).</li>
+</ol>
+
+<h2>§7 — Runtime State &amp; Storage</h2>
+<p>The <code>P2PNode</code> struct holds all live state in memory. Several maps are keyed by remote
+PeerId and are therefore attacker-influenceable — a deliberate focus of the audit:</p>
+<table>
+  <tr><th>Field</th><th>Keyed by</th><th>Purpose</th></tr>
+  <tr><td><code>sessions</code></td><td>PeerId</td><td>Live Double Ratchet states, lazy-loaded from disk.</td></tr>
+  <tr><td><code>pending_sends</code> / <code>pending_recvs</code></td><td>PeerId</td><td>Messages buffered during a prekey-fetch / X3DH-bootstrap window.</td></tr>
+  <tr><td><code>cached_otpks</code></td><td>PeerId</td><td>One-time prekey bundles fetched from peers.</td></tr>
+  <tr><td><code>recent_otpk_fetches</code></td><td>PeerId</td><td>Per-peer 60&nbsp;s cooldown gate for the OTPK pool-drain defence.</td></tr>
+  <tr><td><code>pending_{provider,record,ack}_queries</code></td><td>Kad QueryId</td><td>Outstanding mailbox DHT lookups.</td></tr>
+</table>
+<p>On disk, <code>messages.db</code> holds messages, contacts, channels, seen prekeys, ratchet
+sessions, own one-time prekeys, the outbox, mailbox drops, and five group tables. Every sensitive
+column is ChaCha20-Poly1305-encrypted under the per-profile DEK, which itself lives only in the OS
+secret store. Identity keys live in <code>identity.json</code> (0600 on Unix).</p>
+
+<h2>§8 — Build, Test &amp; Code Quality</h2>
+<div class="sevbar">
+  <div><span class="num">119</span><span class="lbl">unit tests</span></div>
+  <div><span class="num">0</span><span class="lbl">failures</span></div>
+  <div><span class="num">11</span><span class="lbl">clippy warns</span></div>
+  <div><span class="num">12.1k</span><span class="lbl">LOC</span></div>
+  <div><span class="num">25</span><span class="lbl">source files</span></div>
+</div>
+<ul class="tight">
+  <li><b>Tests:</b> <code>cargo test --lib</code> &#8594; 119/119 on default features and with <code>--features gui</code>. One known flake (<code>mailbox_drops_basic_lifecycle</code>) races a 1-second clock boundary; it passes on re-run.</li>
+  <li><b>Clippy:</b> 11 warnings, all cosmetic — <code>type_complexity</code> (&times;3), doc-list indentation (&times;5), a <code>matches!</code> suggestion, a <code>large_enum_variant</code>, an <code>io::Error::other</code>. No correctness lints.</li>
+  <li><b>Build:</b> compiles clean on rustc/cargo 1.95; release build is LTO + stripped, ~9.3&nbsp;MB.</li>
+  <li><b>Test density</b> is high for a project this young — every crypto module and the storage layer carry substantial test suites; <code>node.rs</code> alone has 64 test functions.</li>
+</ul>
+
+<h2>§9 — Project Timeline</h2>
+<table>
+  <tr><th>Phase</th><th>Delivered</th></tr>
+  <tr><td>Phase 1</td><td>Ed25519 identity; libp2p TCP+Noise+Yamux+Kad+gossipsub+mDNS+identify; bootstrap CLI.</td></tr>
+  <tr><td>Phase 2</td><td>Signed DM envelope with transport-peer&#8596;signed-sender cross-check; SQLite store with TTL sweep.</td></tr>
+  <tr><td>Phase 3 / 3.5</td><td>Double Ratchet + X3DH-lite; one-time prekey pool; at-rest AEAD with keyring DEK; persistent outbox; safety-number command.</td></tr>
+  <tr><td>Phase 4</td><td>ScrambleStream wire obfuscation: byte-XOR &#8594; NTOR/elligator2 handshake &#8594; 256-byte frame padding &#8594; optional IAT jitter; DHT mailbox store-and-forward.</td></tr>
+  <tr><td>Phase 5</td><td>Sealed sender; mailbox encrypt-once + ACK loop; OTPK pool-drain defence; Megolm-style group chats (8-commit track); Tauri GUI with push-refresh.</td></tr>
+  <tr><td>Post-Phase-5</td><td>Self-audit pass (12 findings); OTPK serve/consume regression fix; GUI default + <code>withGlobalTauri</code> fix; audit finding F12 (outbox PeerId HMAC).</td></tr>
+</table>
+
+<!-- ============================== PART B ============================== -->
+<h2>§10 — Security Code Audit</h2>
+<div class="panel tip">
+<b>Methodology.</b> Three independent reviewers each took one subsystem — the crypto core, the
+node/networking layer, and the storage/protocol/obfuscation layer — and read every file in full,
+cross-referencing the project's own <code>INVARIANTS.md</code>, <code>CRYPTO.md</code> and
+<code>THREAT_MODEL.md</code>. The 35 findings below are the consolidated, de-duplicated result.
+Severity: <b>High</b> = remotely triggerable with serious impact; <b>Medium</b> = a real security
+weakness needing specific conditions; <b>Low</b> = limited or hard to trigger; <b>Informational</b>
+= hardening / hygiene. The review found <b>no Critical issues</b> — no nonce reuse, no missing
+domain separator, no signature-verification bypass, no key reuse in the handshake or ratchet.
+</div>
+
+<div class="sevbar">
+  <div><span class="num" style="color:var(--crit)">0</span><span class="lbl">Critical</span></div>
+  <div><span class="num" style="color:var(--high)">5</span><span class="lbl">High</span></div>
+  <div><span class="num" style="color:var(--med)">11</span><span class="lbl">Medium</span></div>
+  <div><span class="num" style="color:var(--low)">12</span><span class="lbl">Low</span></div>
+  <div><span class="num" style="color:var(--info)">7</span><span class="lbl">Informational</span></div>
+</div>
+
+<h3>§10.1 — Findings at a glance</h3>
+<table class="findings">
+  <tr><th>ID</th><th>Severity</th><th>Area</th><th>Finding</th></tr>
+  <tr><td>H1</td><td><span class="badge b-high">High</span></td><td>Node</td><td>Stale/replayed first message can overwrite a live ratchet session</td></tr>
+  <tr><td>H2</td><td><span class="badge b-high">High</span></td><td>Node</td><td><code>restore_session_if_persisted</code> fails open on DB error / corrupt blob</td></tr>
+  <tr><td>H3</td><td><span class="badge b-high">High</span></td><td>Node</td><td><code>pending_recvs</code>/<code>pending_sends</code> unbounded &#8594; memory-exhaustion DoS</td></tr>
+  <tr><td>H4</td><td><span class="badge b-high">High</span></td><td>GUI</td><td>Stored XSS — remote message content reaches webview <code>innerHTML</code> unescaped</td></tr>
+  <tr><td>H5</td><td><span class="badge b-high">High</span></td><td>Protocol</td><td>Unbounded inbound message deserialization &#8594; allocation / OOM DoS</td></tr>
+  <tr><td>M1</td><td><span class="badge b-med">Medium</span></td><td>Node</td><td><code>process_pending</code> re-bootstraps a session per queued payload (no idempotency)</td></tr>
+  <tr><td>M2</td><td><span class="badge b-med">Medium</span></td><td>Node</td><td>MembershipUpdate accepts any forward epoch jump &#8594; group membership freezes forever</td></tr>
+  <tr><td>M3</td><td><span class="badge b-med">Medium</span></td><td>Node</td><td>MembershipUpdate can remove the founder &#8594; desyncs all receivers</td></tr>
+  <tr><td>M4</td><td><span class="badge b-med">Medium</span></td><td>Network</td><td>Unauthenticated mailbox ACK lets any observer kill an offline delivery</td></tr>
+  <tr><td>M5</td><td><span class="badge b-med">Medium</span></td><td>Node</td><td>Kad query-tracking maps leak on the <code>Found*</code> result arms</td></tr>
+  <tr><td>M6</td><td><span class="badge b-med">Medium</span></td><td>Crypto</td><td>Ratchet AEAD doesn't structurally bind peer IDs (INVARIANTS §6 call-site-dependent)</td></tr>
+  <tr><td>M7</td><td><span class="badge b-med">Medium</span></td><td>Crypto</td><td><code>RatchetState</code> root/chain keys not zeroized on drop</td></tr>
+  <tr><td>M8</td><td><span class="badge b-med">Medium</span></td><td>Crypto</td><td>DEK left in unzeroized <code>String</code>/<code>Vec</code> copies after load</td></tr>
+  <tr><td>M9</td><td><span class="badge b-med">Medium</span></td><td>Obfs</td><td>ScrambleStream read path doesn't bound the descrambled frame length</td></tr>
+  <tr><td>M10</td><td><span class="badge b-med">Medium</span></td><td>Obfs</td><td><code>ScrambleStream::new</code> is <code>pub</code> and builds a two-time-pad stream</td></tr>
+  <tr><td>M11</td><td><span class="badge b-med">Medium</span></td><td>Storage</td><td>At-rest AEAD uses empty AAD &#8594; write-capable disk attacker can graft/rollback blobs</td></tr>
+  <tr><td>L1</td><td><span class="badge b-low">Low</span></td><td>Crypto</td><td><code>try_skipped</code> evicts the cached key even when AEAD verification fails</td></tr>
+  <tr><td>L2</td><td><span class="badge b-low">Low</span></td><td>Node</td><td>Stale <code>SenderKeyDistribution</code> reinstalls a pre-rotation chain; <code>epoch</code> unused</td></tr>
+  <tr><td>L3</td><td><span class="badge b-low">Low</span></td><td>Protocol</td><td><code>is_expired()</code> overflow bypasses the replay check; clock panic on pre-1970</td></tr>
+  <tr><td>L4</td><td><span class="badge b-low">Low</span></td><td>Node</td><td>Sealed-sender unseal runs X25519 per inbound message &#8594; CPU DoS</td></tr>
+  <tr><td>L5</td><td><span class="badge b-low">Low</span></td><td>GUI</td><td>Tauri group/send commands don't bound name / content / member-list size</td></tr>
+  <tr><td>L6</td><td><span class="badge b-low">Low</span></td><td>Crypto</td><td>Megolm chain index uses <code>wrapping_add</code> — attacker bundle index can roll over</td></tr>
+  <tr><td>L7</td><td><span class="badge b-low">Low</span></td><td>Crypto</td><td>Group chain keys (<code>SenderKeyBundle</code>/<code>ReceiverChain</code>) not zeroized</td></tr>
+  <tr><td>L8</td><td><span class="badge b-low">Low</span></td><td>Crypto</td><td>Sealed-sender AEAD uses empty AAD — recipient not bound at the seal layer</td></tr>
+  <tr><td>L9</td><td><span class="badge b-low">Low</span></td><td>Obfs</td><td>NTOR handshake low-order-point check covers only the order-1/2 collapse</td></tr>
+  <tr><td>L10</td><td><span class="badge b-low">Low</span></td><td>Storage</td><td><code>pop_unused_otpk</code> returns <code>Err</code> on a malformed row after burning the OTPK</td></tr>
+  <tr><td>L11</td><td><span class="badge b-low">Low</span></td><td>Storage</td><td>F12 outbox re-tag migration is not transactional &#8594; crash orphans queued mail</td></tr>
+  <tr><td>L12</td><td><span class="badge b-low">Low</span></td><td>Crypto</td><td><code>u32</code> length casts in canonical-bytes builders truncate on &gt;4&nbsp;GiB input</td></tr>
+  <tr><td>I1</td><td><span class="badge b-info">Info</span></td><td>Crypto</td><td>Sealed-sender low-order-point check is incomplete / overstated</td></tr>
+  <tr><td>I2</td><td><span class="badge b-info">Info</span></td><td>Crypto</td><td><code>sealed.rs</code> ephemeral private not zeroized after use</td></tr>
+  <tr><td>I3</td><td><span class="badge b-info">Info</span></td><td>Crypto</td><td><code>try_skipped</code> keys on <code>(dh,n)</code> — relies on no DH-key reuse</td></tr>
+  <tr><td>I4</td><td><span class="badge b-info">Info</span></td><td>Protocol</td><td>Sealed envelope doesn't require empty <code>from</code>/<code>signature</code></td></tr>
+  <tr><td>I5</td><td><span class="badge b-info">Info</span></td><td>Crypto</td><td>Ratchet combined-AD unambiguity relies on an undocumented fixed-width header</td></tr>
+  <tr><td>I6</td><td><span class="badge b-info">Info</span></td><td>Storage</td><td>Group <code>epoch</code> round-trips through SQLite <code>i64</code> (u64↔i64 pun)</td></tr>
+  <tr><td>I7</td><td><span class="badge b-info">Info</span></td><td>Storage</td><td><code>decrypt_at_rest</code> has no upper bound on blob size</td></tr>
+</table>
+
+<h3>§10.2 — High-severity findings</h3>
+
+<div class="finding">
+  <div class="fh"><span class="fid">H1</span><span class="badge b-high">High</span><span class="ft">Stale/replayed first message can overwrite a live ratchet session</span></div>
+  <div class="fb"><dl>
+    <dt>Location</dt><dd><code>core/node.rs:1830-1872</code> (<code>process_incoming_dm</code> step 5), <code>:3219-3241</code> (<code>process_pending</code>)</dd>
+    <dt>Issue</dt><dd>The receive path chooses "run a fresh X3DH bootstrap" vs "use the existing session" purely on the absence of a stored session. There is no first-message idempotency guard on the 2-DH path (the OTPK <code>consumed_at</code> gate only covers 3-DH), and <code>decrypt_first_message</code> inserts the new session <i>before</i> attempting decrypt.</dd>
+    <dt>Impact</dt><dd>An active attacker who replays the captured first <code>ProtocolMessage</code> of a conversation — while the live session row is momentarily unavailable — re-derives the same SK, builds a fresh responder state at index 0, decrypts the genuine old message successfully, and persists it over the advanced live session. Every subsequent real message then fails AEAD; the conversation is permanently desynced until a new handshake. The audit-F9 guard only protects the decrypt-<i>failure</i> case.</dd>
+    <dt>Fix</dt><dd>Gate responder bootstrap on the header being <code>pn==0 &amp;&amp; n==0</code>; refuse to bootstrap when a session blob exists but failed to load; for 2-DH first messages add a replay marker (record the first-message ephemeral, reject a second bootstrap with the same one).</dd>
+  </dl></div>
+</div>
+
+<div class="finding">
+  <div class="fh"><span class="fid">H2</span><span class="badge b-high">High</span><span class="ft"><code>restore_session_if_persisted</code> fails open on DB error / corrupt blob</span></div>
+  <div class="fb"><dl>
+    <dt>Location</dt><dd><code>core/node.rs:3439-3464</code></dd>
+    <dt>Issue</dt><dd>The function returns <code>false</code> for three distinct conditions — no row, a corrupt/undeserialisable blob, and a DB or DEK-decrypt error. Every caller treats <code>false</code> as "no session — safe to bootstrap fresh".</dd>
+    <dt>Impact</dt><dd>A transient SQLite error or a DEK-decrypt failure on a real, live session causes the node to silently abandon the ratchet and bootstrap a new one. This is fail-open behaviour and the enabling primitive for H1. INVARIANTS §10 requires at-rest decrypt failures to propagate, not be swallowed into a boolean.</dd>
+    <dt>Fix</dt><dd>Return a three-state result (<code>Present</code> / <code>Absent</code> / <code>Error</code>). On <code>Error</code> or "corrupt blob present", callers must drop the message / abort the send — never pave over the session.</dd>
+  </dl></div>
+</div>
+
+<div class="finding">
+  <div class="fh"><span class="fid">H3</span><span class="badge b-high">High</span><span class="ft"><code>pending_recvs</code>/<code>pending_sends</code> unbounded &#8594; memory-exhaustion DoS</span></div>
+  <div class="fb"><dl>
+    <dt>Location</dt><dd><code>core/node.rs:44-48</code> (fields), <code>:1041</code>, <code>:1856-1859</code></dd>
+    <dt>Issue</dt><dd>Both maps are keyed by remote PeerId with no cap on key count, no cap on payloads per peer, no byte cap and no TTL. Entries are drained only if a valid prekey response later arrives; the hourly cleanup tick never touches them.</dd>
+    <dt>Impact</dt><dd>A Sybil attacker mints unlimited valid PeerIds, sends one validly-signed first-message envelope per identity (each carrying a large <code>ct</code>) and never answers the prekey fetch. <code>pending_recvs</code> grows without bound until OOM — an unauthenticated-cost remote crash.</dd>
+    <dt>Fix</dt><dd>Cap the peer-key count (LRU-evict), cap payloads per peer, cap total bytes, add TTL eviction on the cleanup tick; also bound <code>inflight_prekey_fetches</code>. <b>Note:</b> this is the project's own deferred finding F4 — rated there "Low, noise only"; this audit re-rates it <b>High</b>.</dd>
+  </dl></div>
+</div>
+
+<div class="finding">
+  <div class="fh"><span class="fid">H4</span><span class="badge b-high">High</span><span class="ft">Stored XSS — remote message content reaches webview <code>innerHTML</code> unescaped</span></div>
+  <div class="fb"><dl>
+    <dt>Location</dt><dd><code>dist/index.html:655-663</code> (<code>renderMessages</code>)</dd>
+    <dt>Issue</dt><dd>Every other render path escapes user-controlled strings via <code>escapeHtml()</code>; <code>renderMessages</code> interpolates <code>msg.sender</code> and <code>msg.content</code> straight into <code>innerHTML</code>. <code>msg.content</code> is the decrypted plaintext of a message from a remote peer.</dd>
+    <dt>Impact</dt><dd>A remote peer sends a DM or group message whose plaintext is <code>&lt;img src=x onerror=...&gt;</code>. When the victim opens that conversation the markup parses and the script runs inside the Tauri webview — where <code>window.__TAURI__.core.invoke</code> is in scope. The injected script can call every exposed Tauri command (<code>send_message</code>, <code>add_contact</code>, <code>create_group</code>, <code>leave_group</code>, …): full webview compromise / account takeover, triggered purely by messaging the victim.</dd>
+    <dt>Fix</dt><dd><code>escapeHtml()</code> both fields (or build the bubble with <code>textContent</code>/<code>createElement</code>). Add a restrictive <code>Content-Security-Policy</code> (<code>default-src 'self'; script-src 'self'</code>) in the Tauri config.</dd>
+  </dl></div>
+</div>
+
+<div class="finding">
+  <div class="fh"><span class="fid">H5</span><span class="badge b-high">High</span><span class="ft">Unbounded inbound message deserialization &#8594; allocation / OOM DoS</span></div>
+  <div class="fb"><dl>
+    <dt>Location</dt><dd><code>protocol/message.rs</code> (<code>ProtocolMessage</code>/<code>EncryptedPayload::from_bytes</code>), <code>protocol/group.rs</code> (<code>GroupControl</code>), <code>network/behaviour.rs:139-159</code></dd>
+    <dt>Issue</dt><dd>All wire parsing runs <code>serde_json::from_slice</code> on attacker-controlled bytes with no size cap before deserialization; the request-response protocols use <code>Config::default()</code> with no explicit request-size maximum. Signature/expiry verification happens <i>after</i> <code>from_bytes</code>. <code>GroupControl::members</code> is <code>Vec&lt;Vec&lt;u8&gt;&gt;</code>, amplifying parse cost.</dd>
+    <dt>Impact</dt><dd>A peer that can deliver bytes (direct DM, DHT-mailbox drop, or group control) sends a multi-megabyte/gigabyte document; the receiver allocates it all — plus two further clones of <code>ct</code> — before any check runs. Memory pressure / OOM on the single tokio task that also runs all crypto: an event-loop-starving DoS that amplifies H3.</dd>
+    <dt>Fix</dt><dd>Set a conservative request-size maximum on both request-response protocols; reject any envelope exceeding a few hundred KiB before deserialization; cap <code>members</code>/<code>added</code>/<code>removed</code> lengths after parse.</dd>
+  </dl></div>
+</div>
+
+<h3>§10.3 — Medium-severity findings</h3>
+
+<div class="finding">
+  <div class="fh"><span class="fid">M1</span><span class="badge b-med">Medium</span><span class="ft"><code>process_pending</code> re-bootstraps a session per queued payload</span></div>
+  <div class="fb"><dl>
+    <dt>Location</dt><dd><code>core/node.rs:3228-3241</code></dd>
+    <dt>Issue</dt><dd>When a prekey response arrives, <code>process_pending</code> iterates every queued payload and may call <code>bootstrap_responder_and_decrypt</code> for each. Bootstrap is not idempotent — on a decrypt failure it removes the session without persisting, so the next payload bootstraps again. Queued payloads are in arrival order, not chain order.</dd>
+    <dt>Impact</dt><dd>A peer who pipelines several first-message-shaped envelopes before the prekey lands causes repeated session install/remove cycles and can land the session in a wrong state. Shares a root cause with H1.</dd>
+    <dt>Fix</dt><dd>Bootstrap the responder session exactly once per peer (identify the genuine first message by <code>pn==0 &amp;&amp; n==0</code>), persist it, then decrypt the remaining payloads against it.</dd>
+  </dl></div>
+</div>
+
+<div class="finding">
+  <div class="fh"><span class="fid">M2</span><span class="badge b-med">Medium</span><span class="ft">MembershipUpdate accepts any forward epoch jump &#8594; group membership freezes forever</span></div>
+  <div class="fb"><dl>
+    <dt>Location</dt><dd><code>core/node.rs:2150-2211</code></dd>
+    <dt>Issue</dt><dd>The MembershipUpdate verifier enforces <code>epoch &gt; stored</code> (monotonicity) but not <code>epoch == stored + 1</code> (continuity). Any strictly-greater epoch is accepted and the local epoch jumps to it.</dd>
+    <dt>Impact</dt><dd>One founder MembershipUpdate (malicious or buggy) with <code>epoch = stored + 1000</code> — or near <code>u64::MAX</code> — is accepted; every legitimately-issued later update then has a smaller epoch and is permanently rejected as stale. Membership management for that group is bricked on the receiving node.</dd>
+    <dt>Fix</dt><dd>Require <code>epoch == stored + 1</code>; reject both stale (<code>&lt;=</code>) and gapped (<code>&gt;</code>) updates. If offline catch-up needs gaps, cap the forward jump and buffer-and-order.</dd>
+  </dl></div>
+</div>
+
+<div class="finding">
+  <div class="fh"><span class="fid">M3</span><span class="badge b-med">Medium</span><span class="ft">MembershipUpdate can remove the founder &#8594; desyncs all receivers</span></div>
+  <div class="fb"><dl>
+    <dt>Location</dt><dd><code>core/node.rs:2150-2229</code></dd>
+    <dt>Issue</dt><dd>The MembershipUpdate arm applies the <code>removed</code> set without checking that it does not contain the group's own <code>founder_pid</code>.</dd>
+    <dt>Impact</dt><dd>A founder MembershipUpdate listing the founder in <code>removed</code> drops the founder from every receiver's <code>group_members</code> table while <code>groups.founder_pid</code> is unchanged. <code>process_group_message</code> then rejects the founder's own group messages and sender-key distributions as "from a non-member" — the group is desynced for everyone, recoverable only by re-creating it.</dd>
+    <dt>Fix</dt><dd>Reject (or filter) a MembershipUpdate whose <code>removed</code> set contains the founder PID — the founder cannot be removed by a membership update.</dd>
+  </dl></div>
+</div>
+
+<div class="finding">
+  <div class="fh"><span class="fid">M4</span><span class="badge b-med">Medium</span><span class="ft">Unauthenticated mailbox ACK lets any observer kill an offline delivery</span></div>
+  <div class="fb"><dl>
+    <dt>Location</dt><dd><code>core/node.rs:1682-1738</code>, <code>network/mailbox.rs:121-128</code></dd>
+    <dt>Issue</dt><dd>Mailbox ACK records are unauthenticated (acknowledged in INVARIANTS §21). The sender's republish loop retires a drop on <i>any</i> <code>FoundRecord</code> at <code>ack_kad_key</code> without validating it. <code>ack_kad_key = SHA-256(domain ‖ recipient ‖ sender ‖ slot)</code> — all values an on-path observer already sees.</dd>
+    <dt>Impact</dt><dd>Any third party who can compute the ACK key publishes a forged empty record there; the legitimate sender permanently stops republishing a real, undelivered drop. Once Kad's per-record TTL lapses the genuinely-offline recipient can never retrieve it — a silently-dropped end-to-end message.</dd>
+    <dt>Fix</dt><dd>Have the recipient Ed25519-sign the ACK (over <code>domain ‖ drop_kad_key</code>) and verify it before <code>mailbox_drop_ack</code>. At minimum, let an ACK only reduce republish frequency, never retire the local drop row.</dd>
+  </dl></div>
+</div>
+
+<div class="finding">
+  <div class="fh"><span class="fid">M5</span><span class="badge b-med">Medium</span><span class="ft">Kad query-tracking maps leak on the <code>Found*</code> result arms</span></div>
+  <div class="fb"><dl>
+    <dt>Location</dt><dd><code>core/node.rs:60-71</code> (fields), <code>:1582</code>/<code>:1610</code>/<code>:1626</code></dd>
+    <dt>Issue</dt><dd><code>pending_provider_queries</code> and <code>pending_record_queries</code> are removed only on the <code>Err</code> and <code>FinishedWithNoAdditionalRecord</code> arms; the <code>FoundProviders</code>/<code>FoundRecord</code> arms dispatch their work but never remove the <code>QueryId</code>. A query completing without the expected terminal variant leaks its entry.</dd>
+    <dt>Impact</dt><dd>Slow unbounded growth of two maps over process lifetime, proportional to mailbox poll/republish cycles and partly attacker-amplifiable. No GC path.</dd>
+    <dt>Fix</dt><dd>Remove the <code>QueryId</code> on the <code>Found*</code> arms once per-result work is dispatched, or age-sweep all three maps on the cleanup tick.</dd>
+  </dl></div>
+</div>
+
+<div class="finding">
+  <div class="fh"><span class="fid">M6</span><span class="badge b-med">Medium</span><span class="ft">Ratchet AEAD doesn't structurally bind peer IDs</span></div>
+  <div class="fb"><dl>
+    <dt>Location</dt><dd><code>crypto/ratchet.rs:421-464</code></dd>
+    <dt>Issue</dt><dd>INVARIANTS §6 requires the ratchet AEAD AD to be <code>ratchet_ad(sender, recipient) ‖ header</code>. <code>ratchet.rs</code> only appends the header; the peer-ID portion is whatever the caller passes. The crypto layer cannot enforce the invariant — it delegates it to every <code>node.rs</code> call site.</dd>
+    <dt>Impact</dt><dd>Current callers do pass <code>ratchet_ad</code>, so no live exploit. But any future path calling <code>encrypt</code>/<code>decrypt</code> with empty or inconsistent AD silently loses the cross-peer/cross-session binding §6 promises, with no compile-time or runtime error.</dd>
+    <dt>Fix</dt><dd>Make <code>encrypt</code>/<code>decrypt</code> take explicit <code>sender</code>/<code>recipient</code> parameters and build the length-prefixed peer-ID prefix internally, so the invariant is structurally impossible to violate.</dd>
+  </dl></div>
+</div>
+
+<div class="finding">
+  <div class="fh"><span class="fid">M7</span><span class="badge b-med">Medium</span><span class="ft"><code>RatchetState</code> root/chain keys not zeroized on drop</span></div>
+  <div class="fb"><dl>
+    <dt>Location</dt><dd><code>crypto/ratchet.rs:126-145</code>, <code>:394-415</code></dd>
+    <dt>Issue</dt><dd><code>RatchetState</code> holds <code>rk</code> (root key), <code>cks</code>, <code>ckr</code> as bare <code>[u8;32]</code> and neither derives <code>ZeroizeOnDrop</code> nor impls <code>Drop</code>; it is also <code>Clone</code>. <code>kdf_ck</code> returns owned message keys dropped after the AEAD call without zeroization. <code>SkippedKey</code> <i>is</i> <code>ZeroizeOnDrop</code> — the discipline is applied inconsistently.</dd>
+    <dt>Impact</dt><dd>A process memory dump (core dump, swap, debugger) recovers the root and chain keys of every live session. With <code>rk</code> plus the peer's next DH pubkey an attacker derives all subsequent message keys — total loss of forward secrecy from the dump point. CRYPTO.md §14 claims <code>zeroize</code> is used for exactly this.</dd>
+    <dt>Fix</dt><dd>Make <code>RatchetState</code> <code>ZeroizeOnDrop</code>; wrap <code>rk</code>/<code>cks</code>/<code>ckr</code> in <code>Zeroizing</code>; zeroize message keys after the AEAD call; scrutinise the <code>Clone</code> derive.</dd>
+  </dl></div>
+</div>
+
+<div class="finding">
+  <div class="fh"><span class="fid">M8</span><span class="badge b-med">Medium</span><span class="ft">DEK left in unzeroized <code>String</code>/<code>Vec</code> copies after load</span></div>
+  <div class="fb"><dl>
+    <dt>Location</dt><dd><code>crypto/keyring.rs:49-68</code></dd>
+    <dt>Issue</dt><dd><code>load_or_create_dek</code> reads the DEK as a hex <code>String</code> from the keyring, hex-decodes it into a <code>Vec&lt;u8&gt;</code>, copies into <code>[u8;32]</code>, and returns — none of the intermediates (nor the hex string in the create path) is zeroized.</dd>
+    <dt>Impact</dt><dd>The master key for all at-rest encryption leaves up to three unzeroized copies (raw + hex) in process memory. A memory dump or swap leak then compromises every at-rest blob — ratchet sessions, OTPK privates, stored plaintext, outbox.</dd>
+    <dt>Fix</dt><dd>Use <code>Zeroizing&lt;String&gt;</code>/<code>Zeroizing&lt;Vec&lt;u8&gt;&gt;</code> for every intermediate; zeroize the hex string after <code>set_password</code>; consider returning <code>Zeroizing&lt;[u8;32]&gt;</code>.</dd>
+  </dl></div>
+</div>
+
+<div class="finding">
+  <div class="fh"><span class="fid">M9</span><span class="badge b-med">Medium</span><span class="ft">ScrambleStream read path doesn't bound the descrambled frame length</span></div>
+  <div class="fb"><dl>
+    <dt>Location</dt><dd><code>network/scramble.rs:310-355</code></dd>
+    <dt>Issue</dt><dd>The descrambled 16-bit frame-length header is fully attacker/keystream-determined. The read path trusts <code>payload_len</code> up to 65535 with no check against <code>MAX_PAYLOAD_PER_FRAME</code> (1022) — the {256,512,768,1024} frame-size invariant (INVARIANTS §17) is enforced only on the write side.</dd>
+    <dt>Impact</dt><dd>A malformed/hostile peer at the obfs layer makes the receiver perform large reads and keystream work on garbage per bogus frame. Not catastrophic (Noise above still fails to authenticate) but a wasted-work amplification vector and a latent correctness gap.</dd>
+    <dt>Fix</dt><dd>On the <code>NeedHeader</code>&#8594;<code>InBody</code> transition, reject <code>payload_len &gt; MAX_PAYLOAD_PER_FRAME</code> with <code>InvalidData</code>.</dd>
+  </dl></div>
+</div>
+
+<div class="finding">
+  <div class="fh"><span class="fid">M10</span><span class="badge b-med">Medium</span><span class="ft"><code>ScrambleStream::new</code> is <code>pub</code> and builds a two-time-pad stream</span></div>
+  <div class="fb"><dl>
+    <dt>Location</dt><dd><code>network/scramble.rs:226-255</code></dd>
+    <dt>Issue</dt><dd><code>ScrambleStream::new</code> is <code>pub</code> and constructs the stream with identical <code>(key, nonce)</code> for both directions — a two-time-pad. The doc says "unidirectional tests only" but nothing enforces it; the production path correctly uses <code>derive_ntor_keystream_pairs</code>.</dd>
+    <dt>Impact</dt><dd>A future caller wiring <code>ScrambleStream::new</code> into a real bidirectional connection silently reintroduces audit finding F1 (XOR of the two directions reveals XOR of plaintexts). The compiler will not catch it.</dd>
+    <dt>Fix</dt><dd>Make <code>ScrambleStream::new</code> <code>#[cfg(test)]</code>-only or <code>pub(crate)</code>+<code>#[doc(hidden)]</code>, or derive two distinct nonces so even the convenience path can't two-time-pad.</dd>
+  </dl></div>
+</div>
+
+<div class="finding">
+  <div class="fh"><span class="fid">M11</span><span class="badge b-med">Medium</span><span class="ft">At-rest AEAD uses empty AAD &#8594; disk attacker can graft/rollback blobs</span></div>
+  <div class="fb"><dl>
+    <dt>Location</dt><dd><code>storage/store.rs:417-462</code></dd>
+    <dt>Issue</dt><dd><code>encrypt_at_rest</code> passes empty AAD (documented in INVARIANTS §11). The version byte and nonce don't bind row identity (<code>peer_id</code>, <code>group_id</code>, rowid) either.</dd>
+    <dt>Impact</dt><dd>An attacker with <i>write</i> access to <code>messages.db</code> can swap blobs between rows — move a ratchet <code>state_blob</code> into another peer's row, or replay an old <code>state_blob</code> to roll a ratchet backward — and the AEAD tag still verifies (keyed only by the DEK). The OTPK replay gate and ratchet rollback resistance partly rest on DB integrity the AEAD doesn't provide. Outside the stated v1 threat model, but worth closing.</dd>
+    <dt>Fix</dt><dd>Bind the row's stable key into the AAD (<code>aad = table_tag ‖ peer_id/group_id</code>); bump <code>AT_REST_VERSION</code> to 2 with a v1-read path.</dd>
+  </dl></div>
+</div>
+
+<h3>§10.4 — Low-severity findings</h3>
+<table>
+  <tr><th>ID</th><th>Finding</th><th>Location</th><th>Issue &amp; recommendation</th></tr>
+  <tr><td>L1</td><td>Skipped-key cache poisoning</td><td class="n"><code>ratchet.rs:289-301</code></td><td><code>try_skipped</code> removes the cached <code>SkippedKey</code> before attempting AEAD decrypt and doesn't restore it on failure. An attacker injecting a valid-header/corrupt-body ciphertext evicts the real message key; the genuine out-of-order message can then never be decrypted. <b>Fix:</b> decrypt first, remove only on AEAD success — the verify-before-mutate order Megolm already uses.</td></tr>
+  <tr><td>L2</td><td>Stale SenderKeyDistribution accepted</td><td class="n"><code>node.rs:2230-2270</code></td><td>The SenderKeyDistribution arm never reads the bundle's <code>epoch</code> field, so a replayed pre-rotation bundle overwrites a rotated <code>ReceiverChain</code>, re-enabling decryption with material a removed member may hold (weakens INVARIANTS §26). <b>Fix:</b> reject a distribution whose epoch/index is behind the installed chain; persist the epoch with the row.</td></tr>
+  <tr><td>L3</td><td><code>is_expired()</code> overflow / clock panic</td><td class="n"><code>message.rs:391,443</code></td><td><code>is_expired()</code> computes <code>timestamp + ttl</code> with no overflow guard on attacker-controlled <code>i64</code> fields (debug: panic; release: wraps, defeating the F5 replay/expiry check). <code>current_timestamp()</code> <code>.unwrap()</code>s <code>duration_since</code> and panics on a pre-1970 clock. <b>Fix:</b> <code>saturating_add</code>; reject implausible <code>timestamp</code>/<code>ttl</code> at parse; <code>unwrap_or_default()</code>.</td></tr>
+  <tr><td>L4</td><td>Sealed-unseal CPU DoS</td><td class="n"><code>node.rs:1772-1783</code></td><td>Every inbound envelope with a non-empty <code>sealed_sender</code> triggers a full X25519 DH + HKDF + AEAD before any cheap rejection, all on the event-loop thread. A connected peer floods sealed envelopes to starve real processing. <b>Fix:</b> per-transport-peer inbound rate limiter (token bucket) before the unseal/verify work.</td></tr>
+  <tr><td>L5</td><td>Tauri command size bounds missing</td><td class="n"><code>gui/app.rs:231-302</code></td><td><code>create_group</code>/<code>send_message</code>/<code>send_group_message</code> accept arbitrary-length <code>name</code>/<code>content</code> and unbounded <code>members</code> lists, flowing into signed control messages and per-member fan-out. The webview is in the trust boundary, so robustness rather than a privilege break. <b>Fix:</b> bound <code>name</code>, <code>content</code> and <code>members.len()</code> in the handlers.</td></tr>
+  <tr><td>L6</td><td>Megolm index <code>wrapping_add</code></td><td class="n"><code>megolm.rs:282-302</code></td><td>The chain index advances with <code>wrapping_add</code>; a malicious <code>SenderKeyBundle</code> can set the index to <code>u32::MAX</code>, and a message at that index rolls <code>next_index</code> over to 0, causing chain-state confusion / denial of decryption for that sender. <b>Fix:</b> use <code>checked_add</code> with a dedicated error; validate <code>bundle.index</code> against a ceiling.</td></tr>
+  <tr><td>L7</td><td>Group chain keys not zeroized</td><td class="n"><code>megolm.rs:90,207</code></td><td><code>SenderKeyBundle.chain_key</code> and <code>ReceiverChain.chain_key</code> are plain <code>[u8;32]</code> never zeroized (<code>ReceiverChain</code> opts out of <code>ZeroizeOnDrop</code> citing <code>VecDeque</code>). A memory dump recovers the symmetric key for every group chain. <b>Fix:</b> wrap the scalar <code>chain_key</code> fields in <code>Zeroizing</code>, or impl <code>Drop</code>.</td></tr>
+  <tr><td>L8</td><td>Sealed-sender empty AAD</td><td class="n"><code>sealed.rs:88-139</code></td><td>The seal AEAD uses empty AAD, so the recipient is not bound at the seal layer; a captured <code>sealed_sender</code> blob could be lifted onto an envelope addressed elsewhere (caught today only by the inner Ed25519 signature one layer up). <b>Fix:</b> pass the recipient's X25519 pubkey as the AEAD AAD — zero wire cost.</td></tr>
+  <tr><td>L9</td><td>NTOR low-order check incomplete</td><td class="n"><code>scramble.rs:623-639</code></td><td>The handshake rejects only an all-zero shared secret, catching the order-1/2 collapse but not the full small-order subgroup. Impact is limited because <code>obfs_key</code> is also folded into the HKDF. <b>Fix:</b> check the full small-order DH-output set, or reject small-order Montgomery points before the DH.</td></tr>
+  <tr><td>L10</td><td><code>pop_unused_otpk</code> burns OTPK on bad row</td><td class="n"><code>store.rs:690-726</code></td><td><code>UPDATE … RETURNING</code> marks the row served before the closure runs; a malformed pubkey/sig blob makes the function return <code>Err</code> with the OTPK already consumed and lost from the pool (inconsistent with <code>load_prekey</code>, which treats wrong-width rows as <code>Ok(None)</code>). <b>Fix:</b> on a malformed row, warn and pop the next, or return <code>Ok(None)</code> for graceful 2-DH fallback.</td></tr>
+  <tr><td>L11</td><td>F12 migration not transactional</td><td class="n"><code>store.rs:236-255</code></td><td>The F12 re-tag loop reads rows, issues one <code>UPDATE</code> each, then sets <code>PRAGMA user_version = 1</code>, all auto-committed separately. A crash mid-migration leaves rows half-tagged; a retry either orphans un-tagged rows or double-tags already-migrated ones. <b>Fix:</b> wrap read + updates + version bump in a single transaction.</td></tr>
+  <tr><td>L12</td><td><code>u32</code> length-cast truncation</td><td class="n"><code>megolm.rs:343,group.rs:109</code></td><td>Canonical-bytes builders cast <code>usize</code> lengths to <code>u32</code> with <code>as</code>; a &gt;4&nbsp;GiB attacker-influenced ciphertext truncates the length prefix and breaks the canonical-encoding non-ambiguity property (the signature still fails, so no forgery). <b>Fix:</b> reject oversized blobs at deserialization; use <code>u32::try_from</code>.</td></tr>
+</table>
+
+<h3>§10.5 — Informational findings</h3>
+<table>
+  <tr><th>ID</th><th>Finding</th><th>Location</th><th>Note</th></tr>
+  <tr><td>I1</td><td>Low-order check overstated</td><td class="n"><code>sealed.rs:80-127</code></td><td>The all-zero shared-secret check is framed as a "low-order pubkey defence" but covers only part of the small-order set; on the sender side a zero result only indicates a misconfigured recipient. No concrete impact — reframe as a sanity check or do full small-order rejection.</td></tr>
+  <tr><td>I2</td><td>Sealed ephemeral not zeroized</td><td class="n"><code>sealed.rs:73</code></td><td><code>seal_sender_cert</code> builds <code>eph_priv_bytes</code> via <code>OsRng.fill_bytes</code> then <code>StaticSecret::from(...)</code>; the raw array is never zeroized, leaving a per-message ephemeral private in memory. Zeroize it, or use <code>StaticSecret::random_from_rng</code>.</td></tr>
+  <tr><td>I3</td><td><code>try_skipped</code> key scope</td><td class="n"><code>ratchet.rs:294-297</code></td><td>The skipped-key lookup keys on <code>(dh_pub, n)</code> only; uniqueness rests entirely on the sender never reusing a DH ratchet key. Benign under a correct sender; becomes fully benign once L1 is fixed.</td></tr>
+  <tr><td>I4</td><td>Sealed envelope <code>from</code>-field hygiene</td><td class="n"><code>message.rs:278</code></td><td><code>is_sealed()</code> is <code>!sealed_sender.is_empty()</code>; a <code>ProtocolMessage</code> may carry both a non-empty <code>from</code>/<code>signature</code> and a non-empty <code>sealed_sender</code>. No exploit (inner signature still authenticates) but the wire format permits an ambiguous envelope the docs assume impossible. Reject hybrids.</td></tr>
+  <tr><td>I5</td><td>Ratchet AAD fixed-width reliance</td><td class="n"><code>ratchet.rs:421-440</code></td><td><code>combined_ad = ad ‖ header</code> is unambiguous only because the header portion is fixed 40 bytes; a future variable-length header field would silently make it ambiguous. Document the invariant or length-prefix the header portion.</td></tr>
+  <tr><td>I6</td><td>Group <code>epoch</code> u64↔i64 pun</td><td class="n"><code>store.rs:1085,1387</code></td><td>Group epoch is stored <code>epoch as i64</code> and read back <code>i64 as u64</code>; the round-trip is bit-preserving but any future SQL <code>ORDER BY</code>/comparison on <code>epoch</code> would mis-sort the high range. Document the pun, or store as <code>TEXT</code>/<code>BLOB</code> if a comparison is ever needed.</td></tr>
+  <tr><td>I7</td><td><code>decrypt_at_rest</code> no upper bound</td><td class="n"><code>store.rs:450-453</code></td><td>The length check has a lower bound but no upper bound; a 4&nbsp;GiB blob row would be fully read into memory before AEAD fails. Blobs are written only by this codebase, so informational — optionally cap blob size if untrusted DB files are ever a concern.</td></tr>
+</table>
+
+<h3>§10.6 — Strengths confirmed by the review</h3>
+<ul class="tight">
+  <li><b>Domain separation is thorough and complete.</b> Every distinct KDF/signature context has its own separator; the cross-protocol replay class (INVARIANTS §1) is closed and actively test-pinned.</li>
+  <li><b>The §2 transport-peer&#8596;signed-sender cross-check is correct</b> — correctly skipped for sealed envelopes, and correctly ordered (verify &#8594; cross-check &#8594; expiry &#8594; decrypt).</li>
+  <li><b>Megolm verify-before-mutate is correct</b> — the Ed25519 signature is checked before any skipped-cache or chain mutation; a forged signature is a no-op on chain state.</li>
+  <li><b>The OTPK three-state lifecycle</b> (<code>served_at</code> vs <code>consumed_at</code>) is carefully reasoned; atomic <code>UPDATE … RETURNING</code> gives single-use and the F3 replay gate holds.</li>
+  <li><b>SQL is uniformly parameterised</b> — no string-interpolated queries anywhere in the storage layer.</li>
+  <li><b>Wire parsers are bounds-checked</b> — <code>pop_bytes</code>, <code>extract_inline_pubkey</code>, <code>group_row_from_db</code> and the Megolm signature <code>try_into</code> all reject malformed input instead of panicking.</li>
+  <li><b>The ScrambleStream F1 fix is real</b> — <code>derive_ntor_keystream_pairs</code> derives genuinely independent per-direction keystreams; <code>generate_representable_keypair</code> has a hard 64-attempt cap.</li>
+  <li><b>At-rest encryption is genuinely verified</b> — the <code>*_is_encrypted_at_rest</code> tests scan raw on-disk bytes; <code>wrong_dek_fails_to_decrypt</code> confirms the failure path.</li>
+  <li><b>No plaintext in <code>info!</code>/<code>warn!</code> logs</b> — message plaintext is consistently at <code>debug!</code> (INVARIANTS §19 holds).</li>
+  <li><b>Bounded skipped-key caches</b> — both the ratchet and Megolm cap <code>n_to_skip + skipped.len()</code> before the derive loop with saturating arithmetic.</li>
+  <li><b>The keyring is fail-loud</b> — an unreachable keyring warns and uses an ephemeral DEK rather than silently dropping to plaintext-at-rest.</li>
+  <li><b><code>escapeHtml</code> is correct and applied in every render path except the one flagged in H4</b> — which is exactly why H4 is a real bug rather than a systemic gap.</li>
+</ul>
+
+<h2>§11 — Conclusions &amp; Remediation Priority</h2>
+<p>The audit found <b>no Critical issues</b> and confirmed the cryptographic foundations: there is no
+nonce/IV reuse, no missing domain separator, no signature-verification bypass, and no key reuse in
+the handshake or ratchet. The primitives and their composition are sound. The 5 High and 11 Medium
+findings cluster into three themes:</p>
+<ul class="tight">
+  <li><b>Session-state integrity (H1, H2, M1).</b> A single root cause — the receive path conflates
+      "no session", "DB error" and "corrupt blob" into one boolean, and responder bootstrap is not
+      idempotent against a successfully-decrypting stale first message. This is the most important
+      cluster: in the field it would most likely be mis-diagnosed as a "flaky session" bug.</li>
+  <li><b>Resource exhaustion (H3, H5, M5, L4).</b> Several unauthenticated-cost remote DoS vectors —
+      unbounded <code>pending_*</code> maps, unbounded inbound message size, leaking Kad query maps,
+      and per-message X25519 on the single event-loop thread.</li>
+  <li><b>Webview compromise (H4).</b> A remotely-triggerable stored XSS that, because the webview
+      holds the Tauri <code>invoke</code> bridge, escalates to full command execution.</li>
+</ul>
+<p>The Medium tier is otherwise dominated by group-chat control-plane gaps (M2, M3) and
+memory-hygiene / zeroization gaps (M6–M8) — consistent with the project's own note that the
+group-chat track and its invariants §24–§26 post-date the last self-audit. Notably, this review
+<b>re-rates the project's own deferred finding F4</b> (unbounded <code>pending_recvs</code>) from
+"Low — noise only" to <b>High</b>.</p>
+
+<div class="panel warn">
+<b>Recommended remediation order.</b>
+(1) <b>H4</b> and <b>H5</b> first — remotely triggerable, small well-scoped fixes.
+(2) <b>H1 / H2 / M1</b> as one coordinated change to the session-restore logic (three-state result + idempotent bootstrap).
+(3) <b>H3</b> and the resource-exhaustion tier (M5, L4) — bounds, caps and TTL eviction.
+(4) The zeroization cluster (M7, M8, L7, I2) — mechanical, low-risk.
+(5) The group-chat control-plane fixes (M2, M3, L2) and the remaining Low/Informational items.
+None of the findings breaks the core end-to-end-encryption guarantee, but <b>all five High findings
+should be closed before any external audit or release.</b>
+</div>
+
+<div class="foot">
+ZeroCenter Messenger — In-Depth Analysis &amp; Code Audit · main @ aa48e40 · 12,131 LOC / 25 files ·
+Part A (Analysis §1–§9) + Part B (Audit §10–§11) · 35 findings: 0 Critical / 5 High / 11 Medium /
+12 Low / 7 Informational · generated 2026-05-23.
+</div>
+
+<div class="foot">
+ZeroCenter Messenger — In-Depth Analysis &amp; Code Audit · generated 2026-05-22 · main @ aa48e40 ·
+Part A (Analysis) complete; Part B (Audit) pending subsystem reviews.
+</div>
+
+</div>
+</body>
+</html>
