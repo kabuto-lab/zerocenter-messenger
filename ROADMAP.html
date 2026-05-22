@@ -57,7 +57,7 @@
 <body>
 <div class="wrap">
 
-<h1>ZeroCenter Messenger — Roadmap <small>updated 2026-05-20</small></h1>
+<h1>ZeroCenter Messenger — Roadmap <small>updated 2026-05-22</small></h1>
 <div class="sub">Censorship-resistant, zero-trust, leaderless P2P messenger. Rust + libp2p 0.53.
   Source of truth is <span class="kbd">plans/ROADMAP.md</span>; this page is a visual snapshot of it.</div>
 
@@ -162,8 +162,6 @@
     <code>consumed_at</code> (set after a successful first-decrypt — the F3 replay gate). Migrates pre-fix
     DBs via <code>ALTER TABLE</code> + backfill. The F3 unit test that encoded the bug was replaced with a
     full serve → load → consume lifecycle test.</li>
-  <li class="inprog"><b>Branch <code>fix/otpk-serve-consume-lifecycle</code> awaits merge.</b>
-    Commit b365be4 is not yet on <code>main</code> — merge it or open a PR before the next release tag.</li>
   <li class="todo"><b>Codebase has not had an external audit.</b> Phase 3-5 implement known-good algorithms
     (Signal Double Ratchet, X3DH-lite, Megolm-style sender chains, vetted primitives) but the integration
     is hand-rolled. Treat as research-grade until third-party review.</li>
