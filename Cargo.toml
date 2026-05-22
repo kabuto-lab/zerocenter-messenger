@@ -96,7 +96,14 @@ bs58 = "0.5"
 
 # Phase 4 — Tauri 2.x webview frontend. Optional; pulled in only by
 # the `gui` feature so the default headless CLI build stays slim.
-tauri = { version = "2", optional = true }
+#
+# `custom-protocol` is REQUIRED on release builds via plain `cargo build`.
+# Without it `tauri/build.rs` sets `cfg(dev)` regardless of cargo profile,
+# and `generate_context!()` embeds the `devUrl` (localhost:1420) instead
+# of the `frontendDist` assets — the webview then fails with
+# ERR_CONNECTION_REFUSED. `cargo tauri build` would enable this feature
+# automatically; we don't use that CLI, so we set it explicitly.
+tauri = { version = "2", optional = true, features = ["custom-protocol"] }
 
 [build-dependencies]
 # `tauri-build` runs at build time when `gui` is on; it parses
