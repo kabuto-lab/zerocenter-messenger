@@ -61,6 +61,18 @@
             color: var(--text-secondary);
             margin-top: 5px;
             font-family: monospace;
+            cursor: pointer;
+            padding: 3px 6px;
+            margin-left: -6px;
+            border-radius: 4px;
+            transition: background 0.15s, color 0.15s;
+            user-select: none;
+        }
+        .peer-id:hover {
+            background: rgba(255, 255, 255, 0.06);
+        }
+        .peer-id.copied {
+            color: #3fb950;
         }
 
         .contacts-list {
@@ -386,7 +398,7 @@
         <div class="sidebar">
             <div class="sidebar-header">
                 <h1>📡 ZeroCenter</h1>
-                <div class="peer-id" id="peerId">Loading...</div>
+                <div class="peer-id" id="peerId" title="Нажмите, чтобы скопировать ваш полный PeerId">Loading...</div>
             </div>
             
             <div class="contacts-list" id="contactsList">
@@ -507,7 +519,29 @@
         async function init() {
             try {
                 const peerId = await invoke('get_peer_id');
-                document.getElementById('peerId').textContent = `ID: ${peerId.slice(0, 16)}...`;
+                const peerIdEl = document.getElementById('peerId');
+                const shortLabel = `ID: ${peerId.slice(0, 16)}…`;
+                peerIdEl.textContent = shortLabel;
+                peerIdEl.title = `${peerId}\n(нажмите, чтобы скопировать)`;
+                peerIdEl.addEventListener('click', async () => {
+                    try {
+                        await navigator.clipboard.writeText(peerId);
+                    } catch (e) {
+                        // Fallback for older webview: select + execCommand.
+                        const ta = document.createElement('textarea');
+                        ta.value = peerId;
+                        ta.style.position = 'fixed'; ta.style.opacity = '0';
+                        document.body.appendChild(ta); ta.select();
+                        try { document.execCommand('copy'); } catch (_) {}
+                        document.body.removeChild(ta);
+                    }
+                    peerIdEl.textContent = '✓ Скопировано';
+                    peerIdEl.classList.add('copied');
+                    setTimeout(() => {
+                        peerIdEl.textContent = shortLabel;
+                        peerIdEl.classList.remove('copied');
+                    }, 1200);
+                });
             } catch (error) {
                 document.getElementById('peerId').textContent = 'Error loading ID';
                 console.error(error);
