@@ -1,6 +1,6 @@
 # ZeroCenter Messenger — Roadmap
 
-Living document tracking what's done, what's in flight, and what's queued. Last refreshed 2026-05-22 (`tauri.conf.json` `withGlobalTauri` fix; OTPK serve/consume branch confirmed merged into `main`).
+Living document tracking what's done, what's in flight, and what's queued. Last refreshed 2026-05-22 (F12 — `outbox.peer_id` HMAC-tagged at rest; `tauri.conf.json` `withGlobalTauri` fix).
 
 ## Status snapshot
 
@@ -25,12 +25,12 @@ Living document tracking what's done, what's in flight, and what's queued. Last 
 | Mailbox encrypt-once (Phase 5) | ✅ same ciphertext bytes shared between outbox and DHT-mailbox drop |
 | Mailbox ACK loop (Phase 5) | ✅ recipient publishes empty ack record; sender skips republish |
 | OTPK rotation under load (Phase 5) | ✅ per-peer 60s cooldown + pool target bumped 20→100 |
-| Self-audit pass (12 findings, 6 actioned) | ✅ `audit/SELF_AUDIT.md` |
+| Self-audit pass (12 findings, 7 actioned) | ✅ `audit/SELF_AUDIT.md` |
 | External security audit | ❌ not started; `audit/` pack ready for reviewer (self-audit done) |
 | Group chats (Megolm-style, founder-signed) | ✅ full 8-commit track shipped: storage + Megolm crypto + GroupControl wire + send/receive fan-out + CLI + membership rotation + Tauri GUI + audit pack |
 | Deniability | ❌ (intentional non-deniability for v1) |
 
-Build: rustc 1.95 / cargo 1.95 / VS Build Tools. `cargo test --lib`: **117/117** on default features (`--features gui` matches). `cargo build --release` (default, headless CLI) produces a ~9.27 MB `zerocenter.exe`; `cargo build --release --features gui` additionally pulls Tauri 2.x and its webview2 toolchain (Windows). The tracked in-tree `zerocenter.exe` is the default build — the GUI artefact is significantly larger and isn't checked in.
+Build: rustc 1.95 / cargo 1.95 / VS Build Tools. `cargo test --lib`: **119/119** on default features (`--features gui` matches). `cargo build --release` (default, headless CLI) produces a ~9.27 MB `zerocenter.exe`; `cargo build --release --features gui` additionally pulls Tauri 2.x and its webview2 toolchain (Windows). The tracked in-tree `zerocenter.exe` is the default build — the GUI artefact is significantly larger and isn't checked in.
 
 ## Done — chronological commits
 
@@ -38,6 +38,8 @@ Most recent first.
 
 | Commit | Title | What it shipped |
 |---|---|---|
+| 74328e7 | feat(storage): F12 — HMAC the outbox.peer_id column under the DEK | Self-audit finding F12 actioned. The persistent outbox stored the recipient PeerId in the clear in `outbox.peer_id`; message bodies were AEAD-encrypted at rest but a disk-read attacker without the OS-keyring DEK could still enumerate who had mail queued. The column now holds `HMAC-SHA256(DEK, "zerocenter-outbox-peer-v1" \|\| peer_id)` via the new `outbox_peer_tag` helper — keyed by the DEK so the mapping is opaque without the keyring, deterministic so the by-peer equality lookup and `idx_outbox_peer` index are unchanged, one-way (sufficient: `drain_outbox_for` always already holds the `PeerId`). A `PRAGMA user_version` gate re-tags pre-F12 rows once on first open. Two outbox tests adjusted, two added; 119/119 on default and `--features gui`. `SELF_AUDIT.md` F12 marked ACTIONED. |
+| 4694498 | fix(gui): enable withGlobalTauri so the frontend event API resolves | `dist/index.html` drives push-refresh through `window.__TAURI__.event` (the `listen('dm-received')` / `listen('group-msg-received')` handlers from 4a52acc + d1556c1). Without `"withGlobalTauri": true` in `tauri.conf.json` that global is never injected, so the listeners throw at load and live refresh silently breaks — the user is back to re-opening a chat to see new messages. Also corrected two stale roadmap claims: b365be4 is on `main` as of 52d4744, not "awaiting merge". |
 | b365be4 | fix(prekey): separate OTPK served/consumed states — first DM was unconditionally dropped | Found during live two-node DM testing. The audit-F3 fix (835c299) gated `load_otpk_private` on `consumed_at IS NULL`, but `pop_unused_otpk` sets `consumed_at` at *serve* time — so the private OTPK was refused for the very first legitimate responder X3DH, and every 3-DH first message was dropped with `OTPK id=N not found in our store`, permanently desyncing the session. Fix splits the lifecycle into two columns: `served_at` (set on pop; blocks re-serving the same OTPK) and `consumed_at` (set by the new `mark_otpk_consumed` after a successful first-decrypt — the F3 replay gate). `load_otpk_private` now gates on `consumed_at` only, so a served-but-not-spent OTPK still loads. Idempotent `ALTER TABLE` + `served_at` backfill migrates pre-fix DBs. The F3 unit test (which encoded the buggy behaviour) was replaced with a full serve→load→consume lifecycle test. Merged into `main` (now at `52d4744`); 117/117. |
 | 5794f82 | docs(audit): Phase 5 group-chat audit pack — INVARIANTS §24-§26, CRYPTO §12, threat model J | Audit pack refreshed for the group-chat track. New INVARIANTS §24 (per-message Ed25519 cross-member impersonation defence), §25 (founder authority + epoch monotonicity), §26 (rotation FS semantics, best-effort not retroactive). New CRYPTO.md §12 (Megolm sender chains, 8 sub-sections). THREAT_MODEL gained section J (compromised group member). README test count refreshed, source tree + suggested-review-order expanded. Pure docs, no code changes. |
 | d1556c1 | feat(groups): Phase 5 GUI surface for groups + group-msg push-refresh | Two new DTOs (`GroupDto`, `GroupMessageDto`) + two query NodeCommands (`QueryGroups`, `QueryGroupMessages`). Seven new Tauri commands wired (`get_groups`, `get_group_messages`, `create_group`, `send_group_message`, `add_group_member`, `remove_group_member`, `leave_group`). Frontend `dist/index.html` gained a Groups sidebar section, mode-aware chat view (contact vs group), three new modals (Create Group / Add Member / Remove Member), per-mode chat-header controls (founder-only Add/Remove + Leave), and a `listen('group-msg-received')` listener that refreshes the open group conversation. `escapeHtml` added wherever user-controlled strings interpolate into innerHTML. |
@@ -89,7 +91,7 @@ _None._ The Phase 5 group-chats track (94710ba → 5794f82) completed 2026-05-19
 ### Audit-flagged debt deferred from the self-pass
 
 - **F4** — `pending_recvs` unbounded duplicates during prekey-fetch window. Low severity, noise only. Cap queue + dedupe by ciphertext hash. ~30 LOC.
-- **F12** — `outbox.peer_id` plaintext on disk. Defense-in-depth gap. HMAC the column under the local DEK. ~50 LOC + migration.
+- **F12** — `outbox.peer_id` plaintext on disk. ✅ **Actioned** in `74328e7` — the column is now an HMAC tag under the DEK.
 
 ## Known debt (not phase-tagged)
 

@@ -63,7 +63,7 @@
 
 <div class="progress" title="implementation completeness — external audit not counted"><div style="width: 98%"></div></div>
 <div class="sub">Phases 1 → 5 implemented and test-green. Outstanding: external security audit (needs a third party)
-  and deniability (intentionally deferred for v1). <span class="kbd">cargo test --lib</span>: <b>117 / 117</b>.</div>
+  and deniability (intentionally deferred for v1). <span class="kbd">cargo test --lib</span>: <b>119 / 119</b>.</div>
 
 <h2>Phase 1 — Foundations <span class="pill done">Done</span></h2>
 <table>
@@ -138,7 +138,7 @@
   <tr><td>Group chats (Megolm-style, founder-signed)</td><td class="s"><span class="badge done">done</span></td>
       <td>8-commit track: storage + Megolm sender chains + GroupControl wire + send/receive fan-out + CLI + membership rotation (forward secrecy on remove/leave) + Tauri GUI + audit pack.</td></tr>
   <tr><td>Self-audit pass</td><td class="s"><span class="badge done">done</span></td>
-      <td>12 findings, 6 actioned. <span class="kbd">audit/SELF_AUDIT.md</span>. (Predates the group-chat track — §24-§26 not yet self-audited.)</td></tr>
+      <td>12 findings, 7 actioned. <span class="kbd">audit/SELF_AUDIT.md</span>. (Predates the group-chat track — §24-§26 not yet self-audited.)</td></tr>
   <tr><td>OTPK serve/consume regression fix</td><td class="s"><span class="badge done">done</span></td>
       <td><b>2026-05-20</b> — see "Where we are right now" below.</td></tr>
   <tr><td>External security audit</td><td class="s"><span class="badge todo">todo</span></td>
@@ -151,7 +151,15 @@
 <div class="commit-list">
   <li class="done"><b>Phases 1 → 5 are implemented and test-green.</b> Transport, E2EE, at-rest hardening,
     obfuscation, DHT mailbox, sealed sender, and Megolm-style group chats are all on disk with unit-test
-    and audit-pack coverage. <span class="kbd">cargo test --lib</span>: 117 / 117.</li>
+    and audit-pack coverage. <span class="kbd">cargo test --lib</span>: 119 / 119.</li>
+  <li class="done"><b>F12 (self-audit) actioned — outbox.peer_id no longer plaintext at rest.</b>
+    <span class="tag">commit 74328e7</span><br>
+    The persistent outbox stored the recipient PeerId in the clear, so a disk-read attacker without the
+    OS-keyring DEK could enumerate who had mail queued even though the message body was encrypted. The
+    column now holds <code>HMAC-SHA256(DEK, "zerocenter-outbox-peer-v1" || peer_id)</code> — deterministic,
+    so the by-peer lookup and <code>idx_outbox_peer</code> index are unchanged; one-way, which is enough
+    since the drain path always already holds the PeerId. A <code>PRAGMA user_version</code> gate re-tags
+    pre-F12 rows once on first open.</li>
   <li class="warn"><b>OTPK serve/consume regression — found in live DM testing, fixed 2026-05-20</b>
     <span class="tag">commit b365be4</span><br>
     The audit-F3 fix (835c299) gated <code>load_otpk_private</code> on <code>consumed_at IS NULL</code>, but
@@ -178,7 +186,7 @@
   <li class="todo"><b>Group-chats v1 polish.</b> Prekey-fetch onboarding for new joiners (currently
     warn-and-skip), a founder-key rotation primitive, no-op leave on an absent group.</li>
   <li class="todo"><b>Audit-flagged debt.</b> F4 — bound <span class="kbd">pending_recvs</span> duplicates
-    (~30 LOC). F12 — HMAC the plaintext <span class="kbd">outbox.peer_id</span> column (~50 LOC + migration).</li>
+    (~30 LOC). <i>(F12 — HMAC the <span class="kbd">outbox.peer_id</span> column — done in 74328e7.)</i></li>
   <li class="todo"><b>Re-test QUIC.</b> The <span class="kbd">ring</span>-on-MSVC blocker may already be
     obsolete; re-enable the <span class="kbd">quic</span> feature and run a two-peer smoke.</li>
   <li class="todo"><b>Real branded icon</b> to replace the 1150-byte placeholder at
