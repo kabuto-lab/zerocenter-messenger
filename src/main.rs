@@ -2,9 +2,9 @@ use anyhow::Result;
 use std::path::PathBuf;
 use tokio::sync::mpsc;
 use tracing::{info, error};
-use zerocenter_messenger::core::{Config, GuiEvent, Identity, P2PNode, NodeCommand};
-use zerocenter_messenger::cli::Cli;
-use zerocenter_messenger::crypto::keyring as zc_keyring;
+use ME55_messenger::core::{Config, GuiEvent, Identity, P2PNode, NodeCommand};
+use ME55_messenger::cli::Cli;
+use ME55_messenger::crypto::keyring as me55_keyring;
 use libp2p::{PeerId, Multiaddr};
 
 #[tokio::main]
@@ -27,7 +27,7 @@ async fn main() -> Result<()> {
     // Get profile directory
     let profile_dir = get_profile_dir(&cli.profile)?;
 
-    info!("Starting ZeroCenter Messenger");
+    info!("Starting ME55 Messenger");
     info!("Profile: {}", cli.profile);
     info!("Data directory: {:?}", profile_dir);
 
@@ -38,13 +38,13 @@ async fn main() -> Result<()> {
     // Look up (or generate) the at-rest data-encryption key in the OS
     // keyring. Falls back to an ephemeral DEK with a loud warning if the
     // keyring is unreachable — see `keyring::load_or_create_dek` docs.
-    let dek = zc_keyring::load_or_create_dek(&cli.profile)?;
+    let dek = me55_keyring::load_or_create_dek(&cli.profile)?;
 
     // Parse the optional obfuscation key. Stored on Config for the
     // future transport wrapper; for now it's a no-op on the wire and
     // we warn loudly so nobody assumes traffic is obfuscated yet.
     let obfs_key = match cli.obfs_key.as_deref() {
-        Some(s) => match zerocenter_messenger::network::scramble::parse_obfs_key(s) {
+        Some(s) => match ME55_messenger::network::scramble::parse_obfs_key(s) {
             Ok(k) => {
                 // Phase 4b shipped: the key is now actually wired into the
                 // transport stack. P2PNode::start emits the corresponding
@@ -62,7 +62,7 @@ async fn main() -> Result<()> {
     };
 
     info!("Peer ID: {}", peer_id);
-    println!("\n📡 ZeroCenter Messenger");
+    println!("\n📡 ME55 Messenger");
     println!("══════════════════════════════════════");
     println!("Profile: {}", cli.profile);
     println!("Peer ID: {}", peer_id);
@@ -125,7 +125,7 @@ async fn main() -> Result<()> {
     let cmd_tx_for_group = cmd_tx.clone();
 
     // Build command handlers
-    let mut handlers: std::collections::HashMap<String, zerocenter_messenger::cli::CommandHandler> = 
+    let mut handlers: std::collections::HashMap<String, ME55_messenger::cli::CommandHandler> = 
         std::collections::HashMap::new();
 
     // Connect handler
@@ -216,7 +216,7 @@ async fn main() -> Result<()> {
 
         use sha2::{Digest, Sha256};
         let mut h = Sha256::new();
-        h.update(b"zerocenter-safety-v1");
+        h.update(b"ME55-safety-v1");
         h.update(&(a.len() as u32).to_be_bytes());
         h.update(a);
         h.update(&(b.len() as u32).to_be_bytes());
@@ -334,7 +334,7 @@ async fn main() -> Result<()> {
         let rx = gui_event_rx.expect("gui_event_rx initialized when use_gui is set");
         run_gui(cmd_tx, rx).await?;
     } else {
-        if let Err(e) = zerocenter_messenger::cli::run_cli_with_handlers(handlers).await {
+        if let Err(e) = ME55_messenger::cli::run_cli_with_handlers(handlers).await {
             error!("CLI error: {}", e);
         }
     }
@@ -357,7 +357,7 @@ async fn run_gui(
     cmd_tx: tokio::sync::mpsc::Sender<NodeCommand>,
     gui_event_rx: tokio::sync::mpsc::Receiver<GuiEvent>,
 ) -> Result<()> {
-    zerocenter_messenger::gui::run(cmd_tx, gui_event_rx).await
+    ME55_messenger::gui::run(cmd_tx, gui_event_rx).await
 }
 
 #[cfg(not(feature = "gui"))]
@@ -391,7 +391,7 @@ fn parse_group_id_hex(s: &str) -> Result<[u8; 32]> {
 fn get_profile_dir(profile: &str) -> Result<PathBuf> {
     let base_dir = dirs::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("ZeroCenter");
+        .join("ME55");
 
     let profile_dir = base_dir.join(profile);
 

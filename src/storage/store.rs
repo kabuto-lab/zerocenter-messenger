@@ -21,7 +21,7 @@ const NONCE_LEN: usize = 12;
 /// Domain separator for the `outbox.peer_id` HMAC tag (audit finding
 /// F12). A dedicated constant keeps this DEK-keyed MAC from ever
 /// colliding with another at-rest MAC the codebase might add later.
-const OUTBOX_PEER_DOMAIN: &[u8] = b"zerocenter-outbox-peer-v1";
+const OUTBOX_PEER_DOMAIN: &[u8] = b"ME55-outbox-peer-v1";
 
 /// Encrypted message stored locally
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -95,7 +95,7 @@ impl MessageStore {
         )?;
 
         // Cache of remote peers' signed X25519 prekeys. Populated by the
-        // /zerocenter/prekey/1.0.0 response handler. Each row's signature
+        // /ME55/prekey/1.0.0 response handler. Each row's signature
         // has already been verified against the peer's Ed25519 key before
         // insertion — callers can trust the bytes here.
         conn.execute(

@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>ZeroCenter Messenger — Project Overview</title>
+<title>ME55 Messenger — Project Overview</title>
 <style>
   :root {
     --bg: #0b0d10;
@@ -126,7 +126,7 @@
 <header>
   <div class="wrap">
     <span class="badge">RUST · libp2p · P2P MESSENGER</span>
-    <h1>ZeroCenter Messenger<span class="dot">.</span></h1>
+    <h1>ME55 Messenger<span class="dot">.</span></h1>
     <p class="subtitle">A censorship-resistant, zero-trust, leaderless peer-to-peer communication platform.
     No servers. No accounts. No central authority. Cryptographic identity, direct peer connections, and local-first storage.</p>
   </div>
@@ -136,7 +136,7 @@
 
 <section id="concept">
   <h2>Concept</h2>
-  <p>ZeroCenter is a messenger built on a simple thesis: <strong>communication infrastructure should not require trust in any third party</strong>.
+  <p>ME55 is a messenger built on a simple thesis: <strong>communication infrastructure should not require trust in any third party</strong>.
   There is no central server, no phone number registry, no account provider. Each participant is cryptographically addressed by the hash of their own Ed25519 public key, and messages flow directly between peers over an encrypted transport.</p>
 
   <div class="grid">
@@ -201,7 +201,7 @@
     <li><strong>Listen:</strong> Open TCP + QUIC on a random port; advertise via mDNS.</li>
     <li><strong>Discover:</strong> Peers on the LAN are found via mDNS; global peers via Kademlia DHT (once bootstrap nodes exist).</li>
     <li><strong>Connect:</strong> Noise Protocol (ChaCha20-Poly1305) handshake, then Yamux stream multiplexing.</li>
-    <li><strong>Exchange:</strong> Direct DMs via request-response over CBOR; offline fallback via Gossipsub topic <code>/zerocenter/global</code>.</li>
+    <li><strong>Exchange:</strong> Direct DMs via request-response over CBOR; offline fallback via Gossipsub topic <code>/ME55/global</code>.</li>
     <li><strong>Persist:</strong> Received and sent messages recorded in the per-profile SQLite database.</li>
   </ol>
 </section>
@@ -222,7 +222,7 @@
       <tr><td>libp2p Swarm (TCP + QUIC)</td><td><span class="status s-done">DONE</span></td><td>Noise + Yamux</td></tr>
       <tr><td>mDNS local discovery</td><td><span class="status s-done">DONE</span></td><td>Zero-config LAN</td></tr>
       <tr><td>Kademlia DHT</td><td><span class="status s-wip">PARTIAL</span></td><td>Wired but no bootstrap nodes — inert</td></tr>
-      <tr><td>Gossipsub pubsub</td><td><span class="status s-done">DONE</span></td><td>Subscribed to <code>/zerocenter/global</code></td></tr>
+      <tr><td>Gossipsub pubsub</td><td><span class="status s-done">DONE</span></td><td>Subscribed to <code>/ME55/global</code></td></tr>
       <tr><td>Direct messaging (request-response)</td><td><span class="status s-done">DONE</span></td><td>CBOR-framed DMs</td></tr>
       <tr><td>SQLite storage</td><td><span class="status s-done">DONE</span></td><td>messages, contacts, channels tables</td></tr>
       <tr><td>CLI (help, connect, send, peers, history)</td><td><span class="status s-done">DONE</span></td><td>Interactive REPL</td></tr>
@@ -244,7 +244,7 @@
   <h3>Security</h3>
   <ul>
     <li><span class="pri-crit">CRITICAL</span> — No E2EE. <code>x25519-dalek</code> is a declared dependency but unused. Need Double Ratchet or equivalent.</li>
-    <li><span class="pri-crit">CRITICAL</span> — Gossipsub fallback broadcasts DMs globally on <code>/zerocenter/global</code>. Any subscribed peer reads them. This fallback must be removed or replaced with an encrypted-envelope relay scheme.</li>
+    <li><span class="pri-crit">CRITICAL</span> — Gossipsub fallback broadcasts DMs globally on <code>/ME55/global</code>. Any subscribed peer reads them. This fallback must be removed or replaced with an encrypted-envelope relay scheme.</li>
     <li><span class="pri-high">HIGH</span> — No sender signature verification on incoming <code>ProtocolMessage</code>. Sender fields are attacker-controlled.</li>
     <li><span class="pri-high">HIGH</span> — No replay protection, no per-message nonces, no forward secrecy.</li>
     <li><span class="pri-med">MED</span> — Wire format is <code>serde_json</code>; should be CBOR (already a libp2p feature) or bincode for size and stricter parsing.</li>
@@ -380,18 +380,18 @@ cargo build --release
 
 # Terminal 1
 set RUST_LOG=info
-target\release\zerocenter.exe --profile alice
+target\release\ME55.exe --profile alice
 
 # Terminal 2
 set RUST_LOG=info
-target\release\zerocenter.exe --profile bob</code></pre>
+target\release\ME55.exe --profile bob</code></pre>
   <p>In each REPL: <kbd>help</kbd>, <kbd>peers</kbd>, <kbd>connect &lt;multiaddr&gt;</kbd>, <kbd>send &lt;peer_id&gt; &lt;msg&gt;</kbd>, <kbd>history</kbd>, <kbd>quit</kbd>.</p>
 </section>
 
 </main>
 
 <footer>
-  ZeroCenter Messenger · MIT License · Decentralized software for decentralized people.
+  ME55 Messenger · MIT License · Decentralized software for decentralized people.
 </footer>
 
 </body>

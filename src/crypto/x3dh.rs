@@ -36,13 +36,13 @@ use x25519_dalek::{EphemeralSecret, PublicKey, StaticSecret};
 use zeroize::Zeroize;
 
 /// Domain-separator tag for the X3DH HKDF, 2-DH variant.
-const X3DH_INFO: &[u8] = b"zerocenter-x3dh-v1";
+const X3DH_INFO: &[u8] = b"ME55-x3dh-v1";
 
 /// Domain-separator tag for the 3-DH variant (with one-time prekey).
 /// Distinct from the 2-DH variant so the two derivations are NEVER
 /// confusable: a session built with OTPK uses one secret, without uses
 /// another, even if the rest of the inputs happen to collide.
-const X3DH_INFO_OTPK: &[u8] = b"zerocenter-x3dh-otpk-v1";
+const X3DH_INFO_OTPK: &[u8] = b"ME55-x3dh-otpk-v1";
 
 /// Length of the derived shared secret in bytes.
 pub const SHARED_SECRET_LEN: usize = 32;

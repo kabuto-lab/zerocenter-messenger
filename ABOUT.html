@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ZeroCenter Messenger — что это и зачем</title>
+<title>ME55 Messenger — что это и зачем</title>
 <style>
   :root {
     --bg:#0e1116; --panel:#11161d; --panel2:#161c25; --fg:#e6e6e6; --muted:#9aa3ad;
@@ -112,7 +112,7 @@
 
 <!-- ============================ HERO ============================ -->
 <div class="hero">
-  <h1><span class="accent">ZeroCenter</span> Messenger</h1>
+  <h1><span class="accent">ME55</span> Messenger</h1>
   <p class="tag">Мессенджер без сервера, без регистрации, без слежки. На пальцах.</p>
   <div class="badges">
     <span class="badge g"><span class="ico">🚫</span>нет сервера</span>
@@ -145,7 +145,7 @@
     </ul>
   </div>
   <div class="box good">
-    <h4>Что знает ZeroCenter</h4>
+    <h4>Что знает ME55</h4>
     <ul>
       <li>Ничего. У него нет сервера, который что-то знает.</li>
       <li>Нет регистрации — никакого телефона или email.</li>
@@ -326,7 +326,7 @@
     <div class="head"><span class="ic">✉️</span><span class="ti">Личные сообщения</span></div>
     <p>Обычный чат один-на-один. Зашифрованный, без посредников. Если друг онлайн — мгновенно;
        если оффлайн — через тайник, когда вернётся.</p>
-    <span class="tech"><b>Технически:</b> request-response <code>/zerocenter/direct-message/2.0.0</code> (cbor); fallback в DHT mailbox при недоступности.</span>
+    <span class="tech"><b>Технически:</b> request-response <code>/ME55/direct-message/2.0.0</code> (cbor); fallback в DHT mailbox при недоступности.</span>
   </div>
 
   <div class="card">
@@ -364,7 +364,7 @@
 
   <div class="card">
     <div class="head"><span class="ic">📦</span><span class="ti">Один файл — и всё</span></div>
-    <p>Никакой установки. Никаких зависимостей. Один <code>zerocenter.exe</code> размером
+    <p>Никакой установки. Никаких зависимостей. Один <code>ME55.exe</code> размером
        ~17 МБ — в нём <b>уже всё</b>: и сетевая часть, и шифрование, и база данных, и графический интерфейс.
        Скопировал на флешку — унёс с собой.</p>
     <span class="tech"><b>Технически:</b> Rust single-binary с встроенными SQLite (bundled), libp2p, Tauri webview; LTO + stripped в release.</span>
@@ -382,7 +382,7 @@
 
 <!-- ============================ БЕЗОПАСНОСТЬ ПО СЛОЯМ ============================ -->
 <h2><span class="num">§4</span> Безопасность — по слоям</h2>
-<p class="lead">У ZeroCenter <b>несколько уровней</b> защиты. Каждый закрывает свой класс угроз.
+<p class="lead">У ME55 <b>несколько уровней</b> защиты. Каждый закрывает свой класс угроз.
    Так устроены банковские системы: даже если один слой пробьют, остальные ещё работают.</p>
 
 <div class="layers">
@@ -448,25 +448,25 @@
 <h2><span class="num">§6</span> Попробовать прямо сейчас</h2>
 
 <div class="tryit">
-  <p><b>Самый простой вариант</b> — двойной клик по <code>zerocenter.exe</code>. Откроется
+  <p><b>Самый простой вариант</b> — двойной клик по <code>ME55.exe</code>. Откроется
      графическое окно с чатом. При первом запуске программа сама сделает вам уникальную «личность».</p>
 
   <p>Хотите проверить с другом на этом же компьютере? Запустите второй экземпляр с другим именем профиля:</p>
   <pre><span class="cmd-comment"># окно 1</span>
-zerocenter.exe --profile alice
+ME55.exe --profile alice
 
 <span class="cmd-comment"># окно 2 (одновременно — каждому свой mailbox, своя личность)</span>
-zerocenter.exe --profile bob</pre>
+ME55.exe --profile bob</pre>
 
   <p>Они увидят друг друга через mDNS моментально. В одном из окон нажмите «Add contact», вставьте
      PeerId другого окна (он показан в заголовке), и пишите.</p>
 
   <p>Хотите общаться <b>с реальным другом через интернет</b>? Достаточно, чтобы каждый запустил
-     свой <code>zerocenter.exe</code> — они найдут друг друга через DHT за несколько секунд. Обменяйтесь
+     свой <code>ME55.exe</code> — они найдут друг друга через DHT за несколько секунд. Обменяйтесь
      PeerId-ами (по любому каналу — мессенджеру, бумажке, голосом) и добавьте друг друга в контакты.</p>
 
   <p>Без графики (для скриптов, серверов, тестов):</p>
-  <pre>zerocenter.exe --profile alice --cli</pre>
+  <pre>ME55.exe --profile alice --cli</pre>
   <p>Команды: <code>send</code>, <code>contacts</code>, <code>peers</code>, <code>history</code>,
      <code>addr</code>, <code>safety</code>, <code>group</code>, <code>whoami</code>, <code>help</code>.</p>
 </div>
@@ -512,7 +512,7 @@ zerocenter.exe --profile bob</pre>
 
 <!-- ============================ FOOTER ============================ -->
 <div class="foot">
-  ZeroCenter Messenger · open source · 12 131 строк кода Rust · 119 автоматических тестов · версия 0.1.0
+  ME55 Messenger · open source · 12 131 строк кода Rust · 119 автоматических тестов · версия 0.1.0
 </div>
 
 </div>

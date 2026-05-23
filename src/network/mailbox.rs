@@ -11,11 +11,11 @@
 //!   slot_id  = floor(unix_seconds / SLOT_SECONDS)
 //!
 //!   slot_kad_key(recipient, slot)        = SHA-256(
-//!       "zerocenter-mailbox-v1" || recipient_pid_bytes || slot_id_be8
+//!       "ME55-mailbox-v1" || recipient_pid_bytes || slot_id_be8
 //!   )
 //!
 //!   drop_kad_key(recipient, sender, slot) = SHA-256(
-//!       "zerocenter-mailbox-drop-v1" || recipient_pid_bytes
+//!       "ME55-mailbox-drop-v1" || recipient_pid_bytes
 //!       || sender_pid_bytes || slot_id_be8
 //!   )
 //! ```
@@ -78,9 +78,9 @@ pub const REPUBLISH_AFTER_SECS: i64 = 1800;
 /// each slot we haven't yet covered.
 pub const POLL_TICK_SECS: u64 = 600;
 
-const SLOT_KEY_DOMAIN: &[u8] = b"zerocenter-mailbox-v1";
-const DROP_KEY_DOMAIN: &[u8] = b"zerocenter-mailbox-drop-v1";
-const ACK_KEY_DOMAIN: &[u8] = b"zerocenter-mailbox-ack-v1";
+const SLOT_KEY_DOMAIN: &[u8] = b"ME55-mailbox-v1";
+const DROP_KEY_DOMAIN: &[u8] = b"ME55-mailbox-drop-v1";
+const ACK_KEY_DOMAIN: &[u8] = b"ME55-mailbox-ack-v1";
 
 /// Compute the slot id for a given unix timestamp (seconds). `slot_id`
 /// is shared by every drop targeted at any recipient during this hour.
@@ -116,7 +116,7 @@ pub fn drop_kad_key(recipient_pid: &[u8], sender_pid: &[u8], slot_id: i64) -> Re
 /// publish an empty record at this matching ACK key. The sender's
 /// republish loop checks for the ACK before each `put_record` and
 /// stops republishing once it lands. Distinct domain separator
-/// (`"zerocenter-mailbox-ack-v1"`) keeps it disjoint from the drop /
+/// (`"ME55-mailbox-ack-v1"`) keeps it disjoint from the drop /
 /// slot namespaces.
 pub fn ack_kad_key(recipient_pid: &[u8], sender_pid: &[u8], slot_id: i64) -> RecordKey {
     let mut h = Sha256::new();

@@ -18,7 +18,7 @@
 //! - Sender picks ephemeral X25519 `(e_priv, e_pub)`.
 //! - `shared = X25519(e_priv, recipient_x25519_pub)`. Refused if zero
 //!   (low-order pubkey defence; audit F2 hygiene).
-//! - `(key, nonce) = HKDF-SHA256(salt="zerocenter-sealed-sender-v1",
+//! - `(key, nonce) = HKDF-SHA256(salt="ME55-sealed-sender-v1",
 //!                                ikm=shared, info="chacha-key-nonce")`,
 //!   44-byte expansion split into 32-byte key + 12-byte nonce.
 //! - Encrypt `sender_cert` with ChaCha20-Poly1305 under `(key, nonce)`,
@@ -45,7 +45,7 @@
 //! - Hide the recipient. The outer `to` field of the `ProtocolMessage`
 //!   stays clear because it's needed for libp2p routing. Hiding the
 //!   recipient requires onion routing (out of scope).
-//! - Hide the fact that ZeroCenter traffic is happening. That's
+//! - Hide the fact that ME55 traffic is happening. That's
 //!   `ScrambleStream`'s job (`--obfs-key` flag).
 
 use anyhow::{anyhow, Result};
@@ -58,7 +58,7 @@ use rand::RngCore;
 use sha2::Sha256;
 use x25519_dalek::{PublicKey, StaticSecret};
 
-const HKDF_SALT: &[u8] = b"zerocenter-sealed-sender-v1";
+const HKDF_SALT: &[u8] = b"ME55-sealed-sender-v1";
 const HKDF_INFO: &[u8] = b"chacha-key-nonce";
 
 /// Encrypt `sender_cert` to `recipient_x25519_pub`. See the module

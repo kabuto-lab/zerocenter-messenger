@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>ZeroCenter Messenger — Roadmap</title>
+<title>ME55 Messenger — Roadmap</title>
 <style>
   :root {
     --bg:#0e1116; --fg:#e6e6e6; --muted:#9aa3ad; --line:#222a33;
@@ -57,7 +57,7 @@
 <body>
 <div class="wrap">
 
-<h1>ZeroCenter Messenger — Roadmap <small>updated 2026-05-22</small></h1>
+<h1>ME55 Messenger — Roadmap <small>updated 2026-05-22</small></h1>
 <div class="sub">Censorship-resistant, zero-trust, leaderless P2P messenger. Rust + libp2p 0.53.
   Source of truth is <span class="kbd">plans/ROADMAP.md</span>; this page is a visual snapshot of it.</div>
 
@@ -69,7 +69,7 @@
 <table>
   <tr><th>Item</th><th>Status</th><th>Notes</th></tr>
   <tr><td>Ed25519 identity (persistent)</td><td class="s"><span class="badge done">done</span></td>
-      <td>Per-profile <span class="kbd">identity.json</span> under <span class="kbd">%LOCALAPPDATA%\ZeroCenter\&lt;profile&gt;\</span></td></tr>
+      <td>Per-profile <span class="kbd">identity.json</span> under <span class="kbd">%LOCALAPPDATA%\ME55\&lt;profile&gt;\</span></td></tr>
   <tr><td>libp2p transport</td><td class="s"><span class="badge done">done</span></td>
       <td>TCP + Noise + Yamux, + DNS + Kademlia + mDNS + identify.
       <b>QUIC parked</b> — <span class="kbd">ring</span> build script crashes <span class="kbd">cl.exe</span> on this MSVC toolchain.</td></tr>
@@ -83,7 +83,7 @@
 <table>
   <tr><th>Item</th><th>Status</th><th>Notes</th></tr>
   <tr><td>DM transport</td><td class="s"><span class="badge done">done</span></td>
-      <td>Dedicated request-response protocol <span class="kbd">/zerocenter/direct-message/2.0.0</span>.
+      <td>Dedicated request-response protocol <span class="kbd">/ME55/direct-message/2.0.0</span>.
       Gossipsub fallback removed — it leaked plaintext to every subscriber.</td></tr>
   <tr><td>Signed envelope + cross-check</td><td class="s"><span class="badge done">done</span></td>
       <td>Ed25519 over a domain-separated canonical layout. Transport-peer ↔ signed-sender cross-check on receive.</td></tr>
@@ -156,7 +156,7 @@
     <span class="tag">commit 74328e7</span><br>
     The persistent outbox stored the recipient PeerId in the clear, so a disk-read attacker without the
     OS-keyring DEK could enumerate who had mail queued even though the message body was encrypted. The
-    column now holds <code>HMAC-SHA256(DEK, "zerocenter-outbox-peer-v1" || peer_id)</code> — deterministic,
+    column now holds <code>HMAC-SHA256(DEK, "ME55-outbox-peer-v1" || peer_id)</code> — deterministic,
     so the by-peer lookup and <code>idx_outbox_peer</code> index are unchanged; one-way, which is enough
     since the drain path always already holds the PeerId. A <code>PRAGMA user_version</code> gate re-tags
     pre-F12 rows once on first open.</li>
@@ -195,7 +195,7 @@
 
 <div class="note">Verification: <span class="kbd">cargo test --lib</span> · <span class="kbd">cargo build --release</span> ·
   two-window run via <span class="kbd">bats\alice.bat</span> / <span class="kbd">bats\bob.bat</span>
-  (or <span class="kbd">target\release\zerocenter.exe --profile &lt;name&gt;</span>). Full commit log and
+  (or <span class="kbd">target\release\ME55.exe --profile &lt;name&gt;</span>). Full commit log and
   conventions live in <span class="kbd">plans/ROADMAP.md</span>.</div>
 
 </div>

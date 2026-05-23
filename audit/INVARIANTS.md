@@ -12,15 +12,15 @@ If you find an invariant that's stated here but **not** enforced (or enforced in
 
 ## §1. Signed message envelopes are bound to a single protocol version
 
-**Statement.** No two distinct constructions in ZeroCenter ever produce the same signed-bytes layout for the same Ed25519 key. Cross-protocol signature reuse is impossible.
+**Statement.** No two distinct constructions in ME55 ever produce the same signed-bytes layout for the same Ed25519 key. Cross-protocol signature reuse is impossible.
 
 **Why.** Without this, a signature collected under one purpose (e.g. a DM) could be replayed under another (e.g. a future control message), forging assertions the user never made.
 
 **Enforced at.**
-- `src/protocol/message.rs::DOMAIN_SEPARATOR = "zerocenter-dm-v1"` — direct-path DM envelope.
-- `src/protocol/message.rs::SEALED_DOMAIN_SEPARATOR = "zerocenter-sealed-dm-v1"` — Phase 5 sealed-path DM envelope (see §22). Distinct from the direct domain so a captured direct signature can't be transplanted into a sealed envelope or vice versa.
-- `src/core/identity.rs::PREKEY_SIG_DOMAIN = "zerocenter-prekey-v1"` — both signed prekey and OTPK (see §3).
-- `src/main.rs` safety-number handler hashes under `b"zerocenter-safety-v1"` — not a signature, but same hygiene.
+- `src/protocol/message.rs::DOMAIN_SEPARATOR = "ME55-dm-v1"` — direct-path DM envelope.
+- `src/protocol/message.rs::SEALED_DOMAIN_SEPARATOR = "ME55-sealed-dm-v1"` — Phase 5 sealed-path DM envelope (see §22). Distinct from the direct domain so a captured direct signature can't be transplanted into a sealed envelope or vice versa.
+- `src/core/identity.rs::PREKEY_SIG_DOMAIN = "ME55-prekey-v1"` — both signed prekey and OTPK (see §3).
+- `src/main.rs` safety-number handler hashes under `b"ME55-safety-v1"` — not a signature, but same hygiene.
 
 **Suggested attack.** Look for any code path that calls `Identity::sign(...)` or `keypair.sign(...)` without a domain-separated layout. Any such call is a potential collision source.
 
@@ -28,7 +28,7 @@ If you find an invariant that's stated here but **not** enforced (or enforced in
 
 ## §2. The PeerId of a signed sender is cross-checked against the transport peer (DIRECT path only)
 
-**Statement.** When a DM arrives over `/zerocenter/direct-message/2.0.0` on the **direct path** (legacy: `from` + `signature` fields populated), the receiver verifies the application-layer Ed25519 signature AND checks that the libp2p transport-level peer matches the signed `from`. If either check fails, the message is dropped before any state change.
+**Statement.** When a DM arrives over `/ME55/direct-message/2.0.0` on the **direct path** (legacy: `from` + `signature` fields populated), the receiver verifies the application-layer Ed25519 signature AND checks that the libp2p transport-level peer matches the signed `from`. If either check fails, the message is dropped before any state change.
 
 **For sealed-path envelopes** (Phase 5; see §22), the §3 transport-peer cross-check is **intentionally skipped**. The sender PeerId is encrypted inside the seal and decoupled from the transport-level source — this is the entire point of sealed sender. The inner signature inside the seal authenticates the sender; the transport peer is just a delivery agent (e.g. a DHT-mailbox provider). Skipping the cross-check is documented at the relevant code site.
 
@@ -46,7 +46,7 @@ If you find an invariant that's stated here but **not** enforced (or enforced in
 
 ## §3. Prekey signature domain separator does not distinguish long-term vs one-time
 
-**Statement.** Both the signed prekey and one-time prekeys are signed over the same bytes `prekey_signing_bytes(pub) = "zerocenter-prekey-v1" || pub`. Recipients learn which kind it is from the row in `my_otpks` vs the `signed_prekey` field — not from the signature itself.
+**Statement.** Both the signed prekey and one-time prekeys are signed over the same bytes `prekey_signing_bytes(pub) = "ME55-prekey-v1" || pub`. Recipients learn which kind it is from the row in `my_otpks` vs the `signed_prekey` field — not from the signature itself.
 
 **Why.** This is documented; the reviewer should consider if it creates risk. **Suggested risk:** an attacker who captures a long-term signed-prekey signature could re-present it as an OTPK signature (or vice versa), if the rest of the code accepts public-key bytes interchangeably. Currently the recipient's only use of the signature is "did identity X authorize this 32-byte X25519 key as a prekey of any kind for X3DH?" — and any "yes" is acceptable cryptographically. But it does mean OTPK semantics rest entirely on the database row, not on cryptographic binding.
 
@@ -217,11 +217,11 @@ A corollary: if the local DEK is compromised, queued-but-not-yet-sent messages a
 
 **Statement.** When `--obfs-key <32-byte hex>` is supplied, every byte on the TCP socket — *including* the libp2p Noise XX handshake — is XOR'd with a ChaCha20 keystream before it leaves the host, and inverted on receipt. The 32-byte key is pre-shared out of band; both peers must use the same one. The connection-opening handshake itself is hidden behind elligator2-encoded ephemerals so even the first 32 bytes look uniformly random.
 
-**Per-connection key + nonce (Phase 4c.1 — NTOR-style hidden handshake, F1-fixed).** On connection open, each side generates an ephemeral X25519 keypair whose pubkey has an elligator2 `Randomized`-variant representative (retried up to 64 times against ~50% per-attempt success), sends the 32-byte representative on the wire, decodes the peer's 32-byte representative back to a Curve25519 pubkey, and runs X25519 DH to produce `shared_secret`. The handshake refuses `shared_secret == 0` (low-order peer pubkey defence; audit F2). From `shared_secret || obfs_key` (concatenated, 64 bytes) we HKDF-SHA256 with salt `"zerocenter-ntor-v1"` and derive **two** distinct 44-byte OKMs under role-distinguished info strings: `"zc-chacha-d2l-v1"` for dialer→listener traffic and `"zc-chacha-l2d-v1"` for listener→dialer. Each OKM splits into `(chacha_key[32] || chacha_nonce[12])`. The dialer's `out_cipher` initializes from the d2l pair and its `in_cipher` from l2d; the listener mirrors. Without the per-direction split, both peers' `out_cipher` and `in_cipher` would share a keystream — a two-time-pad on any bidirectional connection (audit F1, fixed at commit 2273cf5). After the 32-byte representative exchange (each direction), every subsequent byte is scrambled with the role-appropriate ChaCha20 instance — Noise's XX handshake, Yamux frames, request-response payloads. The pre-shared `obfs_key` keeps its role as the authenticator: a MITM substituting their own ephemerals derives a different OKM-pair and can't decrypt either side's scrambled stream.
+**Per-connection key + nonce (Phase 4c.1 — NTOR-style hidden handshake, F1-fixed).** On connection open, each side generates an ephemeral X25519 keypair whose pubkey has an elligator2 `Randomized`-variant representative (retried up to 64 times against ~50% per-attempt success), sends the 32-byte representative on the wire, decodes the peer's 32-byte representative back to a Curve25519 pubkey, and runs X25519 DH to produce `shared_secret`. The handshake refuses `shared_secret == 0` (low-order peer pubkey defence; audit F2). From `shared_secret || obfs_key` (concatenated, 64 bytes) we HKDF-SHA256 with salt `"ME55-ntor-v1"` and derive **two** distinct 44-byte OKMs under role-distinguished info strings: `"zc-chacha-d2l-v1"` for dialer→listener traffic and `"zc-chacha-l2d-v1"` for listener→dialer. Each OKM splits into `(chacha_key[32] || chacha_nonce[12])`. The dialer's `out_cipher` initializes from the d2l pair and its `in_cipher` from l2d; the listener mirrors. Without the per-direction split, both peers' `out_cipher` and `in_cipher` would share a keystream — a two-time-pad on any bidirectional connection (audit F1, fixed at commit 2273cf5). After the 32-byte representative exchange (each direction), every subsequent byte is scrambled with the role-appropriate ChaCha20 instance — Noise's XX handshake, Yamux frames, request-response payloads. The pre-shared `obfs_key` keeps its role as the authenticator: a MITM substituting their own ephemerals derives a different OKM-pair and can't decrypt either side's scrambled stream.
 
 **Frame padding (Phase 4c.2).** Above the byte-XOR layer sits a frame protocol: `[u16-be: payload_len] [payload_len bytes payload] [pad to FRAME_QUANTUM-multiple]` with `FRAME_QUANTUM = 256`. The whole frame (header + payload + pad) is XOR'd with the keystream as a unit, so an observer can't separate the header from the payload from the pad. Effect: every frame on the wire is a multiple of 256 bytes. A 48-byte Noise handshake message and a 200-byte DM both look like 256 bytes; a 300-byte DM looks like 512. This collapses the per-message size fingerprint that statistical DPI uses to identify libp2p.
 
-**IAT jitter (Phase 4c.2′ — opt-in).** When `--obfs-jitter-ms <max>` is supplied alongside `--obfs-key`, every `poll_write` that's about to emit a NEW frame first waits a `uniform(0..=max)` ms delay. State machine: `pending_sleep: Option<Pin<Box<tokio::time::Sleep>>>` lives on the struct; `poll_write` drains `pending` first, then polls `pending_sleep` to completion if in progress, else rolls a fresh delay if `jitter_max_ms` is configured. Effect: a passive timing observer can no longer match ZeroCenter's wire-emission cadence against a known reference profile, within the configured window. Cost: up to `max` ms of added per-frame latency, which on a request-response DM path the user trades for traffic-analysis resistance. Default off — users who don't ask pay nothing.
+**IAT jitter (Phase 4c.2′ — opt-in).** When `--obfs-jitter-ms <max>` is supplied alongside `--obfs-key`, every `poll_write` that's about to emit a NEW frame first waits a `uniform(0..=max)` ms delay. State machine: `pending_sleep: Option<Pin<Box<tokio::time::Sleep>>>` lives on the struct; `poll_write` drains `pending` first, then polls `pending_sleep` to completion if in progress, else rolls a fresh delay if `jitter_max_ms` is configured. Effect: a passive timing observer can no longer match ME55's wire-emission cadence against a known reference profile, within the configured window. Cost: up to `max` ms of added per-frame latency, which on a request-response DM path the user trades for traffic-analysis resistance. Default off — users who don't ask pay nothing.
 
 **Enforced at.**
 - `src/network/scramble.rs::scramble_handshake` — NTOR-style hidden handshake (elligator2 exchange → X25519 DH → HKDF over `shared || obfs_key`) + wrap; forwards `jitter_max_ms` into the resulting `ScrambleStream`.
@@ -304,7 +304,7 @@ it could land in a remote log aggregator.
 **Why.** The mailbox layer must not introduce a parallel decryption path with different invariants. Reusing the exact `process_incoming_dm` entry-point keeps the security surface flat. The §2 cross-check still holds because the recipient verifies the `from` field of the signed envelope against the PeerId of the provider that fronted the Kad record (the `sender` argument passed into `process_incoming_dm`).
 
 **Enforced at.**
-- `src/network/mailbox.rs` — slot/key derivation; `slot_kad_key` and `drop_kad_key` use distinct domain separators (`"zerocenter-mailbox-v1"` vs `"zerocenter-mailbox-drop-v1"`) so the namespaces are disjoint.
+- `src/network/mailbox.rs` — slot/key derivation; `slot_kad_key` and `drop_kad_key` use distinct domain separators (`"ME55-mailbox-v1"` vs `"ME55-mailbox-drop-v1"`) so the namespaces are disjoint.
 - `src/core/node.rs::publish_mailbox_drop` — sender side; calls `ratchet_encrypt_and_wrap` for the same bytes the request-response path would have sent, then `put_record` + `start_providing`.
 - `src/core/node.rs::handle_mailbox_record_result` — recipient side; routes fetched bytes through `process_incoming_dm` with the provider's PeerId as the transport-attribution argument.
 - `src/core/node.rs::poll_mailbox_slots` — periodic recipient scan; caps fan-out at 24 slots (one day) per poll regardless of how long the recipient has been offline, so a fresh install doesn't blast the DHT.
@@ -327,10 +327,10 @@ it could land in a remote log aggregator.
 
 **Statement.** When `ProtocolMessage::is_sealed()` is true, the sender's identity is encrypted inside `sealed_sender` and only the recipient (holder of the X25519 prekey private) can recover it. The authentication chain is:
 
-1. **AEAD decrypt** with `(key, nonce)` derived from `HKDF(salt="zerocenter-sealed-sender-v1", ikm=X25519(recipient_prekey_priv, sealed[..32]))`. The first 32 wire bytes are the sender's per-message ephemeral X25519 pubkey. AEAD failure → drop.
+1. **AEAD decrypt** with `(key, nonce)` derived from `HKDF(salt="ME55-sealed-sender-v1", ikm=X25519(recipient_prekey_priv, sealed[..32]))`. The first 32 wire bytes are the sender's per-message ephemeral X25519 pubkey. AEAD failure → drop.
 2. **Cert parse:** length-prefixed `sender_pid_bytes || signature_bytes`. Malformed → drop.
 3. **Sender pubkey extraction** from `sender_pid` via the embedded-protobuf-pubkey convention (multihash code = 0x00). Failure → drop.
-4. **Signature verify** under the **sealed domain separator** `"zerocenter-sealed-dm-v1"` over `(to || sender_pid || payload || timestamp || ttl || msg_type)`. Mismatch → drop.
+4. **Signature verify** under the **sealed domain separator** `"ME55-sealed-dm-v1"` over `(to || sender_pid || payload || timestamp || ttl || msg_type)`. Mismatch → drop.
 
 If all four pass, the sender PeerId is authenticated and the message proceeds through `process_incoming_dm` exactly as a direct-path message would (modulo §2's transport-peer cross-check being skipped).
 
@@ -394,7 +394,7 @@ If all four pass, the sender PeerId is authenticated and the message proceeds th
 
 ## §24. Per-message Ed25519 signatures prevent cross-member impersonation in groups (Phase 5)
 
-**Statement.** Every group message (`EncryptedPayload.kind = 2`) carries an Ed25519 signature produced under the sender's per-chain signing key, with canonical signing bytes prefixed by `GROUP_MSG_DOMAIN_SEPARATOR = b"zerocenter-group-msg-v1"` and binding `(group_id, sender_pid)` via the associated-data scope. Receivers verify the signature **before any chain state mutation** using the `verify_pub` field of the locally-cached `ReceiverChain` (installed from a `SenderKeyBundle` delivered over the outer 1:1 DR session). Decryption only proceeds on signature success.
+**Statement.** Every group message (`EncryptedPayload.kind = 2`) carries an Ed25519 signature produced under the sender's per-chain signing key, with canonical signing bytes prefixed by `GROUP_MSG_DOMAIN_SEPARATOR = b"ME55-group-msg-v1"` and binding `(group_id, sender_pid)` via the associated-data scope. Receivers verify the signature **before any chain state mutation** using the `verify_pub` field of the locally-cached `ReceiverChain` (installed from a `SenderKeyBundle` delivered over the outer 1:1 DR session). Decryption only proceeds on signature success.
 
 **Why.** Each member of a group ends up with every other member's symmetric `chain_key` (it's part of the `SenderKeyBundle` they distribute), so without the Ed25519 sig any member could mint a ciphertext claiming to be from any other chain owner. The per-message signature is the unforgeable bind from "ciphertext at index N on chain X" to "signed by the owner of chain X". The `(group_id, sender_pid)` AD prevents a captured ciphertext from being replayed under a different group context or attributed to a different sender.
 
@@ -432,7 +432,7 @@ If all four pass, the sender PeerId is authenticated and the message proceeds th
 **Why.** Without founder authority, anyone could push membership state changes (silently add a Sybil to spy, kick a legitimate member out of fanout). Without epoch monotonicity, an attacker who captured an old MembershipUpdate could replay it after a contradictory update has already been applied, re-introducing a removed member.
 
 **Enforced at.**
-- `src/protocol/group.rs::GROUP_CTRL_DOMAIN_SEPARATOR = b"zerocenter-group-ctrl-v1"` — distinct from §1's DM/sealed domain separators so a captured DM signature can't be replayed as group control authorization.
+- `src/protocol/group.rs::GROUP_CTRL_DOMAIN_SEPARATOR = b"ME55-group-ctrl-v1"` — distinct from §1's DM/sealed domain separators so a captured DM signature can't be replayed as group control authorization.
 - `src/protocol/group.rs::canonical_create_bytes` / `canonical_update_bytes` / `canonical_leave_bytes` — canonical signing bytes with length-prefixed variable fields. Member lists are sorted before encoding so semantically-equal sets produce byte-identical signatures (defends against subtle re-ordering attempts).
 - `src/protocol/group.rs::GroupControl::verify_signature` — covers CreateGroup, Leave, SenderKeyDistribution.
 - `src/protocol/group.rs::GroupControl::verify_membership_update(founder_pid)` — caller MUST supply the locally-stored founder PID; the plain `verify_signature` deliberately returns `BadSignature` for the MembershipUpdate variant so a careless call site can't accept an unverified update.

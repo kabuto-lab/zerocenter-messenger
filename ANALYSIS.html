@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ZeroCenter Messenger — In-Depth Analysis &amp; Code Audit</title>
+<title>ME55 Messenger — In-Depth Analysis &amp; Code Audit</title>
 <style>
   :root {
     --bg:#0e1116; --panel:#11161d; --panel2:#161c25; --fg:#e6e6e6; --muted:#9aa3ad;
@@ -90,7 +90,7 @@
 <body>
 <div class="wrap">
 
-<h1>ZeroCenter Messenger <small>— In-Depth Analysis &amp; Code Audit</small></h1>
+<h1>ME55 Messenger <small>— In-Depth Analysis &amp; Code Audit</small></h1>
 <p class="sub">A censorship-resistant, leaderless, zero-trust peer-to-peer encrypted messenger written in Rust.</p>
 
 <div class="meta">
@@ -128,9 +128,9 @@ Critical / High / Medium / Low / Informational scale.
 <!-- ============================== PART A ============================== -->
 <h2>§1 — Executive Summary</h2>
 <p class="lead">
-ZeroCenter Messenger is a fully decentralised instant messenger: there is no server, no leader
+ME55 Messenger is a fully decentralised instant messenger: there is no server, no leader
 node, no operator and no directory. Every participant runs the same single binary
-(<code>zerocenter.exe</code>, ~9.3&nbsp;MB), discovers peers over a Kademlia DHT plus mDNS, and
+(<code>ME55.exe</code>, ~9.3&nbsp;MB), discovers peers over a Kademlia DHT plus mDNS, and
 exchanges messages directly over authenticated, encrypted libp2p streams. The threat model it
 targets is a Signal/Tor-class adversary: a network observer who can see, block and tamper with
 traffic, and who would like to learn <i>who is talking to whom</i>.
@@ -241,14 +241,14 @@ domain-separator string, which is the project's primary defence against cross-pr
 signature/key reuse.</p>
 <table>
   <tr><th>Construction</th><th>Primitive</th><th>Domain separator</th><th>Purpose</th></tr>
-  <tr><td>Identity &amp; prekey</td><td>Ed25519 sign over X25519 pubkey</td><td><code>zerocenter-prekey-v1</code></td><td>Long-term identity; PeerId-verifiable signed prekey.</td></tr>
-  <tr><td>X3DH-lite handshake</td><td>HKDF-SHA256 over 2 or 3 DH outputs</td><td><code>zerocenter-x3dh-v1</code> / <code>-otpk-v1</code></td><td>Asynchronous first-message key agreement.</td></tr>
-  <tr><td>Double Ratchet</td><td>DH-ratchet + HMAC-SHA256 KDF chains; ChaCha20-Poly1305</td><td><code>zerocenter-rk-v1</code> + chain constants</td><td>Per-message forward secrecy &amp; break-in recovery for 1:1 DMs.</td></tr>
-  <tr><td>Megolm group chains</td><td>HMAC-SHA256 chain; ChaCha20-Poly1305 zero-nonce; per-msg Ed25519</td><td><code>zerocenter-group-msg-v1</code></td><td>Scalable group messaging; the per-message signature blocks cross-member impersonation.</td></tr>
-  <tr><td>Sealed sender</td><td>ECIES: ephemeral X25519 + HKDF-SHA256 + ChaCha20-Poly1305</td><td><code>zerocenter-sealed-sender-v1</code></td><td>Hides the sender PeerId from network observers.</td></tr>
+  <tr><td>Identity &amp; prekey</td><td>Ed25519 sign over X25519 pubkey</td><td><code>ME55-prekey-v1</code></td><td>Long-term identity; PeerId-verifiable signed prekey.</td></tr>
+  <tr><td>X3DH-lite handshake</td><td>HKDF-SHA256 over 2 or 3 DH outputs</td><td><code>ME55-x3dh-v1</code> / <code>-otpk-v1</code></td><td>Asynchronous first-message key agreement.</td></tr>
+  <tr><td>Double Ratchet</td><td>DH-ratchet + HMAC-SHA256 KDF chains; ChaCha20-Poly1305</td><td><code>ME55-rk-v1</code> + chain constants</td><td>Per-message forward secrecy &amp; break-in recovery for 1:1 DMs.</td></tr>
+  <tr><td>Megolm group chains</td><td>HMAC-SHA256 chain; ChaCha20-Poly1305 zero-nonce; per-msg Ed25519</td><td><code>ME55-group-msg-v1</code></td><td>Scalable group messaging; the per-message signature blocks cross-member impersonation.</td></tr>
+  <tr><td>Sealed sender</td><td>ECIES: ephemeral X25519 + HKDF-SHA256 + ChaCha20-Poly1305</td><td><code>ME55-sealed-sender-v1</code></td><td>Hides the sender PeerId from network observers.</td></tr>
   <tr><td>At-rest storage</td><td>ChaCha20-Poly1305 under the keyring DEK</td><td><code>[ver‖nonce‖ct+tag]</code></td><td>Message bodies, sessions, OTPK privates, outbox, mailbox drops.</td></tr>
-  <tr><td>Wire obfuscation</td><td>ChaCha20 keystream; NTOR/elligator2 handshake</td><td><code>zerocenter-ntor-v1</code>, <code>zc-chacha-{d2l,l2d}-v1</code></td><td>Defeats DPI: uniform-random handshake, 256-byte framed padding, optional IAT jitter.</td></tr>
-  <tr><td>Safety number</td><td>SHA-256 over sorted PeerIds</td><td><code>zerocenter-safety-v1</code></td><td>Out-of-band anti-MITM fingerprint (160-bit, 8&times;5 hex groups).</td></tr>
+  <tr><td>Wire obfuscation</td><td>ChaCha20 keystream; NTOR/elligator2 handshake</td><td><code>ME55-ntor-v1</code>, <code>zc-chacha-{d2l,l2d}-v1</code></td><td>Defeats DPI: uniform-random handshake, 256-byte framed padding, optional IAT jitter.</td></tr>
+  <tr><td>Safety number</td><td>SHA-256 over sorted PeerIds</td><td><code>ME55-safety-v1</code></td><td>Out-of-band anti-MITM fingerprint (160-bit, 8&times;5 hex groups).</td></tr>
 </table>
 
 <h2>§6 — Core Data Flows</h2>
@@ -256,7 +256,7 @@ signature/key reuse.</p>
 <h3>6.1 First DM to a stranger (X3DH bootstrap)</h3>
 <ol class="tight">
   <li>User runs <code>send &lt;peer&gt; &lt;text&gt;</code>. No ratchet session exists.</li>
-  <li>Node fires a <code>PrekeyRequest</code> on <code>/zerocenter/prekey/1.0.0</code>; the plaintext is buffered in <code>pending_sends</code>.</li>
+  <li>Node fires a <code>PrekeyRequest</code> on <code>/ME55/prekey/1.0.0</code>; the plaintext is buffered in <code>pending_sends</code>.</li>
   <li>Responder returns a signed X25519 prekey, optionally with a one-time prekey (OTPK).</li>
   <li>Initiator verifies the Ed25519 signature against the responder's PeerId, runs X3DH-lite (3-DH if an OTPK was supplied, else 2-DH), derives the root key, and builds an initiator <code>RatchetState</code>.</li>
   <li>The buffered message is ratchet-encrypted, wrapped in a signed (or sealed) <code>ProtocolMessage</code>, and sent — or queued to the outbox + DHT mailbox if the peer is offline.</li>
@@ -631,13 +631,13 @@ should be closed before any external audit or release.</b>
 </div>
 
 <div class="foot">
-ZeroCenter Messenger — In-Depth Analysis &amp; Code Audit · main @ aa48e40 · 12,131 LOC / 25 files ·
+ME55 Messenger — In-Depth Analysis &amp; Code Audit · main @ aa48e40 · 12,131 LOC / 25 files ·
 Part A (Analysis §1–§9) + Part B (Audit §10–§11) · 35 findings: 0 Critical / 5 High / 11 Medium /
 12 Low / 7 Informational · generated 2026-05-23.
 </div>
 
 <div class="foot">
-ZeroCenter Messenger — In-Depth Analysis &amp; Code Audit · generated 2026-05-22 · main @ aa48e40 ·
+ME55 Messenger — In-Depth Analysis &amp; Code Audit · generated 2026-05-22 · main @ aa48e40 ·
 Part A (Analysis) complete; Part B (Audit) pending subsystem reviews.
 </div>
 

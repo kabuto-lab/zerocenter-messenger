@@ -358,7 +358,7 @@ spec would not catch F1 because the doc CLAIMS the correct behavior.
 
 **Recommendation.** Rewrite §11 to describe the actual Phase 4c.1 NTOR-
 style handshake, the elligator2 representable-keypair retry loop, the
-HKDF info string (`"zerocenter-ntor-v1"` + `"chacha-key-nonce"`), the
+HKDF info string (`"ME55-ntor-v1"` + `"chacha-key-nonce"`), the
 44-byte OKM split into `(key32, nonce12)`, the frame-padding scheme
 (`FRAME_QUANTUM = 256`, `MAX_PENDING_BYTES`, `MAX_PAYLOAD_PER_FRAME`),
 and the opt-in jitter. Cross-reference INVARIANTS §17 explicitly.
@@ -406,7 +406,7 @@ peer_hmac = ?". Same query performance, no peer-id leak on disk read.
 metadata-privacy work.
 
 **Status — ACTIONED (2026-05-22).** `outbox.peer_id` now stores
-`HMAC-SHA256(DEK, "zerocenter-outbox-peer-v1" || peer_id)` instead of
+`HMAC-SHA256(DEK, "ME55-outbox-peer-v1" || peer_id)` instead of
 the raw PeerId (`store.rs::outbox_peer_tag`). The HMAC is deterministic
 so the by-peer equality lookup and `idx_outbox_peer` index are
 unchanged; it is one-way, which is sufficient because `drain_outbox_for`
@@ -419,10 +419,10 @@ added (`outbox_peer_id_is_hmac_tagged_at_rest`,
 
 ## Invariants verified clean
 
-- **§1 — Domain separators are distinct** between `zerocenter-dm-v1`,
-  `zerocenter-prekey-v1`, `zerocenter-rk-v1`, `zerocenter-x3dh-v1`,
-  `zerocenter-x3dh-otpk-v1`, `zerocenter-safety-v1`, `zerocenter-mailbox-v1`,
-  `zerocenter-mailbox-drop-v1`, `zerocenter-ntor-v1`. No collisions; no
+- **§1 — Domain separators are distinct** between `ME55-dm-v1`,
+  `ME55-prekey-v1`, `ME55-rk-v1`, `ME55-x3dh-v1`,
+  `ME55-x3dh-otpk-v1`, `ME55-safety-v1`, `ME55-mailbox-v1`,
+  `ME55-mailbox-drop-v1`, `ME55-ntor-v1`. No collisions; no
   call to `Identity::sign` or `keypair.sign` without a domain separator
   was found.
 
@@ -566,7 +566,7 @@ added (`outbox_peer_id_is_hmac_tagged_at_rest`,
   the security-relevant event."
 
 - `audit/THREAT_MODEL.md` row G ("State DPI") claim "Cannot identify
-  ZeroCenter traffic by simple signature match" with status "⚠️
+  ME55 traffic by simple signature match" with status "⚠️
   partial — once ScrambleStream is wired (Phase 4b), naive matching
   fails" — the wording reads as if Phase 4b is still pending. Phase
   4b/4c.1/4c.2/4c.2′ are shipped per INVARIANTS §17. Update to "✅

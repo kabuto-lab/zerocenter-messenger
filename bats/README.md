@@ -1,6 +1,6 @@
 # bats/ — node launch helpers
 
-Double-click any of these to start a ZeroCenter node in its own
+Double-click any of these to start a ME55 node in its own
 console window:
 
 | Script      | Profile | Surface | Use                                       |
@@ -13,7 +13,7 @@ console window:
 ## GUI vs CLI
 
 On a binary built with `cargo build --release --features gui`, the
-**GUI is the default** — `zerocenter.exe` with no flag opens the
+**GUI is the default** — `ME55.exe` with no flag opens the
 webview window. `gui.bat` just runs that.
 
 The `--cli` flag forces the headless line-based REPL. The test
@@ -30,7 +30,7 @@ the default and runs the REPL regardless.
 2. Sets `RUST_LOG=info` — makes `warn!`/`info!` logs visible. Without it
    only `error!` shows, so dropped-message reasons stay invisible.
    Lower it to `warn` for less noise, or `debug` for more.
-3. Runs `target\release\zerocenter.exe --profile <name>` (the CLI
+3. Runs `target\release\ME55.exe --profile <name>` (the CLI
    scripts add `--cli`).
 4. `pause`s on exit so a startup crash stays readable.
 

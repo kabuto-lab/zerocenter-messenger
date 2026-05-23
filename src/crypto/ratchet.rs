@@ -45,7 +45,7 @@ use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// Domain separator for the root-key KDF.
-const RK_INFO: &[u8] = b"zerocenter-rk-v1";
+const RK_INFO: &[u8] = b"ME55-rk-v1";
 /// Constant byte fed into KDF_CK to produce the next chain key.
 const CK_CONST_CHAIN: u8 = 0x02;
 /// Constant byte fed into KDF_CK to produce the message key.

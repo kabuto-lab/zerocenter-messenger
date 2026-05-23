@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>ZeroCenter Messenger — Engineering Briefing</title>
+<title>ME55 Messenger — Engineering Briefing</title>
 <style>
   body{font:14px/1.55 -apple-system,Segoe UI,Roboto,sans-serif;max-width:920px;margin:2em auto;padding:0 1em;color:#222}
   h1{border-bottom:2px solid #222;padding-bottom:.3em}
@@ -27,20 +27,20 @@
 </head>
 <body>
 
-<h1>ZeroCenter Messenger — Engineering Briefing</h1>
+<h1>ME55 Messenger — Engineering Briefing</h1>
 <p><em>Single-file context dump for another AI / engineer picking this codebase up cold. Refreshed 2026-05-17 after Phase 4b shipped and Phase 4c.2 went in-flight.</em></p>
 
 <div class="note">
-<b>Repo:</b> <code>F:\__Qwen1\ME55</code> (Windows, NTFS). Branch <code>main</code> tracks <code>origin/main</code> at <a href="https://github.com/kabuto-lab/zerocenter-messenger">github.com/kabuto-lab/zerocenter-messenger</a>. <br>
+<b>Repo:</b> <code>F:\__Qwen1\ME55</code> (Windows, NTFS). Branch <code>main</code> tracks <code>origin/main</code> at <a href="https://github.com/kabuto-lab/ME55-messenger">github.com/kabuto-lab/ME55-messenger</a>. <br>
 <b>Build:</b> rustc 1.95 / cargo 1.95 / VS Build Tools (Windows). <code>cargo test --lib</code> currently 49/49 on <code>main</code>; Phase 4c.2 framing in flight has a known hang in <code>short_inner_writes_dont_desync_keystream</code> (see <em>Active landmines</em>). <br>
 <b>Companion docs:</b> <code>audit/</code> pack (CRYPTO, INVARIANTS — 20 numbered invariants, THREAT_MODEL, README), <code>plans/ROADMAP.md</code> (this doc's prose source).
 </div>
 
 <h2>Vision</h2>
 <p>
-ZeroCenter is a <b>censorship-resistant, leaderless, zero-trust P2P messenger</b>. The design constraints are stronger than Signal's because there is no central server, no operator, and no bootstrap-must-be-online dependency beyond what the user explicitly configures with <code>-B/--bootstrap</code>. Identity is Ed25519. Direct messages are Signal-spec Double-Ratchet encrypted on top of an X3DH-lite handshake. At-rest data is AEAD-encrypted with a per-profile key from the OS keyring. Optional ChaCha20 wire obfuscation defeats pattern-matching DPI; size-fingerprint hiding is in flight.
+ME55 is a <b>censorship-resistant, leaderless, zero-trust P2P messenger</b>. The design constraints are stronger than Signal's because there is no central server, no operator, and no bootstrap-must-be-online dependency beyond what the user explicitly configures with <code>-B/--bootstrap</code>. Identity is Ed25519. Direct messages are Signal-spec Double-Ratchet encrypted on top of an X3DH-lite handshake. At-rest data is AEAD-encrypted with a per-profile key from the OS keyring. Optional ChaCha20 wire obfuscation defeats pattern-matching DPI; size-fingerprint hiding is in flight.
 </p>
-<p>The product is a single Rust binary <code>zerocenter.exe</code>; <code>--profile alice</code> lets multiple instances coexist on one host (separate identity, separate SQLite store, separate keyring entry).</p>
+<p>The product is a single Rust binary <code>ME55.exe</code>; <code>--profile alice</code> lets multiple instances coexist on one host (separate identity, separate SQLite store, separate keyring entry).</p>
 
 <h2>Threat model — what we defend, what we don't</h2>
 <table>
@@ -55,7 +55,7 @@ ZeroCenter is a <b>censorship-resistant, leaderless, zero-trust P2P messenger</b
 <tr><td>Statistical traffic analysis (size, timing)</td><td class="wip">Partial</td><td>Phase 4c.2 frame-padding to 256-byte quantum hides per-message size. IAT jitter (Phase 4c.2′) queued.</td></tr>
 <tr><td>Asynchronous first-message delivery (recipient offline)</td><td class="ok">Yes</td><td>One-time prekey pool (target 20 per profile) + 3-DH X3DH variant. Also persistent outbox draining on connect.</td></tr>
 <tr><td>Long-term offline delivery (both peers never online at once)</td><td class="todo">No</td><td>DHT mailbox store-and-forward scaffolded in storage layer; network layer not wired.</td></tr>
-<tr><td>Local file-system attacker (read-only)</td><td class="ok">Yes (except identity.json)</td><td>Per-profile DEK in OS keyring; ChaCha20-Poly1305 over messages / ratchet sessions / OTPK privates / outbox / mailbox drops. Identity Ed25519+X25519 stays in clear at <code>%LOCALAPPDATA%\ZeroCenter\&lt;profile&gt;\identity.json</code> (INVARIANTS §13 — chicken-and-egg).</td></tr>
+<tr><td>Local file-system attacker (read-only)</td><td class="ok">Yes (except identity.json)</td><td>Per-profile DEK in OS keyring; ChaCha20-Poly1305 over messages / ratchet sessions / OTPK privates / outbox / mailbox drops. Identity Ed25519+X25519 stays in clear at <code>%LOCALAPPDATA%\ME55\&lt;profile&gt;\identity.json</code> (INVARIANTS §13 — chicken-and-egg).</td></tr>
 <tr><td>Local FS attacker (write)</td><td class="wip">Partial</td><td>AEAD blob protected but row context (peer_id) is not in AAD — an attacker could swap blobs between rows. AEAD then fails on next ratchet step. INVARIANTS §11.</td></tr>
 <tr><td>Metadata privacy (who talks to whom, when)</td><td class="todo">No</td><td>Sender + recipient PeerIds visible to on-path observer. Kad lookups reveal who you're searching. Out of scope for v1; future onion-routing layer.</td></tr>
 <tr><td>Deniability</td><td class="todo">No</td><td>Per-message Ed25519 sig over ciphertext = cryptographic proof of authorship. Intentional v1 trade-off for verification simplicity; reverses Signal's deniability property.</td></tr>
@@ -124,8 +124,8 @@ ZeroCenter is a <b>censorship-resistant, leaderless, zero-trust P2P messenger</b
 <tr><td><code>src/crypto/ratchet.rs</code></td><td>Double Ratchet per Signal spec: <code>DHs, DHr, RK, CKs, CKr, Ns, Nr, PN, MKSKIPPED</code>. ChaCha20-Poly1305 AEAD with zero nonce (each <code>mk</code> is one-shot). MAX_SKIP=1000 oldest-first eviction.</td><td><code>RatchetState</code> (no <code>Debug</code> — keeps RK/CK out of <code>{:?}</code> logs), <code>Header</code>, <code>RatchetMessage</code>, <code>kdf_rk</code>, <code>kdf_ck</code></td></tr>
 <tr><td><code>src/crypto/x3dh.rs</code></td><td>X3DH-lite handshake. 2-DH variant (initiator ephemeral × responder spk, initiator identity × responder spk) and 3-DH variant with one-time prekey. Domain-separated info tags so 2-DH and 3-DH derivations are NEVER confusable.</td><td><code>initiator_derive</code>, <code>responder_derive</code>, <code>initiator_derive_with_otpk</code>, <code>responder_derive_with_otpk</code></td></tr>
 <tr><td><code>src/crypto/keyring.rs</code></td><td>Per-profile 32-byte DEK lookup/creation via OS keyring. Loud warning + ephemeral DEK fallback if keyring unreachable.</td><td><code>load_or_create_dek</code></td></tr>
-<tr><td><code>src/protocol/message.rs</code></td><td>Wire envelope: <code>ProtocolMessage{to,from,payload,timestamp,ttl,msg_type,signature}</code> signed over a canonical length-prefixed layout under domain <code>zerocenter-dm-v1</code>. <code>EncryptedPayload{dh,pn,n,ct,x3dh_eph?,otpk_id?}</code> is the Phase 3 ratchet-ciphertext-in-envelope shape.</td><td><code>ProtocolMessage::new_direct_signed</code>, <code>::verify</code>, <code>EncryptedPayload</code></td></tr>
-<tr><td><code>src/network/behaviour.rs</code></td><td>Combined libp2p NetworkBehaviour: Kademlia, Gossipsub, mDNS, Identify, two request-response protocols (<code>/zerocenter/direct-message/2.0.0</code> for DMs, <code>/zerocenter/prekey/1.0.0</code> for prekey fetch). Both request-response use cbor.</td><td><code>Behaviour</code>, <code>BehaviourEvent</code>, <code>PrekeyRequest/Response</code>, <code>OneTimePrekey</code></td></tr>
+<tr><td><code>src/protocol/message.rs</code></td><td>Wire envelope: <code>ProtocolMessage{to,from,payload,timestamp,ttl,msg_type,signature}</code> signed over a canonical length-prefixed layout under domain <code>ME55-dm-v1</code>. <code>EncryptedPayload{dh,pn,n,ct,x3dh_eph?,otpk_id?}</code> is the Phase 3 ratchet-ciphertext-in-envelope shape.</td><td><code>ProtocolMessage::new_direct_signed</code>, <code>::verify</code>, <code>EncryptedPayload</code></td></tr>
+<tr><td><code>src/network/behaviour.rs</code></td><td>Combined libp2p NetworkBehaviour: Kademlia, Gossipsub, mDNS, Identify, two request-response protocols (<code>/ME55/direct-message/2.0.0</code> for DMs, <code>/ME55/prekey/1.0.0</code> for prekey fetch). Both request-response use cbor.</td><td><code>Behaviour</code>, <code>BehaviourEvent</code>, <code>PrekeyRequest/Response</code>, <code>OneTimePrekey</code></td></tr>
 <tr><td><code>src/network/scramble.rs</code></td><td>ChaCha20-keystream wire obfuscation. <code>futures::io::AsyncRead+Write</code> wrapper, per-connection 12-byte nonce exchange via <code>scramble_handshake</code>. Phase 4c.2 framing (in flight) adds 256-byte quantum padding via a length-prefixed frame protocol.</td><td><code>ScrambleStream</code>, <code>MaybeScrambled</code>, <code>scramble_handshake</code>, <code>FRAME_QUANTUM</code></td></tr>
 <tr><td><code>src/storage/store.rs</code></td><td>SQLite layer. Tables: <code>messages</code>, <code>contacts</code>, <code>channels</code>, <code>prekeys_seen</code>, <code>ratchet_sessions</code>, <code>my_otpks</code>, <code>outbox</code>, <code>mailbox_drops</code>, <code>mailbox_poll_state</code>. Every sensitive blob is AEAD-encrypted at rest with the DEK. <code>pop_unused_otpk</code> uses atomic <code>UPDATE … RETURNING</code>.</td><td><code>MessageStore</code>, <code>encrypt_at_rest</code>, <code>decrypt_at_rest</code></td></tr>
 <tr><td><code>src/serde_helpers.rs</code></td><td>Tuple-style serde adapters for <code>[u8; 64]</code> / <code>Option&lt;[u8; 64]&gt;</code> — serde's built-in array impls cap at N=32, our Ed25519 signatures need 64.</td><td><code>serde_arr64</code>, <code>serde_opt_arr64</code></td></tr>
@@ -135,7 +135,7 @@ ZeroCenter is a <b>censorship-resistant, leaderless, zero-trust P2P messenger</b
 
 <h2>Wire protocols</h2>
 
-<h3>Direct-message envelope (<code>/zerocenter/direct-message/2.0.0</code>)</h3>
+<h3>Direct-message envelope (<code>/ME55/direct-message/2.0.0</code>)</h3>
 <pre>
 ProtocolMessage (JSON-serialised, cbor-framed by libp2p request-response):
   to:        Vec&lt;u8&gt;          (recipient PeerId bytes)
@@ -147,7 +147,7 @@ ProtocolMessage (JSON-serialised, cbor-framed by libp2p request-response):
   signature: Vec&lt;u8&gt;          (Ed25519 over canonical signing-bytes)
 
 Signing bytes (NOT JSON — deterministic byte layout):
-  b"zerocenter-dm-v1" || len_be(to) || to || len_be(from) || from
+  b"ME55-dm-v1" || len_be(to) || to || len_be(from) || from
                        || len_be(payload) || payload
                        || be(timestamp) || be(ttl) || msg_type as u8
 
@@ -163,12 +163,12 @@ EncryptedPayload (inside `payload`, also JSON-serialised):
                                 message when 3-DH was used)
 </pre>
 
-<h3>Prekey fetch protocol (<code>/zerocenter/prekey/1.0.0</code>)</h3>
+<h3>Prekey fetch protocol (<code>/ME55/prekey/1.0.0</code>)</h3>
 <pre>
 PrekeyRequest:   ()           (no payload — responder knows what's its)
 PrekeyResponse:
   x25519_public: [u8; 32]      (responder's signed prekey)
-  signature:     [u8; 64]      (Ed25519 over zerocenter-prekey-v1 || x25519_public)
+  signature:     [u8; 64]      (Ed25519 over ME55-prekey-v1 || x25519_public)
   otpk:          Option&lt;OneTimePrekey&gt;
 
 OneTimePrekey:
@@ -326,7 +326,7 @@ process_incoming_dm(transport_peer, request_bytes)
 </div>
 
 <div class="warn">
-<b>Per-profile DEK is in Windows Credential Manager (generic credential).</b> <code>cmdkey /list</code> doesn't show generic credentials — you need PowerShell + <code>CredEnumerateW</code> via P/Invoke, or the Control Panel GUI. When cleaning up test profiles, the directory under <code>%LOCALAPPDATA%\ZeroCenter\&lt;profile&gt;</code> can be <code>rm -rf</code>'d but the keyring entry will linger unless deleted via the GUI. It's a 32-byte random DEK so leaving it is harmless.
+<b>Per-profile DEK is in Windows Credential Manager (generic credential).</b> <code>cmdkey /list</code> doesn't show generic credentials — you need PowerShell + <code>CredEnumerateW</code> via P/Invoke, or the Control Panel GUI. When cleaning up test profiles, the directory under <code>%LOCALAPPDATA%\ME55\&lt;profile&gt;</code> can be <code>rm -rf</code>'d but the keyring entry will linger unless deleted via the GUI. It's a 32-byte random DEK so leaving it is harmless.
 </div>
 
 <div class="warn">
@@ -350,7 +350,7 @@ process_incoming_dm(transport_peer, request_bytes)
 <h2>Conventions a contributor should know</h2>
 <ul>
 <li>Commit messages name the phase: <code>feat(obfs): Phase 4b — ...</code>. Body lists files touched and surface verification.</li>
-<li>Wire-format changes need both peers on the same version. Bump the <code>/zerocenter/&lt;protocol&gt;/&lt;ver&gt;</code> string in <code>src/network/behaviour.rs</code> if the framed payload layout changes.</li>
+<li>Wire-format changes need both peers on the same version. Bump the <code>/ME55/&lt;protocol&gt;/&lt;ver&gt;</code> string in <code>src/network/behaviour.rs</code> if the framed payload layout changes.</li>
 <li>Any new <code>info!</code> / <code>warn!</code> that touches decrypted bytes defaults to <code>debug!</code> (INVARIANTS §19). The <code>println!("🔓 ...")</code> lines are deliberate UI, out of scope.</li>
 <li><code>audit/INVARIANTS.md</code> is load-bearing. Add invariants with the next number; fixed ones get a "(fixed)" annotation rather than deletion so reviewers see the history of claims.</li>
 <li><code>plans/ROADMAP.md</code> is the running roadmap. Refresh it whenever a phase lands.</li>

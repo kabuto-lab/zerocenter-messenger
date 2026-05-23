@@ -3,6 +3,41 @@
 version = 4
 
 [[package]]
+name = "ME55-messenger"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bs58",
+ "chacha20",
+ "chacha20poly1305",
+ "clap",
+ "curve25519-elligator2",
+ "dirs 5.0.1",
+ "ed25519-dalek",
+ "futures",
+ "hex",
+ "hkdf",
+ "hmac",
+ "keyring",
+ "libp2p",
+ "rand 0.8.5",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tauri",
+ "tauri-build",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+ "x25519-dalek",
+ "zeroize",
+]
+
+[[package]]
 name = "adler2"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7097,41 +7132,6 @@ dependencies = [
  "quote",
  "syn 2.0.117",
  "synstructure",
-]
-
-[[package]]
-name = "zerocenter-messenger"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bs58",
- "chacha20",
- "chacha20poly1305",
- "clap",
- "curve25519-elligator2",
- "dirs 5.0.1",
- "ed25519-dalek",
- "futures",
- "hex",
- "hkdf",
- "hmac",
- "keyring",
- "libp2p",
- "rand 0.8.5",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2",
- "tauri",
- "tauri-build",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tokio-util",
- "tracing",
- "tracing-subscriber",
- "x25519-dalek",
- "zeroize",
 ]
 
 [[package]]

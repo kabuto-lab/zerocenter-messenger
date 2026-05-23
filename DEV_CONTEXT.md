@@ -1,4 +1,4 @@
-# ZeroCenter Messenger - Development Context
+# ME55 Messenger - Development Context
 **Date:** March 3, 2026
 **Status:** Phase 1 Complete - P2P Foundation Working
 
@@ -54,7 +54,7 @@ C:\__Qwen1\ME55\
 │   └── index.html          # Frontend UI mockup
 └── target/
     └── release/
-        └── zerocenter.exe  # Built executable
+        └── ME55.exe  # Built executable
 ```
 
 ### Working Commands
@@ -63,17 +63,17 @@ C:\__Qwen1\ME55\
 cargo build --release
 
 # Run two instances
-target\release\zerocenter.exe --profile alice
-target\release\zerocenter.exe --profile bob
+target\release\ME55.exe --profile alice
+target\release\ME55.exe --profile bob
 
 # With logging
 set RUST_LOG=info
-target\release\zerocenter.exe --profile alice
+target\release\ME55.exe --profile alice
 ```
 
 ### Data Locations
-- **Identity:** `%LOCALAPPDATA%\ZeroCenter\<profile>\identity.json`
-- **Messages:** `%LOCALAPPDATA%\ZeroCenter\<profile>\messages.db`
+- **Identity:** `%LOCALAPPDATA%\ME55\<profile>\identity.json`
+- **Messages:** `%LOCALAPPDATA%\ME55\<profile>\messages.db`
 
 ---
 
@@ -213,5 +213,5 @@ BehaviourEvent::Gossipsub(GossipsubEvent::Message { message }) => {
 ---
 
 **Last Build:** `cargo build --release` succeeded
-**Executable:** `target\release\zerocenter.exe` (working)
+**Executable:** `target\release\ME55.exe` (working)
 **Tested:** Multiple instances run simultaneously ✓

@@ -88,7 +88,7 @@ impl Behaviour {
 
         // Kademlia configuration
         let mut kademlia_config = kad::Config::default();
-        kademlia_config.set_protocol_names(vec![StreamProtocol::new("/zerocenter/kad/1.0.0")]);
+        kademlia_config.set_protocol_names(vec![StreamProtocol::new("/ME55/kad/1.0.0")]);
 
         let kademlia = kad::Behaviour::with_config(
             peer_id,
@@ -116,7 +116,7 @@ impl Behaviour {
         .expect("Valid Gossipsub parameters");
 
         // Subscribe to global topic
-        let global_topic = gossipsub::IdentTopic::new("/zerocenter/global");
+        let global_topic = gossipsub::IdentTopic::new("/ME55/global");
         gossipsub.subscribe(&global_topic)?;
 
         // mDNS configuration
@@ -129,10 +129,10 @@ impl Behaviour {
         let public_key = identity.keypair().public();
         let identify_behaviour = identify::Behaviour::new(
             identify::Config::new(
-                "/zerocenter/1.0.0".to_string(),
+                "/ME55/1.0.0".to_string(),
                 public_key
             )
-            .with_agent_version(format!("zerocenter/{}", env!("CARGO_PKG_VERSION")))
+            .with_agent_version(format!("ME55/{}", env!("CARGO_PKG_VERSION")))
         );
 
         // Request-Response configuration for direct messaging
@@ -143,7 +143,7 @@ impl Behaviour {
         // sending plaintext into a node expecting ciphertext.
         let request_response = request_response::cbor::Behaviour::new(
             [(
-                StreamProtocol::new("/zerocenter/direct-message/2.0.0"),
+                StreamProtocol::new("/ME55/direct-message/2.0.0"),
                 request_response::ProtocolSupport::Full,
             )],
             request_response_config.clone(),
@@ -152,7 +152,7 @@ impl Behaviour {
         // Separate request-response instance for the prekey-fetch protocol.
         let prekey = request_response::cbor::Behaviour::new(
             [(
-                StreamProtocol::new("/zerocenter/prekey/1.0.0"),
+                StreamProtocol::new("/ME55/prekey/1.0.0"),
                 request_response::ProtocolSupport::Full,
             )],
             request_response_config,

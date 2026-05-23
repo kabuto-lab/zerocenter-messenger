@@ -3,9 +3,9 @@ use clap::Parser;
 use tracing::info;
 use std::io::{self, BufRead};
 
-/// ZeroCenter Messenger - Censorship-Resistant P2P Communication
+/// ME55 Messenger - Censorship-Resistant P2P Communication
 #[derive(Parser, Debug)]
-#[command(name = "zerocenter")]
+#[command(name = "ME55")]
 #[command(author, version, about = "Censorship-Resistant, Zero-Trust, Leaderless P2P Messenger", long_about = None)]
 pub struct Cli {
     /// Profile name (allows running multiple instances)

@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-/// Configuration for a ZeroCenter node
+/// Configuration for a ME55 node
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Config {
     /// Profile name (e.g., "alice", "bob")

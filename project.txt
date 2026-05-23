@@ -1,5 +1,5 @@
 ================================================================================
-                    ZEROCENTER MESSENGER - PROJECT ANALYSIS
+                    ME55 MESSENGER - PROJECT ANALYSIS
 ================================================================================
 
 Censorship-Resistant, Zero-Trust, Leaderless P2P Communication Platform
@@ -11,7 +11,7 @@ License: MIT
                               EXECUTIVE SUMMARY
 ================================================================================
 
-ZeroCenter Messenger is a decentralized peer-to-peer messaging platform built in
+ME55 Messenger is a decentralized peer-to-peer messaging platform built in
 Rust. It is designed to operate without any central infrastructure, making it
 resistant to censorship, server takedowns, and developer intervention. The
 project leverages libp2p for networking, Ed25519 for cryptographic identity,
@@ -91,9 +91,9 @@ ME55/
    - peer_id() -> PeerId: Get cached peer ID
 
    Storage Location:
-   - Windows: %LOCALAPPDATA%\ZeroCenter\<profile>\identity.json
-   - Linux: ~/.local/share/ZeroCenter/<profile>/identity.json
-   - macOS: ~/Library/Application Support/ZeroCenter/<profile>/identity.json
+   - Windows: %LOCALAPPDATA%\ME55\<profile>\identity.json
+   - Linux: ~/.local/share/ME55/<profile>/identity.json
+   - macOS: ~/Library/Application Support/ME55/<profile>/identity.json
 
 2. P2P NODE (core/node.rs)
    ────────────────────────
@@ -125,12 +125,12 @@ ME55/
    ├─────────────────────────────────────────────────────────────────────────┤
    │ • kademlia: kad::Behaviour<MemoryStore>                                 │
    │   - DHT for peer discovery and content routing                          │
-   │   - Protocol: /zerocenter/kad/1.0.0                                     │
+   │   - Protocol: /ME55/kad/1.0.0                                     │
    │   - Storage: In-memory (ephemeral)                                      │
    │                                                                         │
    │ • gossipsub: gossipsub::Behaviour                                       │
    │   - Pubsub messaging with signed messages                               │
-   │   - Topic: /zerocenter/global                                           │
+   │   - Topic: /ME55/global                                           │
    │   - Validation: Strict mode                                             │
    │   - Heartbeat: 10 seconds                                               │
    │                                                                         │
@@ -140,8 +140,8 @@ ME55/
    │                                                                         │
    │ • identify_behaviour: identify::Behaviour                               │
    │   - Peer information exchange                                           │
-   │   - Protocol: /zerocenter/1.0.0                                         │
-   │   - Agent version: zerocenter/0.1.0                                     │
+   │   - Protocol: /ME55/1.0.0                                         │
+   │   - Agent version: ME55/0.1.0                                     │
    └─────────────────────────────────────────────────────────────────────────┘
 
 4. PROTOCOL MESSAGES (protocol/message.rs)
@@ -280,17 +280,17 @@ BUILD COMMANDS:
   # Release build (optimized with LTO)
   cargo build --release
 
-  # Output: target\release\zerocenter.exe
+  # Output: target\release\ME55.exe
 
 RUNNING MULTIPLE INSTANCES:
 ───────────────────────────
   # Terminal 1 - Alice
   set RUST_LOG=info
-  target\release\zerocenter.exe --profile alice
+  target\release\ME55.exe --profile alice
 
   # Terminal 2 - Bob
   set RUST_LOG=info
-  target\release\zerocenter.exe --profile bob
+  target\release\ME55.exe --profile bob
 
   # Quick test (opens 2 windows automatically)
   test.bat
@@ -307,9 +307,9 @@ CLI ARGUMENTS:
 
 DATA STORAGE LOCATIONS:
 ───────────────────────
-  Windows: %LOCALAPPDATA%\ZeroCenter\<profile>\
-  Linux:   ~/.local/share/ZeroCenter/<profile>/
-  macOS:   ~/Library/Application Support/ZeroCenter/<profile>/
+  Windows: %LOCALAPPDATA%\ME55\<profile>\
+  Linux:   ~/.local/share/ME55/<profile>/
+  macOS:   ~/Library/Application Support/ME55/<profile>/
 
   Files per profile:
   - identity.json  - Ed25519 keys (private, owner read/write only on Unix)
@@ -454,7 +454,7 @@ IMPLEMENTATION TASKS:
 ================================================================================
 
   ┌───────────────────────────────────────────────────────────────────────────┐
-  │                           ZeroCenter Architecture                         │
+  │                           ME55 Architecture                         │
   └───────────────────────────────────────────────────────────────────────────┘
 
   ┌───────────────────────────────────────────────────────────────────────────┐
@@ -532,7 +532,7 @@ IMPLEMENTATION TASKS:
   9. Kademlia Add Peer ←──────────────→ Kademlia Add Peer
      ↓                                       ↓
   10. Gossipsub Subscribe ←───────────→ Gossipsub Subscribe
-      /zerocenter/global                   /zerocenter/global
+      /ME55/global                   /ME55/global
       ↓                                       ↓
   11. Send Message (future) ──────────→ Receive Message (future)
       - Create ProtocolMessage
@@ -655,7 +655,7 @@ External Resources:
                               CONTACT & LICENSE
 ================================================================================
 
-Authors: ZeroCenter Team
+Authors: ME55 Team
 License: MIT
 Description: Censorship-Resistant, Zero-Trust, Leaderless P2P Messenger
 

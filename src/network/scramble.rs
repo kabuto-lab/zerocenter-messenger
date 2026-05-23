@@ -546,7 +546,7 @@ fn drain_pending<S: AsyncWrite + Unpin>(
 /// **Key + nonce derivation.** Both sides Diffie-Hellman their own
 /// ephemeral private with the peer's decoded public, producing
 /// `shared_secret`. From `shared_secret || obfs_key` we HKDF-SHA256
-/// (salt = `"zerocenter-ntor-v1"`, info = `"chacha-key-nonce"`) a
+/// (salt = `"ME55-ntor-v1"`, info = `"chacha-key-nonce"`) a
 /// 44-byte OKM that splits into a fresh ChaCha20 `(key32 || nonce12)`.
 /// The pre-shared `obfs_key` keeps its role as the authenticator: a
 /// MITM substituting their own ephemerals derives a different OKM and
@@ -671,7 +671,7 @@ where
 /// to assert the two pairs actually differ (regression test for F1
 /// where both directions accidentally used the same `(key, nonce)`).
 ///
-/// The HKDF salt `"zerocenter-ntor-v1"` is unchanged from the pre-F1
+/// The HKDF salt `"ME55-ntor-v1"` is unchanged from the pre-F1
 /// derivation; only the info strings are role-distinguished. This
 /// keeps the math identical to the v1 single-key form modulo the
 /// info-string XOR through the HKDF HMAC, which is the standard way
@@ -683,13 +683,13 @@ pub(crate) fn derive_ntor_keystream_pairs(
     let mut ikm = [0u8; 64];
     ikm[..32].copy_from_slice(shared_secret);
     ikm[32..].copy_from_slice(obfs_key);
-    let hk = hkdf::Hkdf::<sha2::Sha256>::new(Some(b"zerocenter-ntor-v1"), &ikm);
+    let hk = hkdf::Hkdf::<sha2::Sha256>::new(Some(b"ME55-ntor-v1"), &ikm);
 
     let mut okm_d2l = [0u8; 44];
-    hk.expand(b"zc-chacha-d2l-v1", &mut okm_d2l)
+    hk.expand(b"ME55-chacha-d2l-v1", &mut okm_d2l)
         .expect("44 bytes < 32 * 255 = HKDF max output");
     let mut okm_l2d = [0u8; 44];
-    hk.expand(b"zc-chacha-l2d-v1", &mut okm_l2d)
+    hk.expand(b"ME55-chacha-l2d-v1", &mut okm_l2d)
         .expect("44 bytes < 32 * 255 = HKDF max output");
 
     let mut k1 = [0u8; 32];

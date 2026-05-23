@@ -29,7 +29,7 @@ pub type GroupId = [u8; 32];
 /// messages. Distinct from the per-message DM separator so a signature
 /// produced under the DM path cannot be replayed as a membership-
 /// update authorisation, and vice versa (INVARIANTS §1 hygiene).
-pub const GROUP_CTRL_DOMAIN_SEPARATOR: &[u8] = b"zerocenter-group-ctrl-v1";
+pub const GROUP_CTRL_DOMAIN_SEPARATOR: &[u8] = b"ME55-group-ctrl-v1";
 
 /// Domain separator for per-message Ed25519 signatures inside the
 /// Megolm sender-chain. Distinct from the founder-control separator
@@ -38,7 +38,7 @@ pub const GROUP_CTRL_DOMAIN_SEPARATOR: &[u8] = b"zerocenter-group-ctrl-v1";
 /// founder-issued control signature cannot be replayed as a member's
 /// per-message signature even when the signer happens to be the same
 /// principal.
-pub const GROUP_MSG_DOMAIN_SEPARATOR: &[u8] = b"zerocenter-group-msg-v1";
+pub const GROUP_MSG_DOMAIN_SEPARATOR: &[u8] = b"ME55-group-msg-v1";
 
 /// In-memory representation of a `groups` table row. Returned by
 /// `MessageStore::group_get` and `group_list`.

@@ -460,7 +460,7 @@ impl P2PNode {
             tokio::time::interval(Duration::from_secs(mailbox::POLL_TICK_SECS));
         poll_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         // Fire the first poll soon after startup (1 second) so users
-        // running `zerocenter` after being offline don't wait 10 min
+        // running `ME55` after being offline don't wait 10 min
         // for a stale-mailbox sweep.
         tokio::time::sleep(Duration::from_secs(1)).await;
 

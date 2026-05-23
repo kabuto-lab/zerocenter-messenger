@@ -1,4 +1,4 @@
-# ENTITY — ZeroCenter Messenger: конституция совместной работы
+# ENTITY — ME55 Messenger: конституция совместной работы
 
 Назначение: единая точка для человека и ИИ — как развивать продукт без регрессий, куда смотреть перед правками и как собирать/распространять билды. Между чатами «памяти» нет: опирайся на этот файл, `README.md`, `DEV_CONTEXT.md`, код и `Cargo.toml`.
 
@@ -50,7 +50,7 @@
 | Точные версии                                | `Cargo.lock`                        |
 | Конфиг будущего Tauri                        | `tauri.conf.json`                   |
 | Смоук-запуск двух инстансов                  | `test.bat`                          |
-| Пути профилей                                | `%LOCALAPPDATA%\ZeroCenter\<prof>\` |
+| Пути профилей                                | `%LOCALAPPDATA%\ME55\<prof>\` |
 
 Правило: перед архитектурным изменением — `project.html` и `DEV_CONTEXT.md`; перед правкой сетевого поведения — `src/network/behaviour.rs` и `src/core/node.rs`; перед изменением БД — `src/storage/store.rs`.
 
@@ -72,13 +72,13 @@
 ```bash
 # Сборка
 cargo build                 # dev
-cargo build --release       # prod-бинарь target/release/zerocenter.exe
+cargo build --release       # prod-бинарь target/release/ME55.exe
 
 # Запуск двух инстансов (ручной smoke)
 set RUST_LOG=info
-target\release\zerocenter.exe --profile alice
+target\release\ME55.exe --profile alice
 # в другом окне:
-target\release\zerocenter.exe --profile bob
+target\release\ME55.exe --profile bob
 
 # Быстрый smoke
 test.bat                    # открывает два окна с alice/bob
@@ -104,11 +104,11 @@ CLI-команды: `help`, `connect <multiaddr>`, `send <peer_id> <msg>`, `peer
 
 Правила:
 
-- **Версия протокола.** `StreamProtocol::new("/zerocenter/<feature>/X.Y.Z")` — при ломающих изменениях менять `X` или `Y`. Пиры со старым `X` отсекаются Identify-rejectom, а не зависают.
+- **Версия протокола.** `StreamProtocol::new("/ME55/<feature>/X.Y.Z")` — при ломающих изменениях менять `X` или `Y`. Пиры со старым `X` отсекаются Identify-rejectom, а не зависают.
 - **Identity vs profile.** `identity.json` привязан к профилю. Удаление профиля = новая идентичность = старые контакты вас не узнают. Не перезаписывать `identity.json` в процессе миграций.
 - **SQLite-миграции.** Все `CREATE TABLE IF NOT EXISTS` идемпотентны. Новые колонки — через `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` с дефолтом. Перед релизом, меняющим схему — bump `PRAGMA user_version` и миграционный шаг.
 - **Release-сборка.** `cargo build --release` с `lto = true`, `codegen-units = 1`, `strip = true` (уже в `Cargo.toml`). Перед выпуском — `cargo clippy -- -D warnings` и `cargo test`.
-- **Windows-специфика.** `target\release\zerocenter.exe` — путь с обратными слэшами. Firewall должен пропустить бинарь, иначе mDNS/TCP не увидят соседей.
+- **Windows-специфика.** `target\release\ME55.exe` — путь с обратными слэшами. Firewall должен пропустить бинарь, иначе mDNS/TCP не увидят соседей.
 - **Проверка совместимости.** После любого изменения протокола/схемы — запустить старый бинарь и новый, убедиться, что они либо работают, либо корректно отказывают (не виснут).
 
 Регламент выпуска:
@@ -135,7 +135,7 @@ CLI-команды: `help`, `connect <multiaddr>`, `send <peer_id> <msg>`, `peer
 - `Bash` — `cargo` команды, но не для файловых операций (использовать Read/Write/Edit).
 - `Edit` — точечные правки, `replace_all: false` по умолчанию.
 
-Запрещено: редактировать `Cargo.lock` вручную; вызывать `cargo update` без запроса; трогать `target/` и `%LOCALAPPDATA%\ZeroCenter\`.
+Запрещено: редактировать `Cargo.lock` вручную; вызывать `cargo update` без запроса; трогать `target/` и `%LOCALAPPDATA%\ME55\`.
 
 ---
 
@@ -175,7 +175,7 @@ CLI-команды: `help`, `connect <multiaddr>`, `send <peer_id> <msg>`, `peer
 
 ## 10. История документа
 
-- 2026-04-15 — создание `ENTITY.md`, адаптация подхода ESCORT под Rust/libp2p стек ZeroCenter Messenger.
+- 2026-04-15 — создание `ENTITY.md`, адаптация подхода ESCORT под Rust/libp2p стек ME55 Messenger.
 
 ---
 

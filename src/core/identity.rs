@@ -11,7 +11,7 @@ use x25519_dalek::{PublicKey as X25519Public, StaticSecret as X25519Secret};
 /// Domain-separator tag used when Ed25519-signing the X25519 prekey. Binds
 /// the signature to this purpose so it can't be replayed against another
 /// payload that happens to look like a 32-byte X25519 pubkey.
-const PREKEY_SIG_DOMAIN: &[u8] = b"zerocenter-prekey-v1";
+const PREKEY_SIG_DOMAIN: &[u8] = b"ME55-prekey-v1";
 
 /// Long-term identity for a peer.
 ///

@@ -1,4 +1,4 @@
-# ZeroCenter Messenger
+# ME55 Messenger
 
 Censorship-Resistant, Zero-Trust, Leaderless P2P Communication Platform
 
@@ -26,8 +26,8 @@ Censorship-Resistant, Zero-Trust, Leaderless P2P Communication Platform
 - ✅ **End-to-end encryption** via Double Ratchet (per Signal spec). ChaCha20-Poly1305 AEAD, HKDF-SHA256 root-key KDF, HMAC-SHA256 chain-key KDF, per-session forward secrecy + post-compromise security.
 - ✅ **X3DH-lite handshake** (two-DH variant): initiator's ephemeral + responder's signed prekey derive the initial root key. The signed prekey is Ed25519-signed by the responder's long-term identity key.
 - ✅ **Signed prekey on Identity** — `identity.json` carries an X25519 prekey alongside the Ed25519 identity, with the Ed25519 signature over it.
-- ✅ **Prekey-fetch protocol** `/zerocenter/prekey/1.0.0` — peers exchange signed prekeys on demand; cached in `prekeys_seen` SQLite table.
-- ✅ **Wire format** bumped to `/zerocenter/direct-message/2.0.0`. `ProtocolMessage.payload` is now a serialized `EncryptedPayload { dh, pn, n, ct, x3dh_eph? }`. The outer Ed25519 envelope signature now authenticates the ciphertext.
+- ✅ **Prekey-fetch protocol** `/ME55/prekey/1.0.0` — peers exchange signed prekeys on demand; cached in `prekeys_seen` SQLite table.
+- ✅ **Wire format** bumped to `/ME55/direct-message/2.0.0`. `ProtocolMessage.payload` is now a serialized `EncryptedPayload { dh, pn, n, ct, x3dh_eph? }`. The outer Ed25519 envelope signature now authenticates the ciphertext.
 - ✅ **Session persistence** — ratchet state survives restart (`ratchet_sessions` table, JSON blob, saved after every encrypt/decrypt). See threat model: **state is plaintext at rest** until Phase 3.5.
 - ✅ **Out-of-order delivery** tolerated up to `MAX_SKIP=1000` skipped keys per session; oldest-first eviction beyond.
 - ✅ **Pending send/recv queues** — if the peer's prekey isn't cached, the message is queued and a prekey fetch is fired; drained on response.
@@ -44,14 +44,14 @@ Open two terminal windows:
 ```bash
 cd F:\__Qwen1\ME55
 set RUST_LOG=info
-target\release\zerocenter.exe --profile alice
+target\release\ME55.exe --profile alice
 ```
 
 **Window 2 (Bob):**
 ```bash
 cd F:\__Qwen1\ME55
 set RUST_LOG=info
-target\release\zerocenter.exe --profile bob
+target\release\ME55.exe --profile bob
 ```
 
 **Option 2: Test Script**
@@ -61,7 +61,7 @@ Double-click `test.bat` - it will open two console windows automatically.
 ### Expected Output
 
 ```
-📡 ZeroCenter Messenger
+📡 ME55 Messenger
 ══════════════════════════════════════
 Profile: alice
 Peer ID: 12D3KooWRx...
@@ -72,7 +72,7 @@ Type 'help' for commands, 'quit' to exit.
 ```
 
 Each instance will:
-- Generate its own Ed25519 identity (saved to `%LOCALAPPDATA%\ZeroCenter\<profile>\`)
+- Generate its own Ed25519 identity (saved to `%LOCALAPPDATA%\ME55\<profile>\`)
 - Listen on a random port
 - Be discoverable via mDNS on local network
 - Be able to connect to other peers
@@ -117,7 +117,7 @@ cargo build
 cargo build --release
 ```
 
-Output: `target\release\zerocenter.exe`
+Output: `target\release\ME55.exe`
 
 ### Run with Logging
 ```bash
@@ -159,9 +159,9 @@ The **first** DM to a new peer triggers a prekey fetch + X3DH handshake under th
 
 ## 💾 Data Storage
 
-- **Windows:** `%LOCALAPPDATA%\ZeroCenter\<profile>\`
-- **Linux:** `~/.local/share/ZeroCenter/<profile>/`
-- **macOS:** `~/Library/Application Support/ZeroCenter/<profile>/`
+- **Windows:** `%LOCALAPPDATA%\ME55\<profile>\`
+- **Linux:** `~/.local/share/ME55/<profile>/`
+- **macOS:** `~/Library/Application Support/ME55/<profile>/`
 
 Files per profile:
 - `identity.json` — Ed25519 identity keys + X25519 signed prekey + the Ed25519 signature over the prekey. **Private — never transmitted.** On unix the file is `chmod 0600`; on Windows it falls back to default ACL (a Phase 3.5 task).
@@ -176,13 +176,13 @@ Files per profile:
 
 ### Cryptography in use
 - **Identity:** Ed25519 long-term key, generated on first run.
-- **Signed prekey:** X25519 long-term prekey, Ed25519-signed by the identity key (domain `zerocenter-prekey-v1`).
+- **Signed prekey:** X25519 long-term prekey, Ed25519-signed by the identity key (domain `ME55-prekey-v1`).
 - **Transport (hop-level):** libp2p Noise Protocol (ChaCha20-Poly1305).
 - **Peer ID:** Ed25519 inline-pubkey multihash (code = 0). Recipients can verify signatures against keys extracted directly from the PeerId — no out-of-band key distribution.
-- **Application-layer authentication:** Every DM is Ed25519-signed over a domain-separated, length-prefixed canonical byte layout (`zerocenter-dm-v1`). Receivers verify the signature *and* check that the transport peer matches the signed sender.
+- **Application-layer authentication:** Every DM is Ed25519-signed over a domain-separated, length-prefixed canonical byte layout (`ME55-dm-v1`). Receivers verify the signature *and* check that the transport peer matches the signed sender.
 - **End-to-end confidentiality:** Double Ratchet (per Signal spec).
-  - Initial key agreement: X3DH-lite (two-DH: initiator-ephemeral × responder-prekey, initiator-identity × responder-prekey). HKDF-SHA256 with domain `zerocenter-x3dh-v1`.
-  - Root-key KDF: HKDF-SHA256 with domain `zerocenter-rk-v1`.
+  - Initial key agreement: X3DH-lite (two-DH: initiator-ephemeral × responder-prekey, initiator-identity × responder-prekey). HKDF-SHA256 with domain `ME55-x3dh-v1`.
+  - Root-key KDF: HKDF-SHA256 with domain `ME55-rk-v1`.
   - Chain-key KDF: HMAC-SHA256 with one-byte constants per Signal spec.
   - Per-message AEAD: ChaCha20-Poly1305 with zero nonce (safe: each message key is one-shot).
   - Associated data: length-prefixed `sender_pid || recipient_pid` + the ratchet header bytes.
@@ -250,7 +250,7 @@ Phase 3 lands the cryptographic core. To reach parity with Signal:
 **Want to see debug logs?**
 ```bash
 set RUST_LOG=trace
-target\release\zerocenter.exe --profile alice
+target\release\ME55.exe --profile alice
 ```
 
 ## 📄 License

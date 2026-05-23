@@ -75,8 +75,8 @@ jobs:
       - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
-          name: zerocenter-linux-x86_64
-          path: target/release/zerocenter
+          name: ME55-linux-x86_64
+          path: target/release/ME55
 
   build-windows:
     name: Release build (Windows x86_64)
@@ -92,5 +92,5 @@ jobs:
       - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
-          name: zerocenter-windows-x86_64
-          path: target/release/zerocenter.exe
+          name: ME55-windows-x86_64
+          path: target/release/ME55.exe

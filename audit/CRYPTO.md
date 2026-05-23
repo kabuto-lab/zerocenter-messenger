@@ -1,6 +1,6 @@
 # CRYPTO.md — Formal Specification
 
-This document lists every cryptographic primitive and construction used by ZeroCenter, with exact parameters and a pointer to the implementation. The intent is that a reviewer can map every byte going through every KDF / AEAD / signature.
+This document lists every cryptographic primitive and construction used by ME55, with exact parameters and a pointer to the implementation. The intent is that a reviewer can map every byte going through every KDF / AEAD / signature.
 
 ## Notation
 
@@ -30,7 +30,7 @@ This document lists every cryptographic primitive and construction used by ZeroC
 - **Algorithm:** X25519 (`x25519-dalek` 2.0, `static_secrets` feature).
 - **Signature:** Ed25519 over `prekey_signing_bytes(pub)` where
   ```
-  prekey_signing_bytes(pub) = "zerocenter-prekey-v1" || pub
+  prekey_signing_bytes(pub) = "ME55-prekey-v1" || pub
   ```
 - **Storage:** plaintext in `identity.json` alongside the Ed25519 fields.
 - **Verification:** recipients extract the Ed25519 verifying key from the responder's PeerId and check the signature before using the prekey.
@@ -87,7 +87,7 @@ Two authentication paths share the same struct. `is_sealed()` returns true iff `
 ### 5.2 Direct-path canonical signing bytes
 ```
 direct_signing_bytes() =
-    "zerocenter-dm-v1"          // domain separator
+    "ME55-dm-v1"          // domain separator
  || len_be32(to)    || to
  || len_be32(from)  || from
  || len_be32(payload) || payload
@@ -100,7 +100,7 @@ Length-prefixed; deterministic; excludes `signature` itself.
 ### 5.3 Sealed-path canonical signing bytes (Phase 5)
 ```
 sealed_signing_bytes(sender_pid) =
-    "zerocenter-sealed-dm-v1"   // DISTINCT domain separator (§1)
+    "ME55-sealed-dm-v1"   // DISTINCT domain separator (§1)
  || len_be32(to)         || to
  || len_be32(sender_pid) || sender_pid
  || len_be32(payload)    || payload
@@ -134,7 +134,7 @@ After `verify` returns the *signed* sender PeerId, the receiver also checks:
 - **Enforced at:** `src/core/node.rs::process_incoming_dm` (step 3, gated on the `sealed` flag).
 
 ### 5.7 Domain separators
-`zerocenter-dm-v1` (direct) and `zerocenter-sealed-dm-v1` (sealed). Distinct to prevent cross-path signature replay (INVARIANTS §1).
+`ME55-dm-v1` (direct) and `ME55-sealed-dm-v1` (sealed). Distinct to prevent cross-path signature replay (INVARIANTS §1).
 
 **Files:** `src/protocol/message.rs`, `src/crypto/sealed.rs`, `src/core/node.rs::process_incoming_dm`
 
@@ -169,7 +169,7 @@ DH2 = DH(initiator_identity_x25519, responder_signed_prekey)
 SK  = HKDF(
         salt = 0^32,
         ikm  = DH1 || DH2,
-        info = "zerocenter-x3dh-v1",
+        info = "ME55-x3dh-v1",
         L    = 32)
 ```
 
@@ -188,7 +188,7 @@ DH3 = DH(initiator_ephemeral, responder_otpk)
 SK  = HKDF(
         salt = 0^32,
         ikm  = DH1 || DH2 || DH3,
-        info = "zerocenter-x3dh-otpk-v1",  // DISTINCT FROM 2-DH
+        info = "ME55-x3dh-otpk-v1",  // DISTINCT FROM 2-DH
         L    = 32)
 ```
 
@@ -255,7 +255,7 @@ state.ns = state.nr = state.pn = 0
 (new_rk, ck) = split64(HKDF(
     salt = rk,
     ikm  = dh_out,
-    info = "zerocenter-rk-v1",
+    info = "ME55-rk-v1",
     L    = 64))
 ```
 First 32 bytes are the new root key; second 32 bytes are the new chain key.
@@ -331,7 +331,7 @@ When a message arrives ahead of expected `nr`, derive (and cache) the message ke
 
 ```
 fingerprint = SHA-256(
-    "zerocenter-safety-v1"
+    "ME55-safety-v1"
  || len_be32(|a|) || a
  || len_be32(|b|) || b
 )[:20]
@@ -348,7 +348,7 @@ Displayed as 40 hex characters in 8 space-separated groups of 5: `1a2b3 c4d5e f6
 ### 10.1 Data-Encryption Key (DEK)
 
 - **Algorithm:** ChaCha20-Poly1305 with a random per-blob nonce.
-- **Key:** 32-byte random, generated on first run via `OsRng`. Stored in the OS keyring under `service="zerocenter-messenger"`, `account=<profile>`. Encoded as 64 hex chars for the keyring API.
+- **Key:** 32-byte random, generated on first run via `OsRng`. Stored in the OS keyring under `service="ME55-messenger"`, `account=<profile>`. Encoded as 64 hex chars for the keyring API.
 - **Fallback:** if the keyring is unreachable, an ephemeral DEK is used with a loud `warn!`. Documented as fail-loud (don't silently fall back to plaintext on disk).
 - **File:** `src/crypto/keyring.rs`
 
@@ -394,7 +394,7 @@ On every new connection, both peers run a hidden-nonce handshake:
 1. **Ephemeral keypair generation.** Each side picks a random X25519 private key whose public has an elligator2 representative under the `Randomized` variant of `curve25519-elligator2 = "0.1.0-alpha.2"`. Roughly 50% of keys have a representative; the generator retries up to 64 times (2⁻⁶⁴ failure under a healthy RNG).
 2. **Wire exchange.** Both sides send their 32-byte elligator2 representative. To a passive observer those 32 bytes are computationally indistinguishable from uniform random — no plaintext nonce prefix to fingerprint.
 3. **X25519 DH.** Each side decodes the peer's representative back to a Montgomery point and computes `shared_secret = X25519(my_priv, their_pub)`. The handshake refuses `shared_secret == 0` (low-order peer pubkey defence; audit F2).
-4. **HKDF-SHA256 dual derivation.** From `IKM = shared_secret || obfs_key` with `salt = "zerocenter-ntor-v1"`, expand TWO 44-byte OKMs under role-distinguished `info` strings:
+4. **HKDF-SHA256 dual derivation.** From `IKM = shared_secret || obfs_key` with `salt = "ME55-ntor-v1"`, expand TWO 44-byte OKMs under role-distinguished `info` strings:
    - `"zc-chacha-d2l-v1"` → dialer→listener keystream `(key32 || nonce12)`.
    - `"zc-chacha-l2d-v1"` → listener→dialer keystream `(key32 || nonce12)`.
    Per-direction keying is load-bearing: with a single shared `(key, nonce)` for both directions, both peers' outbound ciphers would generate the same keystream — a textbook two-time-pad recoverable by XOR-ing the two directions of a wire capture (audit F1, fixed at commit 2273cf5).
@@ -442,7 +442,7 @@ Per-message ECIES variant. Sender:
 
 1. Generate ephemeral X25519 `(e_priv, e_pub)`.
 2. `shared = X25519(e_priv, recipient_x25519_prekey_pub)`. Refused if `shared == 0` (low-order pubkey defence).
-3. `(aead_key, aead_nonce) = HKDF-SHA256(salt="zerocenter-sealed-sender-v1", ikm=shared, info="chacha-key-nonce")`, 44-byte expansion split as `(32, 12)`.
+3. `(aead_key, aead_nonce) = HKDF-SHA256(salt="ME55-sealed-sender-v1", ikm=shared, info="chacha-key-nonce")`, 44-byte expansion split as `(32, 12)`.
 4. `sender_cert = len_be32(sender_pid) || sender_pid || len_be32(signature) || signature`, where `signature` is over the sealed-path signing bytes (CRYPTO §5.3) under the sender's Ed25519 key.
 5. `aead_ct = ChaCha20-Poly1305-Encrypt(aead_key, aead_nonce, sender_cert, aad=empty)`.
 6. Wire: `e_pub (32 bytes) || aead_ct`. This goes into `ProtocolMessage::sealed_sender`.
@@ -521,7 +521,7 @@ build_group_ad(group_id, sender_pid)
 
 **Per-message Ed25519 signature** binds the ciphertext to the chain owner. Each `SenderChain` is born with its own Ed25519 keypair; the public half is included in the `SenderKeyBundle` (§12.4) so receivers can verify. Canonical signing bytes:
 ```
-GROUP_MSG_DOMAIN_SEPARATOR = b"zerocenter-group-msg-v1"
+GROUP_MSG_DOMAIN_SEPARATOR = b"ME55-group-msg-v1"
 canonical = DOMAIN
           || index_be (4)
           || ad_len_be (4) || ad
@@ -554,7 +554,7 @@ GroupControl = CreateGroup
              | SenderKeyDistribution
              | Leave
 
-GROUP_CTRL_DOMAIN_SEPARATOR = b"zerocenter-group-ctrl-v1"
+GROUP_CTRL_DOMAIN_SEPARATOR = b"ME55-group-ctrl-v1"
 ```
 
 Distinct domain separator from §1's DM/sealed paths so a captured DM signature can't be replayed as group control authorization (and vice versa).

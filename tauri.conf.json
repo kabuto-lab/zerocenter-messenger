@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "ZeroCenter Messenger",
+  "productName": "ME55 Messenger",
   "version": "0.1.0",
-  "identifier": "com.zerocenter.messenger",
+  "identifier": "com.ME55.messenger",
   "build": {
     "frontendDist": "dist",
     "devUrl": "http://localhost:1420",
@@ -14,7 +14,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "ZeroCenter Messenger",
+        "title": "ME55 Messenger",
         "width": 1100,
         "height": 700,
         "minWidth": 800,
@@ -31,7 +31,7 @@
     "active": false,
     "targets": "all",
     "category": "SocialNetworking",
-    "shortDescription": "ZeroCenter Messenger",
+    "shortDescription": "ME55 Messenger",
     "longDescription": "Censorship-Resistant, Zero-Trust, Leaderless P2P Messenger",
     "copyright": "",
     "icon": [],

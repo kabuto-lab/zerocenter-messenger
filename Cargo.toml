@@ -1,8 +1,8 @@
 [package]
-name = "zerocenter-messenger"
+name = "ME55-messenger"
 version = "0.1.0"
 edition = "2021"
-authors = ["ZeroCenter Team"]
+authors = ["ME55 Team"]
 description = "Censorship-Resistant, Zero-Trust, Leaderless P2P Messenger"
 
 [dependencies]
@@ -118,7 +118,7 @@ tauri-build = { version = "2", optional = true }
 # implementation is gated on this feature so the default CLI build
 # stays slim.
 #
-# Build: `cargo build --release --features gui`. Run: `zerocenter --gui`.
+# Build: `cargo build --release --features gui`. Run: `ME55 --gui`.
 # The Tauri runtime + build script are pulled in only when this is on,
 # courtesy of the `optional = true` flags on the deps below.
 gui = ["dep:tauri", "dep:tauri-build"]
@@ -132,7 +132,7 @@ tempfile = "3"
 tokio-util = { version = "0.7", features = ["compat"] }
 
 [[bin]]
-name = "zerocenter"
+name = "ME55"
 path = "src/main.rs"
 
 [profile.release]

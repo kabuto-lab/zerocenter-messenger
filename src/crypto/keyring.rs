@@ -10,7 +10,7 @@
 //! - **Linux:** Secret Service via dbus (gnome-keyring, kwallet, ...).
 //!
 //! Service / account convention:
-//! - service = `"zerocenter-messenger"` (constant)
+//! - service = `"ME55-messenger"` (constant)
 //! - account = the profile name (e.g. `"alice"`)
 //!
 //! The DEK is encoded as lowercase hex (64 chars) inside the keyring.
@@ -19,7 +19,7 @@ use anyhow::{anyhow, Result};
 use rand::RngCore;
 use tracing::{info, warn};
 
-const KEYRING_SERVICE: &str = "zerocenter-messenger";
+const KEYRING_SERVICE: &str = "ME55-messenger";
 const DEK_LEN: usize = 32;
 
 /// Look up the DEK for `profile`. If none is stored yet, generate a fresh

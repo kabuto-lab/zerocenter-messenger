@@ -11,13 +11,13 @@ use x25519_dalek::StaticSecret;
 /// serialized [`EncryptedPayload`] in Phase 3 — the *signed-bytes layout*
 /// did not change (still to+from+payload+timestamp+ttl+msg_type). Bump
 /// only if that layout changes.
-const DOMAIN_SEPARATOR: &[u8] = b"zerocenter-dm-v1";
+const DOMAIN_SEPARATOR: &[u8] = b"ME55-dm-v1";
 
 /// Phase 5 sealed-sender signature domain separator. Distinct from
 /// [`DOMAIN_SEPARATOR`] so a signature produced under the direct path
 /// cannot be replayed under the sealed path or vice versa (INVARIANTS §1
 /// hygiene).
-const SEALED_DOMAIN_SEPARATOR: &[u8] = b"zerocenter-sealed-dm-v1";
+const SEALED_DOMAIN_SEPARATOR: &[u8] = b"ME55-sealed-dm-v1";
 
 /// Phase 3 wire-form payload: a Double-Ratchet ciphertext plus the per-
 /// message header. The outer [`ProtocolMessage::payload`] field carries
@@ -118,7 +118,7 @@ pub enum ProtocolError {
 ///
 /// **Direct path (legacy).** `from` + `signature` carry a clear sender
 /// PeerId and an Ed25519 signature over the canonical signing bytes
-/// (`zerocenter-dm-v1` || to || from || payload || ts || ttl || msg_type).
+/// (`ME55-dm-v1` || to || from || payload || ts || ttl || msg_type).
 /// The transport-layer source PeerId is cross-checked against `from`
 /// (INVARIANTS §2). Used when the sender does NOT yet have the
 /// recipient's X25519 prekey (e.g. very first contact before
@@ -127,7 +127,7 @@ pub enum ProtocolError {
 /// **Sealed path (Phase 5).** `sealed_sender` carries an ECIES-style
 /// ciphertext encrypted to the recipient's long-term X25519 prekey
 /// containing `(sender_pid_bytes || signature_bytes)`. The signature
-/// uses a DISTINCT domain separator (`zerocenter-sealed-dm-v1`) so a
+/// uses a DISTINCT domain separator (`ME55-sealed-dm-v1`) so a
 /// captured direct signature can't be replayed under sealed semantics.
 /// `from` and `signature` are empty on the wire. The §2 transport-peer
 /// cross-check is intentionally skipped — the entire point of sealed
@@ -342,7 +342,7 @@ impl ProtocolMessage {
     }
 
     /// Canonical signing bytes for the direct path.
-    /// Domain `"zerocenter-dm-v1"`. Layout has not changed since Phase 1.
+    /// Domain `"ME55-dm-v1"`. Layout has not changed since Phase 1.
     fn direct_signing_bytes(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(
             DOMAIN_SEPARATOR.len()
@@ -362,7 +362,7 @@ impl ProtocolMessage {
     }
 
     /// Phase 5 canonical signing bytes for the sealed path. Distinct
-    /// domain separator (`"zerocenter-sealed-dm-v1"`) keeps the signed-
+    /// domain separator (`"ME55-sealed-dm-v1"`) keeps the signed-
     /// bytes namespace disjoint from the direct path so neither
     /// signature can be transplanted into the other context.
     /// `sender_pid` is passed in because the envelope's own `from`
@@ -617,7 +617,7 @@ mod tests {
     fn sealed_signature_uses_distinct_domain() {
         // A direct-path signature must NOT verify when interpreted as a
         // sealed-path signature, and vice versa. The domain separators
-        // are different (`zerocenter-dm-v1` vs `zerocenter-sealed-dm-v1`)
+        // are different (`ME55-dm-v1` vs `ME55-sealed-dm-v1`)
         // so this is true by construction; the test pins it down.
         let alice = Keypair::generate_ed25519();
         let alice_pid = PeerId::from(alice.public()).to_bytes();
