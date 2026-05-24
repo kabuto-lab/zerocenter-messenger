@@ -655,6 +655,162 @@ File: `src/storage/store.rs` — `group_*`, `my_sender_key_*`, `their_sender_key
 | Membership integrity | ✅ | Founder-signed CreateGroup + MembershipUpdate; epoch monotonic. |
 | Metadata privacy (group membership visible on disk) | ❌ | `group_members.peer_id` is in clear. Same trade-off as DM contacts. |
 
+## 12A. Post-quantum X3DH (Phase 2 — shipped)
+
+**Purpose.** Defend against `harvest-now-decrypt-later` attacks. Every classical X25519 cipher session being recorded today is decryptable when a sufficiently large quantum computer arrives (Shor's algorithm). Hybrid PQ-X3DH protects against this by mixing an ML-KEM-768 (NIST FIPS 203, formerly CRYSTALS-Kyber) shared secret into the initial key agreement alongside the classical X25519 DH outputs.
+
+**Long-term keys.** Each identity now holds, in addition to the Ed25519 signing key and the signed X25519 prekey:
+- 32-byte signing key (Ed25519, unchanged)
+- 32-byte X25519 prekey (unchanged)
+- 64-byte Ed25519 signature over `ME55-prekey-v1 || x25519_pub` (unchanged)
+- **1184-byte ML-KEM-768 encapsulation key (public, shared)**
+- **2400-byte ML-KEM-768 decapsulation key (private, never transmitted)**
+- **64-byte Ed25519 signature over `ME55-ml-kem-prekey-v1 || ml_kem_ek`**
+
+The PQ signature uses a distinct domain separator from the X25519 prekey signature so a captured X25519-prekey signature cannot be transplanted onto the ML-KEM encapsulation key (INVARIANTS §1).
+
+**Wire shape.**
+```
+PrekeyResponse {
+    x25519_public: [u8; 32],
+    signature:     [u8; 64],
+    otpk:          Option<OneTimePrekey>,
+    pq_prekey:     Option<MlKemPrekey>,    // ← Phase 2
+}
+MlKemPrekey {
+    ek:        Vec<u8>,    // 1184 bytes
+    signature: [u8; 64],   // over ML_KEM_PREKEY_SIG_DOMAIN || ek
+}
+
+EncryptedPayload {
+    // ...existing...
+    ml_kem_ct: Option<Vec<u8>>,   // 1088 bytes; present only on the
+                                  // first message of a hybrid session
+}
+```
+
+Both new fields use `#[serde(default, skip_serializing_if = "Option::is_none")]` so old peers ignore them (clean classical fallback) and the wire format is strictly additive.
+
+**Hybrid KDF.** Initiator computes:
+```
+(ct, ss_pq) = ml_kem_encapsulate(responder.pq_prekey.ek)
+SK = HKDF-SHA256(
+    salt = [0u8; 32],
+    ikm  = X25519_dh1 || X25519_dh2 [|| X25519_dh3] || ss_pq,
+    info = "ME55-x3dh-pq-v1" [or "ME55-x3dh-otpk-pq-v1"]
+)
+```
+
+Ciphertext travels in `EncryptedPayload::ml_kem_ct`. Responder decapsulates with its long-term ML-KEM decapsulation key:
+```
+ss_pq = ml_kem_decapsulate(my.ml_kem_dk, ct)
+```
+
+And reconstructs the same HKDF on its side.
+
+**Domain separation.** Hybrid uses DISTINCT info tags from classical X3DH (`ME55-x3dh-pq-v1` vs `ME55-x3dh-v1`, `ME55-x3dh-otpk-pq-v1` vs `ME55-x3dh-otpk-v1`). A downgrade-attacker who strips `ml_kem_ct` causes the responder to switch to classical info tag; the resulting SKs differ, AEAD on the first message fails, no SK leak (INVARIANTS §27).
+
+**Sizes.**
+- Long-term identity storage: +3648 bytes (ek + dk + sig).
+- Per-prekey-fetch wire overhead: +1248 bytes.
+- Per-first-message wire overhead: +1088 bytes.
+- Per-steady-state-message: zero (ml_kem_ct absent after first message).
+
+**File pointers.**
+- `src/core/identity.rs::generate_signed_ml_kem_prekey` — keypair + signature generation.
+- `src/core/identity.rs::ml_kem_prekey_signing_bytes` — canonical signing bytes.
+- `src/crypto/x3dh.rs::pq_encapsulate` / `pq_decapsulate` — ML-KEM wrappers.
+- `src/crypto/x3dh.rs::initiator_derive_hybrid` / `initiator_derive_with_otpk_hybrid` — hybrid 2-DH / 3-DH initiator paths.
+- `src/crypto/x3dh.rs::responder_derive_hybrid` / `responder_derive_with_otpk_hybrid` — hybrid responder paths.
+- `src/core/node.rs::build_x3dh_hello` — initiator integration; four-way (OTPK × PQ) ladder.
+- `src/core/node.rs::bootstrap_responder_and_decrypt` — responder integration; four-way ladder.
+- `src/core/node.rs::verify_pq_prekey` — sender-side signature verification before caching.
+- `src/storage/store.rs::save_pq_prekey` / `load_pq_prekey` — Phase 2.B SQLite persistence.
+
+**What this does NOT yet do.** PQ-ratchet (periodic ML-KEM re-key of the Double Ratchet root key) is NOT shipped. Once a session is established, the root-key ratchet uses only classical X25519. If both peers' long-term ML-KEM keys are compromised AFTER session setup, the harvest-now-decrypt-later attack still applies to forward messages until the next DH ratchet step provides classical forward secrecy. Signal also hasn't shipped PQ ratchet (only PQ X3DH) as of 2026; iMessage has periodic PQ-rekey in PQ3.
+
+---
+
+## 12B. Session-ID DHT addressing (Phase 4 — shipped)
+
+**Purpose.** Hide recipient PeerId from passive DHT observers. The legacy `drop_kad_key(recipient_pid, sender_pid, slot)` exposes both party PeerIds in the hash preimage; a wide-scale DHT crawler enumerating known PeerIds can correlate `(R, S, slot)` tuples against observed records.
+
+**Mechanism.** After X3DH derives the root key `sk`, both peers compute:
+```
+session_id = HMAC-SHA256(sk, "ME55-session-id-v1")
+```
+
+Symmetric (both sides have `sk`), 32 bytes, never transmitted on the wire. Used as an opaque addressing token for DHT mailbox drops:
+```
+session_drop_kad_key(session_id, slot) = SHA-256(
+    "ME55-session-mailbox-drop-v1" || session_id || slot_id_be8
+)
+
+session_ack_kad_key(session_id, slot) = SHA-256(
+    "ME55-session-mailbox-ack-v1" || session_id || slot_id_be8
+)
+```
+
+A passive observer of the DHT sees only an opaque hash — no PeerId preimage. Enumerating the 2²⁵⁶-sized session_id space is infeasible.
+
+**Migration window.** While the network upgrades from pre-Phase-4 to Phase-4, drops are published in PARALLEL under both legacy and session-keyed addresses so pre-Phase-4 recipients can still fetch. ACKs and republish follow the same parallel pattern. After universal Phase-4 adoption the legacy path can be retired with a one-line change.
+
+**File pointers.**
+- `src/crypto/ratchet.rs::derive_session_id` + `RatchetState::session_id()` — derivation and getter.
+- `src/network/mailbox.rs::session_drop_kad_key` / `session_ack_kad_key` — Kad key derivation.
+- `src/core/node.rs::put_mailbox_drop_bytes` — parallel publish.
+- `src/core/node.rs::poll_mailbox_slots` — parallel poll under all active session_ids.
+- `src/core/node.rs::publish_mailbox_ack` — parallel ACK.
+- `src/core/node.rs::republish_mailbox_drops` — parallel republish + parallel ACK polling.
+
+**What this does NOT do.** Hide recipient from a RELAY operator. The relay still sees `(transport_peer, request_response_target)` for direct DMs. Recipient anonymity against a relay requires onion routing (Phase 6).
+
+---
+
+## 12C. Deniable DMs (Phase 3 — opt-in)
+
+**Purpose.** Remove cryptographic proof-of-authorship from 1:1 DMs. With a per-message Ed25519 signature, any third party with the sender's pubkey can prove "Alice wrote this exact ciphertext at this exact time" — undesirable in coercive scenarios where a journalist / activist might be compelled to surrender past transcripts. Deniability matches Signal's standard property: any session participant could have produced the envelope (both hold the symmetric AEAD key), so no third-party proof of authorship exists.
+
+**Mode.** Opt-in via `--deniable-dm`. Off by default for wire-compatibility with peers expecting the signed legacy path.
+
+**Wire-level changes when deniable mode is on.**
+
+| Path | Field | Signed mode (legacy) | Deniable mode (Phase 3) |
+|---|---|---|---|
+| Direct | `signature` | non-empty 64-byte Ed25519 sig over domain-separated canonical bytes | **empty** (`Vec::new()`) |
+| Sealed | inner cert payload | length-prefixed `sender_pid \|\| signature` (signature non-empty) | length-prefixed `sender_pid \|\| signature` (signature length zero) |
+
+Wire shape is unchanged at the serde level (the `signature` field is still present, just empty) — there's no protocol-ID bump, no schema migration. The receiver's `verify()` / `verify_sealed()` branches on `signature.is_empty()` to skip the cryptographic check.
+
+**What still provides authenticity.**
+- **Session establishment** is authenticated by X3DH-lite: the responder's signed X25519 prekey (Ed25519 signature over `ME55-prekey-v1 || x25519_public`) binds the session to the responder's long-term identity.
+- **Per-message integrity** is authenticated by the Double-Ratchet AEAD (`§8`). The message key is symmetric and derived from a chain key shared by both participants; an AEAD verification failure on receive means either:
+  - the ciphertext was tampered with in transit, OR
+  - the sender's claimed `from` doesn't match the actual session-holder (forgery attempt).
+  Both cases drop the message at the AEAD layer — same outcome as a `BadSignature` would produce in the signed path, just one layer downstream.
+
+**Deniability property formally.** Given a transcript `T = (envelope_1, ..., envelope_n)` between Alice and Bob in deniable mode, and Alice's compromised long-term Ed25519 key `sk_alice`:
+- A third party CANNOT cryptographically prove "Alice produced envelope_k" for any k, because:
+  - The envelope carries no signature by Alice.
+  - The AEAD tag is verifiable only by someone with the session symmetric key, which BOTH Alice and Bob have.
+  - Bob could have produced envelope_k claiming `from = alice_pid` after the fact, and the resulting envelope is indistinguishable from one Alice actually sent.
+
+This is "online deniability" / "offline transcript deniability" — same property Signal advertises.
+
+**What deniability does NOT provide.**
+- It doesn't hide that a conversation happened (metadata still leaks at the libp2p / DHT level; sealed sender and §28 session-ID addressing cover that orthogonally).
+- It doesn't help if the third party WAS Alice's session counterparty (Bob can selectively reveal his copy of the AEAD key to prove "Alice sent these messages TO ME", but cannot prove the same to anyone else without compromising the key).
+- Group chats are NOT deniable: Megolm sender chains use per-message Ed25519 signatures load-bearing for §24 (cross-member anti-impersonation). Group deniability requires a designated-verifier or MLS rewrite — deferred.
+
+**File pointers.**
+- `src/protocol/message.rs::new_direct_deniable` / `new_sealed_deniable` — deniable constructors.
+- `src/protocol/message.rs::verify` / `verify_sealed` — empty-signature branch.
+- `src/protocol/message.rs::is_deniable_direct` — predicate for logging/audit.
+- `src/core/node.rs::ratchet_encrypt_and_wrap_bytes` — constructor selection based on `config.deniable_dm`.
+- `src/cli.rs::Cli::deniable_dm` + `src/core/config.rs::Config::deniable_dm` — opt-in flag.
+
+---
+
 ## 13. Random number generation
 
 All cryptographic randomness comes from `rand::rngs::OsRng`, which on:

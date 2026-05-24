@@ -20,6 +20,14 @@ If you find an invariant that's stated here but **not** enforced (or enforced in
 - `src/protocol/message.rs::DOMAIN_SEPARATOR = "ME55-dm-v1"` — direct-path DM envelope.
 - `src/protocol/message.rs::SEALED_DOMAIN_SEPARATOR = "ME55-sealed-dm-v1"` — Phase 5 sealed-path DM envelope (see §22). Distinct from the direct domain so a captured direct signature can't be transplanted into a sealed envelope or vice versa.
 - `src/core/identity.rs::PREKEY_SIG_DOMAIN = "ME55-prekey-v1"` — both signed prekey and OTPK (see §3).
+- `src/core/identity.rs::ML_KEM_PREKEY_SIG_DOMAIN = "ME55-ml-kem-prekey-v1"` — Phase 2 PQ prekey (see §27). Distinct from the X25519 prekey signature so a captured X25519-prekey signature can't be transplanted onto the ML-KEM encapsulation key.
+- `src/crypto/x3dh.rs::X3DH_INFO = "ME55-x3dh-v1"` — classical 2-DH X3DH HKDF info tag.
+- `src/crypto/x3dh.rs::X3DH_INFO_OTPK = "ME55-x3dh-otpk-v1"` — classical 3-DH X3DH HKDF info tag.
+- `src/crypto/x3dh.rs::X3DH_INFO_PQ = "ME55-x3dh-pq-v1"` — Phase 2 hybrid 2-DH X3DH HKDF info tag (see §27). Distinct from classical so a downgrade-attacked classical SK never collides with a hybrid SK.
+- `src/crypto/x3dh.rs::X3DH_INFO_OTPK_PQ = "ME55-x3dh-otpk-pq-v1"` — Phase 2 hybrid 3-DH X3DH HKDF info tag.
+- `src/crypto/ratchet.rs::SESSION_ID_DOMAIN = "ME55-session-id-v1"` — Phase 4 session id derivation HMAC tag (see §28).
+- `src/network/mailbox.rs::SESSION_DROP_KEY_DOMAIN = "ME55-session-mailbox-drop-v1"` — Phase 4 session-keyed mailbox drop addressing. Distinct from `ME55-mailbox-drop-v1` so the two namespaces are disjoint.
+- `src/network/mailbox.rs::SESSION_ACK_KEY_DOMAIN = "ME55-session-mailbox-ack-v1"` — Phase 4 session-keyed mailbox ACK addressing.
 - `src/main.rs` safety-number handler hashes under `b"ME55-safety-v1"` — not a signature, but same hygiene.
 
 **Suggested attack.** Look for any code path that calls `Identity::sign(...)` or `keypair.sign(...)` without a domain-separated layout. Any such call is a potential collision source.
@@ -31,6 +39,8 @@ If you find an invariant that's stated here but **not** enforced (or enforced in
 **Statement.** When a DM arrives over `/ME55/direct-message/2.0.0` on the **direct path** (legacy: `from` + `signature` fields populated), the receiver verifies the application-layer Ed25519 signature AND checks that the libp2p transport-level peer matches the signed `from`. If either check fails, the message is dropped before any state change.
 
 **For sealed-path envelopes** (Phase 5; see §22), the §3 transport-peer cross-check is **intentionally skipped**. The sender PeerId is encrypted inside the seal and decoupled from the transport-level source — this is the entire point of sealed sender. The inner signature inside the seal authenticates the sender; the transport peer is just a delivery agent (e.g. a DHT-mailbox provider). Skipping the cross-check is documented at the relevant code site.
+
+**For Phase 3 deniable envelopes** (`--deniable-dm` opt-in; see §29), the per-message Ed25519 signature is OMITTED on both direct and sealed paths. `verify()` and `verify_sealed()` then return the parsed sender PeerId WITHOUT a cryptographic check — authentication of the message body has moved entirely to the downstream ratchet AEAD (whose key is shared by the two session participants and rotates per message). The §3 transport-peer cross-check still runs for direct deniable envelopes; it gives a coarse "this sender claim matches the transport peer" but is no longer cryptographic, just a sanity gate.
 
 **Why (direct path).** Without the cross-check, a connected peer can relay a captured direct-DM message and the receiver would treat it as direct delivery (impacting offline-delivery semantics).
 
@@ -311,9 +321,9 @@ it could land in a remote log aggregator.
 - `src/core/node.rs::republish_mailbox_drops` — sender-side republish loop; reads `mailbox_drops_due_for_republish(REPUBLISH_AFTER_SECS=1800)` and re-puts each. Sender's own `mailbox_drops` row tracks `expires_at` (default 7 days) so unack'd drops self-prune.
 
 **Known limitations.**
-- **Metadata leak.** A passive observer of the providers DHT can correlate `(sender_pid, slot_kad_key(recipient_pid, slot))` and infer that `sender → recipient` traffic happened at some point during that hour. This is no worse than the direct-DM path (which exposes `from`/`to` in the unencrypted envelope) but is more durable: providers records persist in the DHT until Kad TTL expires. Phase 5 sealed-sender / onion routing addresses both paths.
-- **No ACK in v0.** Storage scaffolding (`mailbox_drop_ack`) is unused; senders republish until 7-day `expires_at` even after the recipient successfully fetched. A future ACK can be carried out-of-band (a DM when next online) or as a separate Kad record at a derived key.
-- **First-message-to-stranger can't use the mailbox.** Publishing requires either an existing ratchet session or a cached responder prekey to encrypt. Brand-new contacts whose prekey we've never fetched still fall back to the outbox-only path; the recipient must come online to us directly for the first message.
+- **Phase-4 session-keyed addressing closes the legacy metadata leak for established sessions** (see §28). A passive observer of the DHT no longer sees `(sender_pid, recipient_pid)` for drops between peers with an active Double-Ratchet session — the drop is published in PARALLEL under `session_drop_kad_key(session_id, slot)`, whose preimage contains no PeerId. The legacy `drop_kad_key(recipient, sender, slot)` is also still published for the Phase-4 migration window so pre-Phase-4 recipients can still fetch; this means the legacy leak survives until both ends are Phase-4, after which we can drop the legacy publish path.
+- **First-contact (no session) still leaks via legacy keys.** Until X3DH completes there is no `session_id`, so the drop can only be published under the legacy `drop_kad_key`. The first message metadata is still visible; subsequent messages migrate to session-keyed addressing.
+- **First-message-to-stranger can't use the mailbox at all.** Publishing requires either an existing ratchet session or a cached responder prekey to encrypt. Brand-new contacts whose prekey we've never fetched still fall back to the outbox-only path; the recipient must come online to us directly for the first message.
 
 **Suggested attack.** Construct two mailbox drops at the same `(recipient, slot)` from two distinct senders. The recipient should fetch and decrypt both — the providers DHT must enumerate both senders, and each `drop_kad_key(recipient, sender, slot)` is distinct so the records don't overwrite.
 
@@ -475,6 +485,70 @@ The rotation is event-driven (one rotation per remove/leave event), not per-mess
 - **No prekey-fetch onboarding for the new joiner.** If a newly-added member has never DM'd existing members before, they have no 1:1 DR session for `deliver_kind_to_member` to ride — the bundle delivery is warn-and-skipped. New joiners must first complete a 1:1 prekey-fetch + first message before group bundle distribution works. v0 limitation.
 
 **Suggested attack.** Position a node so it captures every message on the wire. Join a group, then arrange to be removed (or leave). Continue capturing. Try to decrypt: only ciphertexts sent BEFORE the rotation events propagated to each respective sender are decryptable. Post-rotation ciphertexts produce `MessageKeyMissing` or `BadSignature` (depending on which chain was hit) — because the chain key for that index was never derivable from the bundles you held.
+
+---
+
+## §27. Hybrid X3DH preserves classical-X25519 security even if ML-KEM-768 is broken (Phase 2)
+
+**Statement.** The Phase 2 PQ-X3DH derivation feeds BOTH the classical X25519 DH outputs AND the ML-KEM-768 shared secret into a single HKDF-SHA256. The resulting session key `SK = HKDF(salt=0, ikm = dh1 || dh2 [|| dh3] || ss_pq, info = X3DH_INFO_PQ [or X3DH_INFO_OTPK_PQ])` is secure as long as **at least one** of (classical X25519 DH problem, ML-KEM-768 lattice problem) remains intractable. Compromise of either primitive alone does NOT reveal `SK`.
+
+**Why.** ML-KEM is young; deployed crypto must protect against the possibility that it's broken before its expected lifetime. Classical X25519 is well-studied but vulnerable to a future quantum computer (Shor). Hybrid is the standard defence — Signal PQXDH (2023) and iMessage PQ3 (2024) take the same approach for the same reason.
+
+**Enforced at.**
+- `src/crypto/x3dh.rs::derive_shared_secret_pq` / `derive_shared_secret_3_pq` — HKDF ikm concatenates classical DH outputs WITH the ML-KEM shared secret. Domain separator `ME55-x3dh-pq-v1` / `ME55-x3dh-otpk-pq-v1`.
+- `src/crypto/x3dh.rs::pq_encapsulate` / `pq_decapsulate` — ML-KEM-768 RustCrypto wrapper; encapsulation returns `(ct, ss)` where `ss` is fed to HKDF and `ct` is transmitted in `EncryptedPayload::ml_kem_ct`.
+- `src/core/identity.rs` — long-term ML-KEM-768 keypair lives alongside the X25519 prekey, both Ed25519-signed by the identity key under distinct domain separators (`ME55-prekey-v1` vs `ME55-ml-kem-prekey-v1`).
+- `src/core/node.rs::build_x3dh_hello` — initiator's PQ encapsulation path; `bootstrap_responder_and_decrypt` is the responder's PQ decapsulation path with the four-way (OTPK × PQ) classical-fallback ladder.
+
+**Downgrade safety.** A man-in-the-middle who strips the `ml_kem_ct` from a Phase-2 initiator's first message cannot cause the responder to compute the classical-only `SK`. The HKDF info tag is selected by the responder based on the PRESENCE of `ml_kem_ct`: present ⇒ `X3DH_INFO_PQ`, absent ⇒ `X3DH_INFO`. If the initiator computed `SK_hybrid` and the responder computes `SK_classical` (because the ct was stripped), the SKs DIFFER, AEAD on the first message FAILS, and the session does not establish. The MITM cannot recover either party's PQ secret either; they just denied service.
+
+**Suggested attack.** Replace a Phase-2 initiator's `ml_kem_ct` with random bytes. ML-KEM-768 is IND-CCA secure — the responder's `pq_decapsulate` yields a pseudo-random `ss` (not an error), but that `ss` does not match what the initiator generated, so `SK_hybrid_initiator ≠ SK_hybrid_responder` and AEAD fails. Session does not establish; no information leaked.
+
+---
+
+## §28. DHT mailbox drops under an active session leak no PeerId to passive observers (Phase 4)
+
+**Statement.** Once two peers complete X3DH and derive a Double-Ratchet root key, both compute the same 32-byte `session_id = HMAC-SHA256(sk, "ME55-session-id-v1")`. All subsequent DHT mailbox drops for this conversation are published in parallel under `session_drop_kad_key(session_id, slot) = SHA-256("ME55-session-mailbox-drop-v1" || session_id || slot)`. The preimage contains NEITHER party's PeerId, so a passive observer of the DHT sees only an opaque hash and cannot link the drop to either party's identity without breaking HMAC-SHA256.
+
+**Why.** The legacy `drop_kad_key(recipient_pid, sender_pid, slot)` includes both PeerIds in its hash preimage. While the preimage isn't directly recoverable, a DHT-wide enumeration attacker knows the set of PeerIds in the network and can test all `(R, S, slot)` tuples against observed Kad keys — Bitcoin-style hash analysis at scale. `session_id` is private to the two parties, so no enumeration is possible.
+
+**Enforced at.**
+- `src/crypto/ratchet.rs::derive_session_id` — HMAC-SHA256(sk, SESSION_ID_DOMAIN). Symmetric: both `new_initiator(sk, ...)` and `new_responder(sk, ...)` derive the same `session_id` because the X3DH output `sk` is symmetric.
+- `src/crypto/ratchet.rs::RatchetState::session_id()` — public getter; persisted via JSON serde with `#[serde(default)]` so pre-Phase-4 stored sessions migrate by deriving `[0u8; 32]` (degraded but functional — drops continue under legacy keys only).
+- `src/network/mailbox.rs::session_drop_kad_key` / `session_ack_kad_key` — distinct domain separators from the legacy keys.
+- `src/core/node.rs::put_mailbox_drop_bytes` — parallel PUT under both legacy and session keys during the Phase-4 migration window.
+- `src/core/node.rs::poll_mailbox_slots` — parallel GET_RECORD under session keys for every active session.
+- `src/core/node.rs::publish_mailbox_ack` / `republish_mailbox_drops` — parallel ACK + republish under session keys.
+
+**Known limitations.**
+- **First contact (no session yet) still uses legacy keys.** Until X3DH completes there is no `session_id` to derive; the very first drop unavoidably appears under `drop_kad_key(recipient, sender, slot)` and leaks identity. The leak is bounded to first contact only — every subsequent drop in the conversation is session-keyed and opaque.
+- **Migration window legacy parallel publish.** Until the network is uniformly Phase-4, drops are published under BOTH keys so pre-Phase-4 recipients can still fetch. This means the legacy leak is still present for any conversation either side hasn't upgraded yet. The eventual cleanup (drop the legacy publish path) is a one-line code change once telemetry shows zero legacy fetches.
+- **Republish + ACK loops do not yet purge legacy keys after Phase-4 completes.** Once both sides know they're talking under a session key (e.g. ACK observed under session_ack_key), the legacy republish could be skipped to reduce DHT load. Optimisation; not a correctness concern.
+
+**Suggested attack.** Run a global passive DHT crawler. Enumerate all Kad records and their preimages. For the legacy `drop_kad_key` namespace you can correlate `(R, S, slot)` tuples against observed records by brute-forcing the much-smaller PeerId set. Now try the same for `session_drop_kad_key`: you'd need to enumerate over 2²⁵⁶ possible session_id values, which is computationally infeasible.
+
+---
+
+## §29. Deniable DMs hold up the ratchet AEAD as the sole per-message authenticator (Phase 3, opt-in)
+
+**Statement.** When `config.deniable_dm = true` (CLI flag `--deniable-dm`), outgoing 1:1 DMs are constructed via `ProtocolMessage::new_direct_deniable` / `new_sealed_deniable` — empty per-message Ed25519 signature on direct path, empty inner signature inside the seal on sealed path. The receiving `verify()` / `verify_sealed()` returns the parsed sender PeerId WITHOUT a cryptographic check. The body's authenticity comes from the Double-Ratchet AEAD (ChaCha20-Poly1305, INVARIANTS §6) keyed by per-message symmetric material derived from a session secret known to exactly the two participants.
+
+**Why.** With per-message Ed25519 signatures, ANY third party who later obtains a transcript and the sender's pubkey can mathematically prove "Alice authored this exact ciphertext at this exact time". This is the OPPOSITE of Signal's deniability property — and useful in coercive scenarios. Removing the per-message sig gives "online deniability": either session participant could have produced the envelope (both hold the symmetric key); a third party cannot prove which.
+
+**Enforced at.**
+- `src/protocol/message.rs::new_direct_deniable` — emits envelope with `signature: Vec::new()`.
+- `src/protocol/message.rs::new_sealed_deniable` — emits sealed cert with empty inner signature payload (length-prefixed zero-length).
+- `src/protocol/message.rs::verify` — branches on `signature.is_empty()`; empty ⇒ return parsed sender without crypto check.
+- `src/protocol/message.rs::verify_sealed` — branches on inner `sig_bytes.is_empty()`; empty ⇒ return parsed sender without crypto check.
+- `src/core/node.rs` — `ratchet_encrypt_and_wrap_bytes` selects deniable vs signed constructor per `self.config.deniable_dm`. Per-call branching covers all four (direct × sealed × signed × deniable) constructions.
+
+**Wire compatibility.** Deniable envelopes are wire-incompatible with pre-Phase-3 peers, who require `signature.is_empty() ⇒ MissingSignature`. Opt-in is therefore lossy: a deniable-mode sender talking to a signed-mode receiver is silently dropped at receive-side `verify()`. Both peers must enable `--deniable-dm` for the conversation to work. Wire shape itself is unchanged (just an empty `signature` field); no protocol-ID bump.
+
+**Group chats are NOT deniable.** Megolm per-message Ed25519 signatures in `src/protocol/group.rs` are load-bearing for §24 (cross-member anti-impersonation). Removing them would require a designated-verifier signature scheme or MLS rewrite — deferred to Phase 6.
+
+**Suggested attack.** Construct a deniable envelope with a forged `from = victim_pid` and ciphertext from a totally different session. `verify()` returns Ok(victim_pid). Downstream `process_incoming_dm` then attempts ratchet decryption against the victim's existing session; the AEAD fails (different key) and the message is dropped without state mutation. The forgery cost was zero, the impact was zero — exactly what we want.
+
+**Suggested attack.** Modify a deniable envelope's `payload` byte. The envelope passes `verify()` (no crypto on payload). The inner AEAD on the ratchet message then fails — same drop. Same property as for non-deniable: any tamper is caught at AEAD, just not earlier.
 
 ---
 

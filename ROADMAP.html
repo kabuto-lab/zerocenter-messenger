@@ -11,10 +11,11 @@
   }
   html,body { background:var(--bg); color:var(--fg); margin:0; padding:0;
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-  .wrap { max-width: 1100px; margin: 0 auto; padding: 32px 28px 80px; }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 32px 28px 80px; }
   h1 { font-size: 22px; margin: 0 0 6px; letter-spacing: 0.5px; }
   h1 small { color: var(--muted); font-weight: normal; margin-left: 12px; font-size: 13px; }
   h2 { font-size: 16px; margin: 28px 0 8px; padding-bottom: 6px; border-bottom: 1px solid var(--line); }
+  h3 { font-size: 13px; margin: 18px 0 6px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.6px; }
   .sub { color: var(--muted); font-size: 13px; margin-bottom: 16px; }
   .pill { display:inline-block; padding:1px 8px; border-radius:10px; font-size:11px;
     margin-left:8px; vertical-align: 1px; }
@@ -52,29 +53,143 @@
   a { color: var(--accent); }
   .col2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
   @media (max-width: 760px) { .col2 { grid-template-columns: 1fr; } }
+
+  /* Gantt-style timeline */
+  .gantt { width: 100%; border: 1px solid var(--line); border-radius: 6px; overflow: hidden;
+    margin: 6px 0 22px; background: #11161d; }
+  .gantt-head { display: grid; grid-template-columns: 200px repeat(12, 1fr);
+    background: #161b22; border-bottom: 1px solid var(--line); font-size: 11px; color: var(--muted);
+    text-transform: uppercase; letter-spacing: 0.5px; }
+  .gantt-head div { padding: 6px 4px; border-right: 1px solid var(--line); text-align: center; }
+  .gantt-head div:first-child { text-align: left; padding-left: 12px; }
+  .gantt-row { display: grid; grid-template-columns: 200px repeat(12, 1fr);
+    border-bottom: 1px solid var(--line); align-items: center; min-height: 30px; position: relative; }
+  .gantt-row:last-child { border-bottom: 0; }
+  .gantt-label { padding: 6px 12px; font-size: 12px; }
+  .gantt-track { grid-column: 2 / -1; position: relative; height: 30px; }
+  .gantt-bar { position: absolute; top: 6px; height: 18px; border-radius: 3px;
+    font-size: 10px; padding: 0 6px; line-height: 18px; color: #0e1116; font-weight: 600;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .gantt-bar.done    { background: var(--done); }
+  .gantt-bar.inprog  { background: var(--inprog); }
+  .gantt-bar.todo    { background: #444; color: var(--fg); }
+  .gantt-bar.partial { background: var(--partial); }
+  .gantt-now { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--accent);
+    z-index: 2; }
+  .gantt-now::after { content: 'today'; position: absolute; top: -16px; left: -16px;
+    font-size: 9px; color: var(--accent); text-transform: uppercase; letter-spacing: 0.5px; }
 </style>
 </head>
 <body>
 <div class="wrap">
 
-<h1>ME55 Messenger — Roadmap <small>updated 2026-05-22</small></h1>
+<h1>ME55 Messenger — Roadmap <small>updated 2026-05-24</small></h1>
 <div class="sub">Censorship-resistant, zero-trust, leaderless P2P messenger. Rust + libp2p 0.53.
-  Source of truth is <span class="kbd">plans/ROADMAP.md</span>; this page is a visual snapshot of it.</div>
+  Source of truth is <span class="kbd">plans/ROADMAP.md</span>; this page is a visual snapshot of it.
+  Companion docs: <span class="kbd">ABOUT.html</span> (plain-language overview),
+  <span class="kbd">ANALYSIS.html</span> (architecture deep-dive + 35-finding audit),
+  <span class="kbd">RELAY.md</span> / <span class="kbd">BEGET_SETUP.md</span> (operator guides for Phase 6).</div>
 
-<div class="progress" title="implementation completeness — external audit not counted"><div style="width: 98%"></div></div>
-<div class="sub">Phases 1 → 5 implemented and test-green. Outstanding: external security audit (needs a third party)
-  and deniability (intentionally deferred for v1). <span class="kbd">cargo test --lib</span>: <b>119 / 119</b>.</div>
+<div class="progress" title="implementation completeness — external audit + bootstrap network not counted"><div style="width: 92%"></div></div>
+<div class="sub">Phases 1 → 5 implemented and test-green. <b>In flight:</b> Phase 6 (bootstrap + relay
+  for NAT traversal), Phase 7 (post-quantum hybrid X3DH via ML-KEM-768), opt-in deniable DMs.
+  Outstanding: external security audit (needs a third party), public bootstrap nodes (Beget VPS
+  pending). <span class="kbd">cargo test --lib</span> last green at <b>119 / 119</b> on commit
+  <span class="kbd">f5c2e65</span>; in-flight work adds ~26 test functions on disk that have not
+  been re-verified yet (clean build pending).</div>
+
+<h2>Phase timeline (Gantt)</h2>
+<div class="gantt">
+  <div class="gantt-head">
+    <div>Phase</div>
+    <div>Q3 25</div><div>Q4 25</div><div>Q1 26</div><div>Feb</div><div>Mar</div>
+    <div>Apr</div><div>May</div><div>Jun</div><div>Jul</div><div>Aug</div>
+    <div>Sep</div><div>Q4 26</div>
+  </div>
+
+  <div class="gantt-row">
+    <div class="gantt-label">1 — Foundations</div>
+    <div class="gantt-track">
+      <div class="gantt-bar done"  style="left: 0%;     width: 12%;">identity · libp2p · SQLite</div>
+    </div>
+  </div>
+  <div class="gantt-row">
+    <div class="gantt-label">2 — Direct messaging</div>
+    <div class="gantt-track">
+      <div class="gantt-bar done"  style="left: 8%;     width: 12%;">DM · signed envelope · CLI</div>
+    </div>
+  </div>
+  <div class="gantt-row">
+    <div class="gantt-label">3 + 3.5 — E2EE &amp; at-rest</div>
+    <div class="gantt-track">
+      <div class="gantt-bar done"  style="left: 16%;    width: 14%;">Double Ratchet · X3DH · AEAD · keyring</div>
+    </div>
+  </div>
+  <div class="gantt-row">
+    <div class="gantt-label">4 — Obfuscation</div>
+    <div class="gantt-track">
+      <div class="gantt-bar done"  style="left: 28%;    width: 14%;">ScrambleStream · NTOR · padding · jitter</div>
+    </div>
+  </div>
+  <div class="gantt-row">
+    <div class="gantt-label">5 — Mailbox · sealed · groups</div>
+    <div class="gantt-track">
+      <div class="gantt-bar done"  style="left: 40%;    width: 18%;">DHT mailbox · ACK · sealed sender · Megolm groups · GUI</div>
+    </div>
+  </div>
+  <div class="gantt-row">
+    <div class="gantt-label">Rebrand → ME55</div>
+    <div class="gantt-track">
+      <div class="gantt-bar done"  style="left: 56%;    width: 4%;">f5c2e65</div>
+    </div>
+  </div>
+  <div class="gantt-row">
+    <div class="gantt-label">6 — Bootstrap + relay (NAT)</div>
+    <div class="gantt-track">
+      <div class="gantt-bar inprog" style="left: 58%;   width: 14%;">DCUtR · CircuitRelay v2 · signed manifest · Beget VPS</div>
+    </div>
+  </div>
+  <div class="gantt-row">
+    <div class="gantt-label">7 — Post-quantum X3DH</div>
+    <div class="gantt-track">
+      <div class="gantt-bar inprog" style="left: 60%;   width: 12%;">ML-KEM-768 hybrid (PQXDH-style)</div>
+    </div>
+  </div>
+  <div class="gantt-row">
+    <div class="gantt-label">Opt-in deniable DMs</div>
+    <div class="gantt-track">
+      <div class="gantt-bar inprog" style="left: 60%;   width: 8%;">--deniable-dm</div>
+    </div>
+  </div>
+  <div class="gantt-row">
+    <div class="gantt-label">External security audit</div>
+    <div class="gantt-track">
+      <div class="gantt-bar todo"  style="left: 66%;    width: 16%;">engage reviewer · package commit · remediate</div>
+    </div>
+  </div>
+  <div class="gantt-row">
+    <div class="gantt-label">v1 release</div>
+    <div class="gantt-track">
+      <div class="gantt-bar todo"  style="left: 80%;    width: 6%;">icon · 3 bootstraps · audit-clean</div>
+    </div>
+  </div>
+
+  <div class="gantt-now" style="left: calc(200px + (100% - 200px) * 0.620);"></div>
+</div>
+<div class="note">Approximate timeline (months on the X-axis are illustrative — git commit dates are authoritative).
+  Bars to the LEFT of the purple "today" line are shipped; bars crossing or to the right are projected.</div>
 
 <h2>Phase 1 — Foundations <span class="pill done">Done</span></h2>
 <table>
   <tr><th>Item</th><th>Status</th><th>Notes</th></tr>
   <tr><td>Ed25519 identity (persistent)</td><td class="s"><span class="badge done">done</span></td>
-      <td>Per-profile <span class="kbd">identity.json</span> under <span class="kbd">%LOCALAPPDATA%\ME55\&lt;profile&gt;\</span></td></tr>
+      <td>Per-profile <span class="kbd">identity.json</span> under <span class="kbd">%LOCALAPPDATA%\ME55\&lt;profile&gt;\</span>.
+      Identity record extended with a long-term ML-KEM-768 keypair (Phase 7) — backward-compatible serde defaults so pre-PQ identities upgrade on first load.</td></tr>
   <tr><td>libp2p transport</td><td class="s"><span class="badge done">done</span></td>
-      <td>TCP + Noise + Yamux, + DNS + Kademlia + mDNS + identify.
-      <b>QUIC parked</b> — <span class="kbd">ring</span> build script crashes <span class="kbd">cl.exe</span> on this MSVC toolchain.</td></tr>
+      <td>TCP + Noise + Yamux, + DNS + Kademlia + mDNS + identify + relay + <b>DCUtR</b> (Phase 6).
+      <b>QUIC still parked</b> — <span class="kbd">ring</span> build script crashes <span class="kbd">cl.exe</span> on this MSVC toolchain.</td></tr>
   <tr><td>Kademlia DHT + mDNS LAN discovery</td><td class="s"><span class="badge done">done</span></td>
-      <td>Auto-finds peers on the same LAN; DHT used for the mailbox store-and-forward.</td></tr>
+      <td>Auto-finds peers on the same LAN; DHT used for the mailbox store-and-forward and PEX cache lookup.</td></tr>
   <tr><td>Multi-profile + SQLite storage</td><td class="s"><span class="badge done">done</span></td>
       <td><span class="kbd">--profile alice</span> / <span class="kbd">--profile bob</span>; per-profile encrypted <span class="kbd">messages.db</span>.</td></tr>
 </table>
@@ -86,11 +201,13 @@
       <td>Dedicated request-response protocol <span class="kbd">/ME55/direct-message/2.0.0</span>.
       Gossipsub fallback removed — it leaked plaintext to every subscriber.</td></tr>
   <tr><td>Signed envelope + cross-check</td><td class="s"><span class="badge done">done</span></td>
-      <td>Ed25519 over a domain-separated canonical layout. Transport-peer ↔ signed-sender cross-check on receive.</td></tr>
+      <td>Ed25519 over a domain-separated canonical layout. Transport-peer ↔ signed-sender cross-check on receive.
+      Opt-in <span class="kbd">--deniable-dm</span> path skips the per-message signature (relies on the ratchet AEAD MAC for authenticity) — see "In flight" below.</td></tr>
   <tr><td>Local storage + TTL sweep</td><td class="s"><span class="badge done">done</span></td>
       <td>Hourly <span class="kbd">cleanup_expired()</span> tick.</td></tr>
   <tr><td>CLI</td><td class="s"><span class="badge done">done</span></td>
-      <td><span class="kbd">connect</span> / <span class="kbd">send</span> / <span class="kbd">peers</span> / <span class="kbd">contacts</span> / <span class="kbd">history</span> / <span class="kbd">whoami</span> / <span class="kbd">addr</span> / <span class="kbd">safety</span> / <span class="kbd">group</span></td></tr>
+      <td><span class="kbd">connect</span> / <span class="kbd">send</span> / <span class="kbd">peers</span> / <span class="kbd">contacts</span> / <span class="kbd">history</span> / <span class="kbd">whoami</span> / <span class="kbd">addr</span> / <span class="kbd">safety</span> / <span class="kbd">group</span>;
+      Phase 6 adds <span class="kbd">--relay</span> / <span class="kbd">--relay-server</span> / <span class="kbd">--daemon</span> / <span class="kbd">--bootstrap</span> / <span class="kbd">--no-default-bootstrap</span>.</td></tr>
 </table>
 
 <h2>Phase 3 + 3.5 — E2EE &amp; at-rest hardening <span class="pill done">Done</span></h2>
@@ -99,7 +216,8 @@
   <tr><td>Double Ratchet E2EE (Signal spec)</td><td class="s"><span class="badge done">done</span></td>
       <td>Hand-rolled on in-tree primitives (x25519-dalek, chacha20poly1305, hkdf, sha2, hmac). KDF_RK / KDF_CK, DH ratchet step, skipped-key cache (MAX_SKIP=1000).</td></tr>
   <tr><td>X3DH-lite handshake + one-time prekeys</td><td class="s"><span class="badge done">done</span></td>
-      <td>2-DH base + 3-DH OTPK variant (distinct domain separator). Asynchronous first-message delivery.</td></tr>
+      <td>2-DH base + 3-DH OTPK variant (distinct domain separator). Asynchronous first-message delivery.
+      Phase 7 adds an ML-KEM-768 ciphertext to the first message → hybrid SK = HKDF(X25519 outputs ‖ ML-KEM ss).</td></tr>
   <tr><td>At-rest AEAD (DEK in OS keyring)</td><td class="s"><span class="badge done">done</span></td>
       <td>ChaCha20-Poly1305 over messages / ratchet sessions / OTPK privates / outbox / mailbox drops / group sender keys. DEK in Windows Credential Manager.</td></tr>
   <tr><td>Session persistence + safety-number UI</td><td class="s"><span class="badge done">done</span></td>
@@ -120,7 +238,7 @@
     <tr><td>4c.2: 256-byte frame padding</td><td class="s"><span class="badge done">done</span></td></tr>
     <tr><td>4c.2′: opt-in IAT jitter (<span class="kbd">--obfs-jitter-ms</span>)</td><td class="s"><span class="badge done">done</span></td></tr>
     <tr><td>4c.3: <span class="kbd">ScrambleStream::pending</span> buffer bound</td><td class="s"><span class="badge done">done</span></td></tr>
-    <tr><td>GUI (Tauri 2.x) — build wired + push-refresh</td><td class="s"><span class="badge done">done</span></td></tr>
+    <tr><td>GUI (Tauri 2.x) — build wired + push-refresh + click-to-copy</td><td class="s"><span class="badge done">done</span></td></tr>
   </table>
 </div>
 
@@ -137,52 +255,145 @@
       <td>Per-peer 60s cooldown; pool target bumped 20 → 100.</td></tr>
   <tr><td>Group chats (Megolm-style, founder-signed)</td><td class="s"><span class="badge done">done</span></td>
       <td>8-commit track: storage + Megolm sender chains + GroupControl wire + send/receive fan-out + CLI + membership rotation (forward secrecy on remove/leave) + Tauri GUI + audit pack.</td></tr>
-  <tr><td>Self-audit pass</td><td class="s"><span class="badge done">done</span></td>
-      <td>12 findings, 7 actioned. <span class="kbd">audit/SELF_AUDIT.md</span>. (Predates the group-chat track — §24-§26 not yet self-audited.)</td></tr>
-  <tr><td>OTPK serve/consume regression fix</td><td class="s"><span class="badge done">done</span></td>
-      <td><b>2026-05-20</b> — see "Where we are right now" below.</td></tr>
+  <tr><td>F12 — HMAC the outbox.peer_id column</td><td class="s"><span class="badge done">done</span></td>
+      <td>Self-audit finding actioned in <span class="kbd">74328e7</span>; pre-F12 rows migrated via <span class="kbd">PRAGMA user_version</span> gate.</td></tr>
+  <tr><td>Rebrand ZeroCenter → ME55</td><td class="s"><span class="badge done">done</span></td>
+      <td><span class="kbd">f5c2e65</span> — wire-format and at-rest breaking; domain separators, table names, multiaddr protocol strings all rotated.</td></tr>
   <tr><td>External security audit</td><td class="s"><span class="badge todo">todo</span></td>
       <td><span class="kbd">audit/</span> pack is review-ready; needs an external reviewer engaged.</td></tr>
-  <tr><td>Deniability</td><td class="s"><span class="badge todo">deferred</span></td>
-      <td>Intentional non-deniability for v1 — every message carries an Ed25519 signature. Deniable AKE is a post-audit crypto change.</td></tr>
 </table>
+
+<h2>Phase 6 — Bootstrap + Relay (NAT traversal) <span class="pill inprog">In flight</span></h2>
+<div class="sub">Code on disk (uncommitted as of 2026-05-24, ~2500 LOC) but builds clean and the local 3-process smoke
+  (relay + Alice + Bob, all on <span class="kbd">127.0.0.1</span>) works end-to-end. Public-VPS validation is
+  pending — see <span class="kbd">BEGET_SETUP.md</span> for the operator runbook.</div>
+<table>
+  <tr><th>Item</th><th>Status</th><th>Notes</th></tr>
+  <tr><td>libp2p <span class="kbd">dcutr</span> feature + Circuit Relay v2</td><td class="s"><span class="badge inprog">in flight</span></td>
+      <td>Two NAT'd peers connect through a public relay; DCUtR then attempts hole-punching to upgrade
+      to a direct connection. Relayed bytes use plain Noise (we can't scramble a third party's circuit);
+      direct upgraded bytes use the ScrambleStream wrapper.</td></tr>
+  <tr><td>CLI: <span class="kbd">--relay</span>, <span class="kbd">--relay-server</span>, <span class="kbd">--daemon</span>, <span class="kbd">--bootstrap</span>, <span class="kbd">--no-default-bootstrap</span></td>
+      <td class="s"><span class="badge inprog">in flight</span></td>
+      <td>NAT'd clients pass <span class="kbd">--relay</span> to listen on a circuit-relay address;
+      VPS nodes set <span class="kbd">--relay-server</span> + <span class="kbd">--daemon</span> for systemd-friendly headless operation.</td></tr>
+  <tr><td>Dynamic bootstrap discovery (<span class="kbd">src/network/bootstrap.rs</span>)</td><td class="s"><span class="badge inprog">in flight</span></td>
+      <td>4-layer resolution: CLI override → local PEX cache (<span class="kbd">peer_cache</span> SQLite) →
+      signed HTTPS manifest at <span class="kbd">bootstrap.me55.network/manifest.json</span> (Ed25519 detached sig
+      pinned to <span class="kbd">MAINTAINER_PUBKEY</span>) → DNSADDR TXT fallback → hardcoded
+      <span class="kbd">DEFAULT_BOOTSTRAPS</span>. Maintainer pubkey is currently a 32-byte zero placeholder.</td></tr>
+  <tr><td>New binary: <span class="kbd">ME55AGUI</span></td><td class="s"><span class="badge inprog">in flight</span></td>
+      <td>GUI-defaulting twin of <span class="kbd">ME55.exe</span>. Sets <span class="kbd">#![windows_subsystem = "windows"]</span>
+      so double-clicking the exe opens only the Tauri webview — no extra console window.
+      <span class="kbd">required-features = ["gui"]</span> in Cargo.toml. Common startup body lives in <span class="kbd">src/entry.rs</span>.</td></tr>
+  <tr><td>New binary: <span class="kbd">me55-tools</span></td><td class="s"><span class="badge inprog">in flight</span></td>
+      <td>Maintainer CLI: generate the Ed25519 keypair that signs the bootstrap manifest, print the pubkey to paste
+      into <span class="kbd">MAINTAINER_PUBKEY</span>, sign a manifest JSON. Headless; ships with the
+      <span class="kbd">cargo build --release</span> default set.</td></tr>
+  <tr><td>Beget VPS as <span class="kbd">bootstrap-1</span></td><td class="s"><span class="badge todo">queued</span></td>
+      <td>Operator runbook at <span class="kbd">BEGET_SETUP.md</span>. End-to-end:
+      ufw / systemd unit (with <span class="kbd">NoNewPrivileges</span>, <span class="kbd">ProtectSystem=strict</span>, capability set zeroed) →
+      first-boot PeerId capture → multiaddr baked into <span class="kbd">DEFAULT_BOOTSTRAPS</span> → rebuild + ship.</td></tr>
+  <tr><td>Bootstrap nodes <span class="kbd">2</span> &amp; <span class="kbd">3</span> (cross-jurisdiction)</td><td class="s"><span class="badge todo">queued</span></td>
+      <td>Oracle Cloud Free in US-East + EU-Frankfurt. Beget is RU; we want at least two
+      non-RU bootstraps before announcing the network, to keep a compelled-logs scenario from being a
+      single-jurisdiction risk. <span class="kbd">THREAT_MODEL.md</span> §Beget reminder.</td></tr>
+</table>
+
+<h2>Phase 7 — Post-quantum X3DH (PQXDH-style) <span class="pill inprog">In flight</span></h2>
+<table>
+  <tr><th>Item</th><th>Status</th><th>Notes</th></tr>
+  <tr><td>ML-KEM-768 (FIPS 203) hybrid in X3DH first message</td><td class="s"><span class="badge inprog">in flight</span></td>
+      <td><span class="kbd">ml-kem = "0.2"</span> dependency wired. Long-term ML-KEM keypair lives on the
+      identity record alongside the Ed25519 / X25519 keys. First message carries the 1088-byte ciphertext;
+      hybrid SK = HKDF(X25519 outputs ‖ ML-KEM ss). Secure as long as either primitive holds.
+      Matches Signal PQXDH (2023) and iMessage PQ3 (2024).</td></tr>
+  <tr><td>Downgrade-attack mitigation</td><td class="s"><span class="badge inprog">in flight</span></td>
+      <td>Distinct HKDF info tags <span class="kbd">ME55-x3dh-pq-v1</span> /
+      <span class="kbd">ME55-x3dh-otpk-pq-v1</span> so a peer stripping the PQ ciphertext from a captured
+      envelope cannot recover a classical-X3DH secret that matches a hybrid initiator.</td></tr>
+  <tr><td>PQ signed-prekey publication</td><td class="s"><span class="badge inprog">in flight</span></td>
+      <td>Responder publishes its ML-KEM encapsulation key bound by an Ed25519 signature over a distinct
+      domain (<span class="kbd">ML_KEM_PREKEY_SIG_DOMAIN</span>). Initiator verifies before encapsulating.</td></tr>
+  <tr><td>Migration path for pre-PQ identities</td><td class="s"><span class="badge inprog">in flight</span></td>
+      <td>Backward-compatible serde defaults — pre-PQ identities upgrade in place by generating an
+      ML-KEM keypair on first load and republishing the prekey bundle. Old sessions continue on classical
+      X3DH until the next session reset.</td></tr>
+</table>
+
+<h2>Opt-in deniable DMs <span class="pill inprog">In flight</span></h2>
+<table>
+  <tr><th>Item</th><th>Status</th><th>Notes</th></tr>
+  <tr><td><span class="kbd">--deniable-dm</span> CLI flag</td><td class="s"><span class="badge inprog">in flight</span></td>
+      <td>Outgoing 1:1 DMs sent WITHOUT the per-message Ed25519 signature. Authenticity rests on the
+      ratchet AEAD MAC (shared between the two session participants → either could have forged it →
+      neither can prove authorship to a third party).</td></tr>
+  <tr><td>Wire incompatibility note</td><td class="s"><span class="badge partial">caveat</span></td>
+      <td>Peers expecting the legacy signed path drop deniable envelopes. Opt-in only; default
+      remains non-deniable for v1. <b>Group chats are unaffected</b> — the Megolm per-message signature
+      is load-bearing for cross-member anti-impersonation (INVARIANTS §24).</td></tr>
+</table>
+
+<h2>Recently shipped (since 2026-05-22)</h2>
+<div class="commit-list">
+  <li class="done"><b>Rebrand ZeroCenter → ME55</b> <span class="tag">commit f5c2e65</span><br>
+      Wire-format and at-rest breaking. Domain separators
+      (<span class="kbd">ZeroCenter-*-v1</span> → <span class="kbd">ME55-*-v1</span>), table prefixes,
+      multiaddr protocol strings (<span class="kbd">/ZeroCenter/direct-message/2.0.0</span> →
+      <span class="kbd">/ME55/direct-message/2.0.0</span>), Cargo bin name, Windows Credential Manager
+      DEK target, profile directory under <span class="kbd">%LOCALAPPDATA%</span>. Old DBs and old
+      sessions must be wiped.</li>
+  <li class="done"><b>ANALYSIS.html — 35-finding code audit</b> <span class="tag">commit efe5c71</span><br>
+      Three independent reviewers (one per subsystem: crypto core / node+networking /
+      storage+protocol+obfs) read every file in full and cross-referenced against INVARIANTS / CRYPTO /
+      THREAT_MODEL. Tally: <b>0 Critical · 5 High · 11 Medium · 12 Low · 7 Informational</b>. The 5
+      Highs are queued into the Phase 6/7 work; remediation tracked in the audit pack.</li>
+  <li class="done"><b>ABOUT.html — plain-language presentation</b> <span class="tag">commit d0221af</span><br>
+      Non-developer-facing summary of what ME55 is, who it's for, and what's actually shipped vs. promised.</li>
+  <li class="done"><b>GUI: click PeerId in sidebar to copy it to the clipboard</b> <span class="tag">commit 87947b7</span><br>
+      Low-noise quality-of-life — was a long-standing papercut for the safety-number workflow.</li>
+  <li class="done"><b>GUI: enable Tauri <span class="kbd">custom-protocol</span> feature for release builds</b>
+      <span class="tag">commit 10d89e8</span><br>
+      Without the feature, <span class="kbd">cargo build --release --features gui</span> baked the dev-mode
+      <span class="kbd">devUrl: localhost:1420</span> into the binary and the webview opened with
+      ERR_CONNECTION_REFUSED. Release GUI builds now work end-to-end.</li>
+</div>
 
 <h2>Where we are right now</h2>
 <div class="commit-list">
-  <li class="done"><b>Phases 1 → 5 are implemented and test-green.</b> Transport, E2EE, at-rest hardening,
-    obfuscation, DHT mailbox, sealed sender, and Megolm-style group chats are all on disk with unit-test
-    and audit-pack coverage. <span class="kbd">cargo test --lib</span>: 119 / 119.</li>
-  <li class="done"><b>F12 (self-audit) actioned — outbox.peer_id no longer plaintext at rest.</b>
-    <span class="tag">commit 74328e7</span><br>
-    The persistent outbox stored the recipient PeerId in the clear, so a disk-read attacker without the
-    OS-keyring DEK could enumerate who had mail queued even though the message body was encrypted. The
-    column now holds <code>HMAC-SHA256(DEK, "ME55-outbox-peer-v1" || peer_id)</code> — deterministic,
-    so the by-peer lookup and <code>idx_outbox_peer</code> index are unchanged; one-way, which is enough
-    since the drain path always already holds the PeerId. A <code>PRAGMA user_version</code> gate re-tags
-    pre-F12 rows once on first open.</li>
-  <li class="warn"><b>OTPK serve/consume regression — found in live DM testing, fixed 2026-05-20</b>
-    <span class="tag">commit b365be4</span><br>
-    The audit-F3 fix (835c299) gated <code>load_otpk_private</code> on <code>consumed_at IS NULL</code>, but
-    <code>pop_unused_otpk</code> sets <code>consumed_at</code> at <i>serve</i> time — so the private OTPK was
-    refused for the very first legitimate responder X3DH, and every 3-DH first message was dropped with
-    <code>OTPK id=N not found in our store</code>, permanently desyncing the session. The lifecycle is now
-    split across two columns: <code>served_at</code> (set on pop, blocks re-serving) and
-    <code>consumed_at</code> (set after a successful first-decrypt — the F3 replay gate). Migrates pre-fix
-    DBs via <code>ALTER TABLE</code> + backfill. The F3 unit test that encoded the bug was replaced with a
-    full serve → load → consume lifecycle test.</li>
-  <li class="todo"><b>Codebase has not had an external audit.</b> Phase 3-5 implement known-good algorithms
-    (Signal Double Ratchet, X3DH-lite, Megolm-style sender chains, vetted primitives) but the integration
-    is hand-rolled. Treat as research-grade until third-party review.</li>
+  <li class="done"><b>Phases 1 → 5 implemented and test-green at <span class="kbd">f5c2e65</span>.</b>
+    Transport, E2EE, at-rest hardening, obfuscation, DHT mailbox, sealed sender, and Megolm-style
+    group chats are all on disk with unit-test and audit-pack coverage. Last clean run:
+    <span class="kbd">cargo test --lib</span> 119 / 119.</li>
+  <li class="inprog"><b>Phase 6, Phase 7, and opt-in deniable DMs on disk uncommitted.</b>
+    Significant code in the working tree (Cargo.toml: <span class="kbd">+dcutr / +ml-kem / +hickory-resolver / +reqwest</span>;
+    src/: <span class="kbd">~2500 LOC across 19 files</span>; two new <span class="kbd">[[bin]]</span>
+    targets). 145 test annotations on disk vs. 119 at last green build — <b>roughly 26 new test
+    functions awaiting a full re-run</b>. Need to land the work in coherent commits, re-run
+    <span class="kbd">cargo test --lib</span>, refresh the audit pack for §27+ (PQ + relay invariants).</li>
+  <li class="todo"><b>Codebase has not had an external audit.</b> Phase 3-5 use known-good algorithms
+    (Signal Double Ratchet, X3DH-lite, Megolm-style sender chains, vetted primitives) but the
+    integration is hand-rolled. Phase 6 brings new attack surface (untrusted relay, manifest fetch
+    over HTTPS, DNSADDR resolver); Phase 7 brings new crypto (ML-KEM-768 RustCrypto implementation).
+    Treat as research-grade until third-party review.</li>
 </div>
 
 <h2>Remaining — prioritised</h2>
 <div class="commit-list">
+  <li class="todo"><b>Land Phase 6 + Phase 7 + deniable-DM in coherent commits.</b> Currently a single
+    uncommitted working tree. Split into ≥4 commits: (a) bootstrap discovery module + manifest tooling,
+    (b) DCUtR + circuit-relay wiring + new CLI flags + ME55AGUI/me55-tools bins, (c) PQ-X3DH hybrid,
+    (d) deniable-DM opt-in. Each with refreshed audit-pack sections and test deltas.</li>
+  <li class="todo"><b>Stand up <span class="kbd">bootstrap-1</span> on Beget.</b> Runbook in
+    <span class="kbd">BEGET_SETUP.md</span>. Capture PeerId, bake into <span class="kbd">DEFAULT_BOOTSTRAPS</span>,
+    rebuild, smoke-test from a NAT'd laptop. Then queue <span class="kbd">bootstrap-2</span> (Oracle US-East)
+    and <span class="kbd">bootstrap-3</span> (Oracle EU-Frankfurt) to spread jurisdictional risk.</li>
   <li class="todo"><b>External security audit.</b> The <span class="kbd">audit/</span> pack (README, CRYPTO
-    incl. §12 Megolm, THREAT_MODEL incl. adversary class J, 26 numbered INVARIANTS, SELF_AUDIT) is
+    incl. §12 Megolm + soon §13 PQ-X3DH, THREAT_MODEL incl. adversary classes J + soon K for
+    compromised relay, 26+ numbered INVARIANTS, SELF_AUDIT, plus the 35-finding ANALYSIS audit) is
     review-ready. Engage a reviewer; package at a fixed commit; remediate findings.</li>
-  <li class="todo"><b>Deniability.</b> Replace per-message Ed25519 with a deniable AKE. Big crypto change;
-    constrained by the load-bearing Megolm per-message signature (anti-impersonation, INVARIANTS §24).
-    Postponed until the external audit lands on the v1 design.</li>
+  <li class="todo"><b>Address the 5 High findings from ANALYSIS.html</b> as part of the Phase 6/7
+    landings — most are scope-aligned. See <span class="kbd">ANALYSIS.html §10-§11</span>.</li>
   <li class="todo"><b>Group-chats v1 polish.</b> Prekey-fetch onboarding for new joiners (currently
     warn-and-skip), a founder-key rotation primitive, no-op leave on an absent group.</li>
   <li class="todo"><b>Audit-flagged debt.</b> F4 — bound <span class="kbd">pending_recvs</span> duplicates
@@ -194,9 +405,10 @@
 </div>
 
 <div class="note">Verification: <span class="kbd">cargo test --lib</span> · <span class="kbd">cargo build --release</span> ·
-  two-window run via <span class="kbd">bats\alice.bat</span> / <span class="kbd">bats\bob.bat</span>
-  (or <span class="kbd">target\release\ME55.exe --profile &lt;name&gt;</span>). Full commit log and
-  conventions live in <span class="kbd">plans/ROADMAP.md</span>.</div>
+  two-window run via <span class="kbd">bats\gui-alice.bat</span> / <span class="kbd">bats\gui-bob.bat</span>
+  (or via-relay variants under <span class="kbd">bats\gui-alice-via-relay.bat</span> /
+  <span class="kbd">bats\gui-bob-via-relay.bat</span>, which exercise the Phase 6 path against a local relay).
+  Full commit log and conventions live in <span class="kbd">plans/ROADMAP.md</span>.</div>
 
 </div>
 </body>

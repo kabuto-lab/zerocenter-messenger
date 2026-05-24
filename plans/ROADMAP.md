@@ -1,6 +1,6 @@
 # ME55 Messenger — Roadmap
 
-Living document tracking what's done, what's in flight, and what's queued. Last refreshed 2026-05-22 (F12 — `outbox.peer_id` HMAC-tagged at rest; `tauri.conf.json` `withGlobalTauri` fix).
+Living document tracking what's done, what's in flight, and what's queued. Last refreshed 2026-05-24 (rebrand ZeroCenter → ME55 landed; ANALYSIS.html 35-finding audit landed; Phase 6 bootstrap+relay, Phase 7 PQ-X3DH, and opt-in `--deniable-dm` are now on disk uncommitted and pending coherent commit landings).
 
 ## Status snapshot
 
@@ -69,9 +69,45 @@ Most recent first.
 | 2da79aa | fix(logs): downgrade plaintext-bearing info! to debug! (INVARIANTS §19) | Three `info!` sites in `node.rs` went to `debug!`. |
 | 7caa646 | feat: land Phase 3+3.5+4a-scaffold, compile-clean & tests green | The big push: Phase 3 + 3.5 + 4a primitive landed in tree, plus six surface-level fixes from the first real `cargo check`. |
 
-## In flight
+## In flight (uncommitted on disk as of 2026-05-24)
 
-_None._ The Phase 5 group-chats track (94710ba → 5794f82) completed 2026-05-19; ~2500 LOC across 8 commits with full test + audit-pack coverage. Next priorities below.
+Three parallel tracks, ~2500 LOC across 19 modified/added source files, plus new top-level docs (`RELAY.md`, `BEGET_SETUP.md`) and ops bats (`bats/gui-*-via-relay.bat`). Builds clean; needs a coherent commit-split, test re-run, and audit-pack refresh.
+
+### Phase 6 — Bootstrap + Relay (NAT traversal)
+
+- **libp2p `dcutr` feature added + Circuit Relay v2 wired** (`src/network/behaviour.rs`). Two NAT'd peers connect through a public relay; DCUtR then attempts hole-punching to upgrade to a direct connection. Relayed bytes use plain Noise (we can't scramble a third party's circuit); direct-upgraded bytes use the ScrambleStream wrapper, so `--obfs-key` only kicks in after the upgrade succeeds.
+- **CLI flags:** `--relay <multiaddr>` (repeatable; listen on `addr/p2p-circuit`), `--relay-server` (run as public relay for other peers), `--daemon` (headless: no REPL, no GUI, swarm in spawned task, main blocks forever — required for systemd unit on the VPS), `--bootstrap <multiaddr>` (repeatable seed), `--no-default-bootstrap` (skip the hardcoded fallback, used by the relay server itself so it doesn't loop-dial itself).
+- **Dynamic bootstrap discovery** (`src/network/bootstrap.rs`, ~300 LOC). 4-layer resolution: CLI override → local PEX cache (`peer_cache` SQLite table) → signed HTTPS manifest at `https://bootstrap.me55.network/manifest.json` (Ed25519 detached sig pinned to `MAINTAINER_PUBKEY`) → DNSADDR TXT at `_dnsaddr.bootstrap.me55.network` → hardcoded `DEFAULT_BOOTSTRAPS`. Maintainer pubkey is currently a 32-byte zero placeholder; will be filled in once `me55-tools keygen` produces the real one. Manifests have an `issued_at`/`expires_at` to bound replay; rejected if older than ~30 days. New deps: `hickory-resolver = "0.24"`, `reqwest = "0.11"` (rustls-tls, no openssl).
+- **New `[[bin]]` targets:**
+  - `ME55AGUI` (`src/bin/me55agui.rs`) — GUI-defaulting twin of `ME55.exe`. Sets `#![windows_subsystem = "windows"]` so double-clicking opens only the Tauri webview — no extra console window. `required-features = ["gui"]`. Common startup body extracted to `src/entry.rs` and shared.
+  - `me55-tools` (`src/bin/me55_tools.rs`) — maintainer CLI: generate the Ed25519 keypair that signs the bootstrap manifest, print the pubkey for pasting into `MAINTAINER_PUBKEY`, sign a manifest JSON. Headless; ships with the default `cargo build --release`.
+- **Ops docs:** `RELAY.md` (end-user setup), `BEGET_SETUP.md` (operator runbook for the first public bootstrap node — Beget VPS as `bootstrap-1`, ufw / systemd unit with `NoNewPrivileges` / `ProtectSystem=strict` / capability set zeroed / `MemoryMax=512M`, first-boot PeerId capture, smoke-test). Pending: actually standing up the Beget node, then `bootstrap-2` (Oracle US-East) and `bootstrap-3` (Oracle EU-Frankfurt) for jurisdictional spread.
+
+### Phase 7 — Post-quantum X3DH (PQXDH-style)
+
+- **`ml-kem = "0.2"` dep added** (CRYSTALS-Kyber / ML-KEM-768, NIST FIPS 203). Hybrid construction: classical X25519 X3DH PLUS an ML-KEM-768 shared secret, mixed into the same HKDF. Session SK stays secure as long as EITHER the X25519 problem OR the ML-KEM problem remains hard. Matches Signal PQXDH (2023) and iMessage PQ3 (2024).
+- **Identity record extended** with a long-term ML-KEM-768 keypair alongside the existing Ed25519 / X25519 keys. Backward-compatible serde defaults — pre-PQ identities upgrade in place by generating an ML-KEM keypair on first load.
+- **`src/crypto/x3dh.rs` rewritten** with `pq_encapsulate` / `pq_decapsulate` helpers + new `initiator_derive_with_pq` / `responder_derive_with_pq` paths. Distinct HKDF info tags `ME55-x3dh-pq-v1` / `ME55-x3dh-otpk-pq-v1` so a downgrade attack (peer drops the 1088-byte ML-KEM ciphertext from a captured first-message envelope) cannot recover a classical-X3DH secret matching a hybrid initiator.
+- **Wire format:** `EncryptedPayload` grew an `ml_kem_ct: Option<Vec<u8>>` field (1088 bytes when present, absent for classical-only fallback). PQ signed-prekey publication binds the encapsulation key under a distinct Ed25519 sig domain (`ML_KEM_PREKEY_SIG_DOMAIN`); initiator verifies before encapsulating.
+
+### Opt-in deniable DMs
+
+- **`--deniable-dm` CLI flag.** Outgoing 1:1 DMs sent WITHOUT the per-message Ed25519 signature. Authenticity rests on the ratchet AEAD MAC, whose key is shared between the two session participants — either could have forged any given message → neither can prove authorship to a third party.
+- **Wire-incompatible with peers expecting the legacy signed path** — they drop deniable envelopes. Opt-in only; default remains non-deniable for v1 to preserve compatibility with existing installs.
+- **Group chats are unaffected.** The Megolm per-message Ed25519 sig is load-bearing for cross-member anti-impersonation (INVARIANTS §24); removing it from group fan-out would require a different deniability construction and is explicitly out of scope here.
+
+## Done — chronological commits
+
+Most recent first.
+
+| Commit | Title | What it shipped |
+|---|---|---|
+| f5c2e65 | chore: rebrand ZeroCenter → ME55 | Wire-format and at-rest breaking. Domain separators (`ZeroCenter-*-v1` → `ME55-*-v1`), table prefixes, multiaddr protocol strings (`/ZeroCenter/direct-message/2.0.0` → `/ME55/direct-message/2.0.0`), Cargo bin name (`ME55`), Windows Credential Manager DEK target, profile directory under `%LOCALAPPDATA%\ME55\<profile>\`. Old DBs and old sessions must be wiped on upgrade. |
+| d0221af | docs: ABOUT.html — plain-language presentation of the project | Non-developer-facing summary. What ME55 is, who it's for, what's actually shipped vs. promised. Standalone self-contained HTML at the repo root. |
+| efe5c71 | docs: ANALYSIS.html — in-depth analysis + 35-finding code audit | Two-part report: §1-§9 architecture analysis (layered diagram, module map for all 25 source files / 12,131 LOC, tech stack, seven cryptographic constructions with domain separators tabulated, four core data flows, runtime state map, build/test/quality, phase timeline); §10-§11 security audit (three independent reviewers, one per subsystem, cross-referenced against INVARIANTS / CRYPTO / THREAT_MODEL). **Tally: 0 Critical · 5 High · 11 Medium · 12 Low · 7 Informational.** The 5 Highs are queued into the Phase 6/7 landings. |
+| 87947b7 | feat(gui): click PeerId in sidebar to copy it to the clipboard | Low-noise quality-of-life. Was a long-standing papercut for the safety-number workflow (you had to manually re-select-and-copy a long base58 string to share out-of-band). |
+| 10d89e8 | fix(gui): enable tauri `custom-protocol` feature for release builds | Without `features = ["custom-protocol"]` on the tauri dep, `cargo build --release --features gui` baked the dev-mode `devUrl: localhost:1420` into the binary; the webview opened with ERR_CONNECTION_REFUSED at launch. Release GUI builds now work end-to-end. Saved to memory as `project_tauri_custom_protocol`. |
+| aa48e40 | docs(roadmap): record F12 outbox-peer-HMAC fix + the tauri.conf fix | Prior roadmap refresh through 74328e7 + 4694498. |
 
 ## Remaining — prioritised forward plan
 

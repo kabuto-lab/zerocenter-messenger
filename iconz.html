@@ -1,0 +1,486 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>iconz — three icon packs</title>
+
+<!-- Phosphor (filled weight) -->
+<link rel="stylesheet" href="https://unpkg.com/@phosphor-icons/web@2.0.3/src/fill/style.css">
+<!-- Tabler webfont -->
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@2.47.0/tabler-icons.min.css">
+
+<style>
+  :root {
+    --bg:        #0a0e1a;
+    --panel:     #131826;
+    --border:    rgba(255,255,255,0.08);
+    --text:      #e8e9ed;
+    --muted:     #8b8f9f;
+    --accent:    #00d4ff;
+    --accent-2:  #ff3d7f;
+    --mono:      ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { background: var(--bg); color: var(--text); min-height: 100vh; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, system-ui, sans-serif;
+    line-height: 1.5;
+    font-size: 15px;
+    padding: 0 24px 60px;
+  }
+  .wrap { max-width: 1240px; margin: 0 auto; }
+
+  /* hero */
+  header.hero {
+    padding: 56px 0 32px;
+    text-align: center;
+  }
+  .hero h1 {
+    font-size: clamp(40px, 7vw, 80px);
+    font-weight: 800;
+    letter-spacing: -0.04em;
+    line-height: 1;
+    background: linear-gradient(120deg, var(--accent), var(--accent-2));
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+    margin-bottom: 12px;
+  }
+  .hero p {
+    color: var(--muted);
+    font-size: 16px;
+    max-width: 560px;
+    margin: 0 auto;
+  }
+
+  /* tabs */
+  .tab-strip {
+    display: flex;
+    gap: 4px;
+    padding: 6px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    margin: 32px auto 28px;
+    width: fit-content;
+    max-width: 100%;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+  .tab {
+    appearance: none;
+    background: transparent;
+    color: var(--muted);
+    border: none;
+    padding: 10px 22px;
+    font-size: 14px;
+    font-weight: 600;
+    font-family: inherit;
+    letter-spacing: 0.01em;
+    border-radius: 10px;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+  }
+  .tab:hover { color: var(--text); background: rgba(255,255,255,0.04); }
+  .tab.active {
+    background: linear-gradient(120deg, var(--accent), var(--accent-2));
+    color: #0a0e1a;
+  }
+  .tab .count {
+    font-family: var(--mono);
+    font-size: 11px;
+    opacity: 0.6;
+    margin-left: 6px;
+  }
+
+  /* panel */
+  .panel { display: none; }
+  .panel.active { display: block; }
+
+  .panel-head {
+    text-align: center;
+    margin-bottom: 28px;
+  }
+  .panel-head h2 {
+    font-size: 22px;
+    font-weight: 700;
+    margin-bottom: 6px;
+  }
+  .panel-head p {
+    color: var(--muted);
+    font-size: 14px;
+    max-width: 620px;
+    margin: 0 auto;
+  }
+  .panel-head .src {
+    display: inline-block;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--accent);
+    border: 1px solid rgba(0,212,255,0.3);
+    border-radius: 999px;
+    padding: 4px 10px;
+    margin-top: 10px;
+    letter-spacing: 0.06em;
+  }
+
+  /* ============================================================
+     TAB 1 — Frosted Glass (glassmorphism on top of vivid gradient)
+     ============================================================ */
+  #pane-frosted {
+    position: relative;
+    border-radius: 24px;
+    overflow: hidden;
+    padding: 40px 32px 56px;
+    margin-top: 8px;
+  }
+  #pane-frosted .gradient-bg {
+    position: absolute;
+    inset: -10%;
+    background:
+      radial-gradient(at 18% 24%, rgba(255, 61, 127, 0.85) 0%, transparent 42%),
+      radial-gradient(at 82% 18%, rgba(123, 97, 255, 0.85) 0%, transparent 42%),
+      radial-gradient(at 22% 82%, rgba(0, 212, 255, 0.75) 0%, transparent 42%),
+      radial-gradient(at 78% 78%, rgba(255, 195, 0, 0.65) 0%, transparent 42%),
+      linear-gradient(135deg, #1a1145 0%, #2d1654 50%, #0f3c5b 100%);
+    filter: blur(40px) saturate(140%);
+    animation: float 18s ease-in-out infinite alternate;
+    z-index: 0;
+  }
+  @keyframes float {
+    0%   { transform: translate(0, 0) scale(1); }
+    50%  { transform: translate(-2%, 2%) scale(1.05); }
+    100% { transform: translate(2%, -2%) scale(1.02); }
+  }
+  #pane-frosted > * { position: relative; z-index: 1; }
+
+  .glass-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+    gap: 18px;
+    margin-top: 8px;
+  }
+  .glass-tile {
+    aspect-ratio: 1 / 1;
+    background: rgba(255, 255, 255, 0.08);
+    backdrop-filter: blur(22px) saturate(180%);
+    -webkit-backdrop-filter: blur(22px) saturate(180%);
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    border-radius: 22px;
+    box-shadow:
+      0 8px 32px 0 rgba(31, 38, 135, 0.18),
+      inset 0 1px 0 rgba(255, 255, 255, 0.15);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    transition: transform 0.2s, box-shadow 0.2s, border-color 0.2s;
+    cursor: default;
+  }
+  .glass-tile:hover {
+    transform: translateY(-3px);
+    box-shadow:
+      0 14px 38px 0 rgba(31, 38, 135, 0.28),
+      inset 0 1px 0 rgba(255, 255, 255, 0.22);
+    border-color: rgba(255, 255, 255, 0.28);
+  }
+  .glass-tile svg {
+    width: 38px;
+    height: 38px;
+    stroke: rgba(255, 255, 255, 0.95);
+    stroke-width: 1.8;
+    filter: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.25));
+  }
+  .glass-tile .label {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: rgba(255, 255, 255, 0.85);
+    letter-spacing: 0.04em;
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
+  }
+
+  /* ============================================================
+     TABS 2 & 3 — generic icon grid (Phosphor fill, Tabler stroke)
+     ============================================================ */
+  .icon-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+    gap: 14px;
+    margin-top: 8px;
+  }
+  .icon-cell {
+    aspect-ratio: 1 / 1;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    transition: border-color 0.15s, transform 0.15s, background 0.15s;
+  }
+  .icon-cell:hover {
+    border-color: rgba(0, 212, 255, 0.35);
+    background: #1a2034;
+    transform: translateY(-2px);
+  }
+  .icon-cell i {
+    font-size: 32px;
+    color: var(--text);
+    line-height: 1;
+  }
+  /* Phosphor tab uses the accent gradient on icons */
+  #pane-phosphor .icon-cell i {
+    background: linear-gradient(135deg, #ff3d7f, #00d4ff);
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+  /* Tabler tab keeps icons monochrome cyan-tinted */
+  #pane-tabler .icon-cell i { color: #d2d6e2; }
+  #pane-tabler .icon-cell:hover i { color: var(--accent); }
+
+  .icon-cell .label {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--muted);
+    letter-spacing: 0.03em;
+  }
+
+  /* footer */
+  footer {
+    margin-top: 56px;
+    padding-top: 24px;
+    border-top: 1px solid var(--border);
+    font-size: 12px;
+    color: var(--muted);
+    text-align: center;
+    font-family: var(--mono);
+  }
+  footer a { color: var(--accent); text-decoration: none; }
+
+  @media (max-width: 600px) {
+    body { padding: 0 14px 50px; }
+    .glass-grid, .icon-grid {
+      grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
+    }
+    #pane-frosted { padding: 24px 16px 36px; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="hero">
+  <h1>iconz</h1>
+  <p>Three icon packs, three aesthetics — frosted glass, filled, stroked.</p>
+</header>
+
+<div class="tab-strip" role="tablist">
+  <button class="tab active" data-target="pane-frosted" role="tab">Frosted Glass <span class="count">·40</span></button>
+  <button class="tab" data-target="pane-phosphor" role="tab">Phosphor Fill <span class="count">·40</span></button>
+  <button class="tab" data-target="pane-tabler" role="tab">Tabler Stroke <span class="count">·40</span></button>
+</div>
+
+<!-- =================================================================
+     TAB 1 — FROSTED GLASS
+     Lucide line icons inside glassmorphism tiles over a vivid gradient.
+     "Frosted Glass Icons" as a CDN-distributed pack doesn't exist;
+     this is the standard glassmorphism treatment built from Lucide.
+     ================================================================= -->
+<section id="pane-frosted" class="panel active" role="tabpanel">
+  <div class="gradient-bg" aria-hidden="true"></div>
+  <div class="panel-head">
+    <h2>Frosted Glass</h2>
+    <p>Glassmorphism tiles with <code>backdrop-filter: blur(22px) saturate(180%)</code>, built on Lucide line icons over a vivid radial-gradient backdrop.</p>
+    <span class="src">Lucide · MIT · CC-BY-styled tiles</span>
+  </div>
+
+  <div class="glass-grid">
+    <div class="glass-tile"><i data-lucide="heart"></i><span class="label">heart</span></div>
+    <div class="glass-tile"><i data-lucide="star"></i><span class="label">star</span></div>
+    <div class="glass-tile"><i data-lucide="home"></i><span class="label">home</span></div>
+    <div class="glass-tile"><i data-lucide="user"></i><span class="label">user</span></div>
+    <div class="glass-tile"><i data-lucide="settings"></i><span class="label">settings</span></div>
+    <div class="glass-tile"><i data-lucide="search"></i><span class="label">search</span></div>
+    <div class="glass-tile"><i data-lucide="bell"></i><span class="label">bell</span></div>
+    <div class="glass-tile"><i data-lucide="mail"></i><span class="label">mail</span></div>
+    <div class="glass-tile"><i data-lucide="phone"></i><span class="label">phone</span></div>
+    <div class="glass-tile"><i data-lucide="calendar"></i><span class="label">calendar</span></div>
+    <div class="glass-tile"><i data-lucide="clock"></i><span class="label">clock</span></div>
+    <div class="glass-tile"><i data-lucide="lock"></i><span class="label">lock</span></div>
+    <div class="glass-tile"><i data-lucide="key"></i><span class="label">key</span></div>
+    <div class="glass-tile"><i data-lucide="eye"></i><span class="label">eye</span></div>
+    <div class="glass-tile"><i data-lucide="download"></i><span class="label">download</span></div>
+    <div class="glass-tile"><i data-lucide="upload"></i><span class="label">upload</span></div>
+    <div class="glass-tile"><i data-lucide="share-2"></i><span class="label">share</span></div>
+    <div class="glass-tile"><i data-lucide="link"></i><span class="label">link</span></div>
+    <div class="glass-tile"><i data-lucide="image"></i><span class="label">image</span></div>
+    <div class="glass-tile"><i data-lucide="camera"></i><span class="label">camera</span></div>
+    <div class="glass-tile"><i data-lucide="music"></i><span class="label">music</span></div>
+    <div class="glass-tile"><i data-lucide="video"></i><span class="label">video</span></div>
+    <div class="glass-tile"><i data-lucide="folder"></i><span class="label">folder</span></div>
+    <div class="glass-tile"><i data-lucide="map"></i><span class="label">map</span></div>
+    <div class="glass-tile"><i data-lucide="globe"></i><span class="label">globe</span></div>
+    <div class="glass-tile"><i data-lucide="cloud"></i><span class="label">cloud</span></div>
+    <div class="glass-tile"><i data-lucide="sun"></i><span class="label">sun</span></div>
+    <div class="glass-tile"><i data-lucide="moon"></i><span class="label">moon</span></div>
+    <div class="glass-tile"><i data-lucide="wifi"></i><span class="label">wifi</span></div>
+    <div class="glass-tile"><i data-lucide="battery"></i><span class="label">battery</span></div>
+    <div class="glass-tile"><i data-lucide="send"></i><span class="label">send</span></div>
+    <div class="glass-tile"><i data-lucide="message-square"></i><span class="label">message</span></div>
+    <div class="glass-tile"><i data-lucide="bookmark"></i><span class="label">bookmark</span></div>
+    <div class="glass-tile"><i data-lucide="zap"></i><span class="label">zap</span></div>
+    <div class="glass-tile"><i data-lucide="gift"></i><span class="label">gift</span></div>
+    <div class="glass-tile"><i data-lucide="smile"></i><span class="label">smile</span></div>
+    <div class="glass-tile"><i data-lucide="check"></i><span class="label">check</span></div>
+    <div class="glass-tile"><i data-lucide="x"></i><span class="label">x</span></div>
+    <div class="glass-tile"><i data-lucide="plus"></i><span class="label">plus</span></div>
+    <div class="glass-tile"><i data-lucide="trash-2"></i><span class="label">trash</span></div>
+  </div>
+</section>
+
+<!-- =================================================================
+     TAB 2 — PHOSPHOR (fill weight)
+     Web font from @phosphor-icons/web. Classes: ph-fill ph-<name>
+     ================================================================= -->
+<section id="pane-phosphor" class="panel" role="tabpanel">
+  <div class="panel-head">
+    <h2>Phosphor — Fill</h2>
+    <p>Phosphor Icons, filled weight — bold, friendly, expressive shapes. 1500+ icons in the full set; below is a 40-icon sampler.</p>
+    <span class="src">@phosphor-icons/web · MIT</span>
+  </div>
+
+  <div class="icon-grid">
+    <div class="icon-cell"><i class="ph-fill ph-heart"></i><span class="label">heart</span></div>
+    <div class="icon-cell"><i class="ph-fill ph-star"></i><span class="label">star</span></div>
+    <div class="icon-cell"><i class="ph-fill ph-house"></i><span class="label">house</span></div>
+    <div class="icon-cell"><i class="ph-fill ph-user"></i><span class="label">user</span></div>
+    <div class="icon-cell"><i class="ph-fill ph-gear"></i><span class="label">gear</span></div>
+    <div class="icon-cell"><i class="ph-fill ph-magnifying-glass"></i><span class="label">search</span></div>
+    <div class="icon-cell"><i class="ph-fill ph-bell"></i><span class="label">bell</span></div>
+    <div class="icon-cell"><i class="ph-fill ph-envelope"></i><span class="label">envelope</span></div>
+    <div class="icon-cell"><i class="ph-fill ph-phone"></i><span class="label">phone</span></div>
+    <div class="icon-cell"><i class="ph-fill ph-calendar"></i><span class="label">calendar</span></div>
+    <div class="icon-cell"><i class="ph-fill ph-clock"></i><span class="label">clock</span></div>
+    <div class="icon-cell"><i class="ph-fill ph-lock"></i><span class="label">lock</span></div>
+    <div class="icon-cell"><i class="ph-fill ph-key"></i><span class="label">key</span></div>
+    <div class="icon-cell"><i class="ph-fill ph-eye"></i><span class="label">eye</span></div>
+    <div class="icon-cell"><i class="ph-fill ph-eye-slash"></i><span class="label">eye-slash</span></div>
+    <div class="icon-cell"><i class="ph-fill ph-download-simple"></i><span class="label">download</span></div>
+    <div class="icon-cell"><i class="ph-fill ph-upload-simple"></i><span class="label">upload</span></div>
+    <div class="icon-cell"><i class="ph-fill ph-share-network"></i><span class="label">share</span></div>
+    <div class="icon-cell"><i class="ph-fill ph-link"></i><span class="label">link</span></div>
+    <div class="icon-cell"><i class="ph-fill ph-image"></i><span class="label">image</span></div>
+    <div class="icon-cell"><i class="ph-fill ph-camera"></i><span class="label">camera</span></div>
+    <div class="icon-cell"><i class="ph-fill ph-music-note"></i><span class="label">music</span></div>
+    <div class="icon-cell"><i class="ph-fill ph-video-camera"></i><span class="label">video</span></div>
+    <div class="icon-cell"><i class="ph-fill ph-file"></i><span class="label">file</span></div>
+    <div class="icon-cell"><i class="ph-fill ph-folder"></i><span class="label">folder</span></div>
+    <div class="icon-cell"><i class="ph-fill ph-map-pin"></i><span class="label">map-pin</span></div>
+    <div class="icon-cell"><i class="ph-fill ph-globe"></i><span class="label">globe</span></div>
+    <div class="icon-cell"><i class="ph-fill ph-cloud"></i><span class="label">cloud</span></div>
+    <div class="icon-cell"><i class="ph-fill ph-sun"></i><span class="label">sun</span></div>
+    <div class="icon-cell"><i class="ph-fill ph-moon"></i><span class="label">moon</span></div>
+    <div class="icon-cell"><i class="ph-fill ph-wifi-high"></i><span class="label">wifi</span></div>
+    <div class="icon-cell"><i class="ph-fill ph-battery-full"></i><span class="label">battery</span></div>
+    <div class="icon-cell"><i class="ph-fill ph-paper-plane-tilt"></i><span class="label">send</span></div>
+    <div class="icon-cell"><i class="ph-fill ph-chat-circle"></i><span class="label">chat</span></div>
+    <div class="icon-cell"><i class="ph-fill ph-bookmark"></i><span class="label">bookmark</span></div>
+    <div class="icon-cell"><i class="ph-fill ph-lightning"></i><span class="label">lightning</span></div>
+    <div class="icon-cell"><i class="ph-fill ph-gift"></i><span class="label">gift</span></div>
+    <div class="icon-cell"><i class="ph-fill ph-smiley"></i><span class="label">smiley</span></div>
+    <div class="icon-cell"><i class="ph-fill ph-trash"></i><span class="label">trash</span></div>
+    <div class="icon-cell"><i class="ph-fill ph-shield-check"></i><span class="label">shield</span></div>
+  </div>
+</section>
+
+<!-- =================================================================
+     TAB 3 — TABLER (stroke weight)
+     Web font from @tabler/icons-webfont. Classes: ti ti-<name>
+     ================================================================= -->
+<section id="pane-tabler" class="panel" role="tabpanel">
+  <div class="panel-head">
+    <h2>Tabler — Stroke</h2>
+    <p>Tabler Icons — pixel-perfect stroke-based icons, very clean for technical UI. 5000+ in the full pack; 40 below.</p>
+    <span class="src">@tabler/icons-webfont · MIT</span>
+  </div>
+
+  <div class="icon-grid">
+    <div class="icon-cell"><i class="ti ti-heart"></i><span class="label">heart</span></div>
+    <div class="icon-cell"><i class="ti ti-star"></i><span class="label">star</span></div>
+    <div class="icon-cell"><i class="ti ti-home"></i><span class="label">home</span></div>
+    <div class="icon-cell"><i class="ti ti-user"></i><span class="label">user</span></div>
+    <div class="icon-cell"><i class="ti ti-settings"></i><span class="label">settings</span></div>
+    <div class="icon-cell"><i class="ti ti-search"></i><span class="label">search</span></div>
+    <div class="icon-cell"><i class="ti ti-bell"></i><span class="label">bell</span></div>
+    <div class="icon-cell"><i class="ti ti-mail"></i><span class="label">mail</span></div>
+    <div class="icon-cell"><i class="ti ti-phone"></i><span class="label">phone</span></div>
+    <div class="icon-cell"><i class="ti ti-calendar"></i><span class="label">calendar</span></div>
+    <div class="icon-cell"><i class="ti ti-clock"></i><span class="label">clock</span></div>
+    <div class="icon-cell"><i class="ti ti-lock"></i><span class="label">lock</span></div>
+    <div class="icon-cell"><i class="ti ti-key"></i><span class="label">key</span></div>
+    <div class="icon-cell"><i class="ti ti-eye"></i><span class="label">eye</span></div>
+    <div class="icon-cell"><i class="ti ti-eye-off"></i><span class="label">eye-off</span></div>
+    <div class="icon-cell"><i class="ti ti-download"></i><span class="label">download</span></div>
+    <div class="icon-cell"><i class="ti ti-upload"></i><span class="label">upload</span></div>
+    <div class="icon-cell"><i class="ti ti-share"></i><span class="label">share</span></div>
+    <div class="icon-cell"><i class="ti ti-link"></i><span class="label">link</span></div>
+    <div class="icon-cell"><i class="ti ti-pencil"></i><span class="label">pencil</span></div>
+    <div class="icon-cell"><i class="ti ti-trash"></i><span class="label">trash</span></div>
+    <div class="icon-cell"><i class="ti ti-copy"></i><span class="label">copy</span></div>
+    <div class="icon-cell"><i class="ti ti-photo"></i><span class="label">photo</span></div>
+    <div class="icon-cell"><i class="ti ti-camera"></i><span class="label">camera</span></div>
+    <div class="icon-cell"><i class="ti ti-music"></i><span class="label">music</span></div>
+    <div class="icon-cell"><i class="ti ti-video"></i><span class="label">video</span></div>
+    <div class="icon-cell"><i class="ti ti-file"></i><span class="label">file</span></div>
+    <div class="icon-cell"><i class="ti ti-folder"></i><span class="label">folder</span></div>
+    <div class="icon-cell"><i class="ti ti-map"></i><span class="label">map</span></div>
+    <div class="icon-cell"><i class="ti ti-world"></i><span class="label">world</span></div>
+    <div class="icon-cell"><i class="ti ti-cloud"></i><span class="label">cloud</span></div>
+    <div class="icon-cell"><i class="ti ti-sun"></i><span class="label">sun</span></div>
+    <div class="icon-cell"><i class="ti ti-moon"></i><span class="label">moon</span></div>
+    <div class="icon-cell"><i class="ti ti-wifi"></i><span class="label">wifi</span></div>
+    <div class="icon-cell"><i class="ti ti-battery"></i><span class="label">battery</span></div>
+    <div class="icon-cell"><i class="ti ti-send"></i><span class="label">send</span></div>
+    <div class="icon-cell"><i class="ti ti-message"></i><span class="label">message</span></div>
+    <div class="icon-cell"><i class="ti ti-bookmark"></i><span class="label">bookmark</span></div>
+    <div class="icon-cell"><i class="ti ti-bolt"></i><span class="label">bolt</span></div>
+    <div class="icon-cell"><i class="ti ti-gift"></i><span class="label">gift</span></div>
+  </div>
+</section>
+
+<footer>
+  Requires internet (CDN: <a href="https://unpkg.com/lucide@latest">lucide</a> ·
+  <a href="https://unpkg.com/@phosphor-icons/web@2.0.3">@phosphor-icons/web</a> ·
+  <a href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@2.47.0">@tabler/icons-webfont</a>)
+</footer>
+
+</div>
+
+<!-- Lucide via UMD; renders [data-lucide] elements into inline SVG -->
+<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+<script>
+  // tab switching
+  const tabs = document.querySelectorAll('.tab');
+  const panels = document.querySelectorAll('.panel');
+  tabs.forEach(t => {
+    t.addEventListener('click', () => {
+      tabs.forEach(x => x.classList.remove('active'));
+      panels.forEach(x => x.classList.remove('active'));
+      t.classList.add('active');
+      document.getElementById(t.dataset.target).classList.add('active');
+    });
+  });
+
+  // Lucide: render once on load; the script replaces every [data-lucide]
+  // element (in all tabs, even hidden ones) with an inline <svg>.
+  if (window.lucide && typeof window.lucide.createIcons === 'function') {
+    window.lucide.createIcons();
+  }
+</script>
+</body>
+</html>
