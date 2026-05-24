@@ -50,7 +50,7 @@ pub struct Cli {
     pub gui: bool,
 
     /// Force the headless line-based REPL even on a GUI-capable build.
-    /// Used by the `bats/` test scripts and the TEST_GUIDE flow.
+    /// Used by the `bats/` test scripts.
     #[arg(long = "cli")]
     pub cli: bool,
 
