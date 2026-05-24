@@ -82,6 +82,17 @@ const SLOT_KEY_DOMAIN: &[u8] = b"ME55-mailbox-v1";
 const DROP_KEY_DOMAIN: &[u8] = b"ME55-mailbox-drop-v1";
 const ACK_KEY_DOMAIN: &[u8] = b"ME55-mailbox-ack-v1";
 
+/// Phase 4 session-keyed mailbox key derivation. Replaces the legacy
+/// per-(recipient, sender) addressing with a single opaque session
+/// identifier known only to the two peers. Passive DHT observers see
+/// drop / ACK records under hash-of-(session_id, slot) — no PeerId
+/// preimage anywhere — so they cannot link a record back to either
+/// party's identity. Distinct domain separators from the legacy keys
+/// so the two namespaces are disjoint (a session-keyed drop cannot
+/// be mistaken for a legacy drop or vice versa).
+const SESSION_DROP_KEY_DOMAIN: &[u8] = b"ME55-session-mailbox-drop-v1";
+const SESSION_ACK_KEY_DOMAIN: &[u8] = b"ME55-session-mailbox-ack-v1";
+
 /// Compute the slot id for a given unix timestamp (seconds). `slot_id`
 /// is shared by every drop targeted at any recipient during this hour.
 pub fn slot_id_for(unix_seconds: i64) -> i64 {
@@ -123,6 +134,40 @@ pub fn ack_kad_key(recipient_pid: &[u8], sender_pid: &[u8], slot_id: i64) -> Rec
     h.update(ACK_KEY_DOMAIN);
     h.update(recipient_pid);
     h.update(sender_pid);
+    h.update(slot_id.to_be_bytes());
+    RecordKey::new(&h.finalize().as_slice())
+}
+
+// ============================================================
+// Phase 4 session-keyed mailbox addressing
+// ============================================================
+
+/// Phase 4 drop key under session-id addressing. Both peers can derive
+/// this — neither party's PeerId appears in the preimage — so a
+/// passive DHT observer sees only an opaque hash and cannot link the
+/// drop to a sender or recipient identity.
+///
+/// Used in parallel with [`drop_kad_key`] during the Phase-4 →
+/// Phase-4+ migration: Phase-4 senders publish under BOTH keys so a
+/// receiver still on the legacy path can fetch the old one; receivers
+/// on Phase 4 prefer the session key when a session exists for the
+/// candidate peer.
+pub fn session_drop_kad_key(session_id: &[u8; 32], slot_id: i64) -> RecordKey {
+    let mut h = Sha256::new();
+    h.update(SESSION_DROP_KEY_DOMAIN);
+    h.update(session_id);
+    h.update(slot_id.to_be_bytes());
+    RecordKey::new(&h.finalize().as_slice())
+}
+
+/// Phase 4 ACK key, session-keyed. Sibling of [`ack_kad_key`] but
+/// without any PeerId preimage. Receiver publishes an empty record
+/// at this key after successful first-message decrypt; sender checks
+/// before republishing to halt the loop early.
+pub fn session_ack_kad_key(session_id: &[u8; 32], slot_id: i64) -> RecordKey {
+    let mut h = Sha256::new();
+    h.update(SESSION_ACK_KEY_DOMAIN);
+    h.update(session_id);
     h.update(slot_id.to_be_bytes());
     RecordKey::new(&h.finalize().as_slice())
 }
@@ -226,5 +271,39 @@ mod tests {
     fn record_key_is_32_bytes() {
         let k = slot_kad_key(b"any", 0);
         assert_eq!(k.as_ref().len(), 32, "RecordKey is SHA-256 output, 32 bytes");
+    }
+
+    #[test]
+    fn session_drop_key_distinguishes_session_and_slot() {
+        let sid_a = [1u8; 32];
+        let sid_b = [2u8; 32];
+        let slot = 100i64;
+        let k = session_drop_kad_key(&sid_a, slot);
+        assert_eq!(k, session_drop_kad_key(&sid_a, slot));
+        assert_ne!(k, session_drop_kad_key(&sid_a, slot + 1));
+        assert_ne!(k, session_drop_kad_key(&sid_b, slot));
+    }
+
+    #[test]
+    fn session_ack_key_distinct_from_session_drop_key() {
+        let sid = [9u8; 32];
+        let slot = 7i64;
+        assert_ne!(
+            session_drop_kad_key(&sid, slot),
+            session_ack_kad_key(&sid, slot),
+            "drop and ack domain separators must produce disjoint keys"
+        );
+    }
+
+    #[test]
+    fn session_keys_disjoint_from_legacy_keys() {
+        // Even when (recipient_pid bytes == session_id bytes) and
+        // (sender_pid bytes == empty) — i.e. an attacker can choose
+        // colliding inputs — the distinct domain separators ensure the
+        // resulting Kad keys are still different.
+        let sid = [0xAAu8; 32];
+        let slot = 0i64;
+        assert_ne!(session_drop_kad_key(&sid, slot), drop_kad_key(&sid[..], &[], slot));
+        assert_ne!(session_ack_kad_key(&sid, slot), ack_kad_key(&sid[..], &[], slot));
     }
 }

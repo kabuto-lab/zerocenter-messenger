@@ -53,6 +53,53 @@ pub struct Cli {
     /// Used by the `bats/` test scripts and the TEST_GUIDE flow.
     #[arg(long = "cli")]
     pub cli: bool,
+
+    /// Circuit-relay multiaddr (repeatable). Each address must end in
+    /// `/p2p/<RelayPeerId>`. On startup the node dials each one and
+    /// listens on `addr/p2p-circuit`, so other peers can reach this
+    /// node through the relay even when this node is behind NAT.
+    /// Typically the same address you use for `--bootstrap`.
+    ///
+    /// Example: --relay /ip4/198.51.100.1/tcp/4001/p2p/12D3KooW...
+    #[arg(long = "relay", value_name = "MULTIADDR")]
+    pub relay: Vec<String>,
+
+    /// Run this node as a circuit-relay server, allowing other peers
+    /// behind NAT to reach each other through it. Only enable on nodes
+    /// with a publicly reachable IP / port — NAT'd nodes would just
+    /// advertise a relay they can't actually serve.
+    #[arg(long = "relay-server")]
+    pub relay_server: bool,
+
+    /// Run headless without REPL or GUI: the swarm runs in the
+    /// background and main blocks forever (Ctrl+C / SIGTERM to stop).
+    /// Required for relay-server / bootstrap-node deployments where
+    /// stdin is not a TTY (systemd unit, background launcher, etc.) —
+    /// the REPL would hit EOF immediately and exit. Implies `--cli`
+    /// semantics in that the GUI is not launched even on a `gui`-feature
+    /// build.
+    #[arg(long = "daemon")]
+    pub daemon: bool,
+
+    /// Skip the hardcoded fallback bootstrap list shipped with the
+    /// binary. Use when running on a private / isolated deployment, or
+    /// when you don't trust the upstream defaults and want to dial only
+    /// your own `--bootstrap` addresses.
+    #[arg(long = "no-default-bootstrap")]
+    pub no_default_bootstrap: bool,
+
+    /// Phase 3 deniable DMs (opt-in). When set, outgoing 1:1 DMs are
+    /// sent WITHOUT a per-message Ed25519 signature: the envelope's
+    /// authenticity rests on the downstream ratchet AEAD whose key is
+    /// shared by both session participants. Property gained: neither
+    /// participant can later prove to a third party which of them
+    /// authored a given message — both have the same forgery
+    /// capability. Cost: wire incompatibility with peers expecting
+    /// the legacy signed path; they will drop deniable envelopes.
+    /// Group chats are unaffected (Megolm signatures are load-bearing
+    /// for cross-member anti-impersonation, INVARIANTS §24).
+    #[arg(long = "deniable-dm")]
+    pub deniable_dm: bool,
 }
 
 impl Cli {

@@ -50,6 +50,12 @@ const RK_INFO: &[u8] = b"ME55-rk-v1";
 const CK_CONST_CHAIN: u8 = 0x02;
 /// Constant byte fed into KDF_CK to produce the message key.
 const CK_CONST_MSG: u8 = 0x01;
+/// Phase 4 session-id derivation. HMAC-SHA256 keyed by the X3DH output
+/// `sk` over this domain tag yields a stable 32-byte session identifier
+/// known to both peers but to nobody else — used as the DHT mailbox
+/// addressing primary so passive observers can no longer link a drop
+/// key to either party's PeerId.
+const SESSION_ID_DOMAIN: &[u8] = b"ME55-session-id-v1";
 
 /// Maximum number of skipped message keys retained per session.
 /// Matches Signal's `MAX_SKIP`. Lower keeps memory bounded; higher
@@ -152,6 +158,16 @@ pub struct RatchetState {
     pn: u32,
     /// Bounded queue of skipped message keys, oldest first.
     skipped: VecDeque<SkippedKey>,
+    /// Phase 4 session identifier. Stable, 32 bytes,
+    /// HMAC-SHA256(sk, "ME55-session-id-v1") where `sk` is the X3DH
+    /// output. Both peers compute the same value at construction
+    /// and never reveal it on the wire — it's used as a private
+    /// addressing token for DHT mailbox drops in place of the
+    /// public (recipient_pid, sender_pid) tuple. Default-derived on
+    /// deserialize of pre-Phase-4 session blobs to keep on-disk
+    /// migration zero-touch.
+    #[serde(default)]
+    session_id: [u8; 32],
 }
 
 impl RatchetState {
@@ -165,6 +181,12 @@ impl RatchetState {
     pub fn new_initiator(sk: [u8; 32], their_dh_pub: PublicKey) -> Self {
         let dhs_secret = StaticSecret::random_from_rng(OsRng);
         let dhs_public = PublicKey::from(&dhs_secret);
+
+        // Derive the session id BEFORE consuming `sk` into the ratchet
+        // step so it's stably tied to the X3DH output, not the post-
+        // first-step root key (which is asymmetric across the parties
+        // until the first round-trip completes).
+        let session_id = derive_session_id(&sk);
 
         // First DH ratchet step: advances rk from sk and produces cks.
         let dh_out = dhs_secret.diffie_hellman(&their_dh_pub);
@@ -181,6 +203,7 @@ impl RatchetState {
             nr: 0,
             pn: 0,
             skipped: VecDeque::new(),
+            session_id,
         }
     }
 
@@ -191,6 +214,7 @@ impl RatchetState {
     /// derived `cks` via a ratchet step.
     pub fn new_responder(sk: [u8; 32], my_dh_secret: StaticSecret) -> Self {
         let dhs_public = PublicKey::from(&my_dh_secret);
+        let session_id = derive_session_id(&sk);
         Self {
             dhs_secret: my_dh_secret,
             dhs_public,
@@ -202,6 +226,7 @@ impl RatchetState {
             nr: 0,
             pn: 0,
             skipped: VecDeque::new(),
+            session_id,
         }
     }
 
@@ -364,9 +389,33 @@ impl RatchetState {
         self.rk = new_rk2;
         self.cks = Some(new_cks);
     }
+
+    /// Phase 4 session identifier — stable, 32 bytes,
+    /// HMAC-SHA256(sk, "ME55-session-id-v1") where `sk` was the X3DH
+    /// output that bootstrapped this session. Both peers compute the
+    /// same value and never reveal it on the wire. Used as an opaque
+    /// addressing token for DHT mailbox drops so passive observers
+    /// can no longer link a drop key to either party's PeerId.
+    pub fn session_id(&self) -> [u8; 32] {
+        self.session_id
+    }
 }
 
 // ----- key derivation -----
+
+/// HMAC-SHA256(sk, [`SESSION_ID_DOMAIN`]) — see [`RatchetState::session_id`].
+/// Uses fully-qualified `<HmacSha256 as Mac>::new_from_slice` because the
+/// type has TWO `new_from_slice` impls in scope (Mac and KeyInit) which
+/// would otherwise produce an ambiguous-method error.
+fn derive_session_id(sk: &[u8; 32]) -> [u8; 32] {
+    let mut mac =
+        <HmacSha256 as Mac>::new_from_slice(sk).expect("HMAC-SHA256 takes any key length");
+    mac.update(SESSION_ID_DOMAIN);
+    let tag = mac.finalize().into_bytes();
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&tag);
+    out
+}
 
 /// KDF_RK(rk, dh_out) → (new_rk, ck). HKDF-SHA256 with salt = rk,
 /// ikm = dh_out, info = domain. Splits the 64-byte output into two
@@ -691,5 +740,39 @@ mod tests {
         assert_eq!(&bytes[..32], &[7u8; 32]);
         assert_eq!(&bytes[32..36], &[0x01, 0x02, 0x03, 0x04]);
         assert_eq!(&bytes[36..40], &[0xAA, 0xBB, 0xCC, 0xDD]);
+    }
+
+    #[test]
+    fn session_id_is_symmetric_across_peers() {
+        // Same X3DH output `sk` ⇒ both sides MUST derive the same
+        // 32-byte session_id. Property is the whole point of the
+        // Phase 4 DHT addressing scheme.
+        let sk = [42u8; 32];
+        let their_dh = PublicKey::from(&StaticSecret::random_from_rng(OsRng));
+        let my_spk = StaticSecret::random_from_rng(OsRng);
+        let init = RatchetState::new_initiator(sk, their_dh);
+        let resp = RatchetState::new_responder(sk, my_spk);
+        assert_eq!(init.session_id(), resp.session_id());
+    }
+
+    #[test]
+    fn session_id_differs_across_sessions() {
+        let sk1 = [1u8; 32];
+        let sk2 = [2u8; 32];
+        let their_dh = PublicKey::from(&StaticSecret::random_from_rng(OsRng));
+        let s1 = RatchetState::new_initiator(sk1, their_dh);
+        let s2 = RatchetState::new_initiator(sk2, their_dh);
+        assert_ne!(s1.session_id(), s2.session_id());
+    }
+
+    #[test]
+    fn session_id_survives_json_roundtrip() {
+        let sk = [99u8; 32];
+        let their_dh = PublicKey::from(&StaticSecret::random_from_rng(OsRng));
+        let before = RatchetState::new_initiator(sk, their_dh);
+        let before_sid = before.session_id();
+        let json = before.to_json().unwrap();
+        let after = RatchetState::from_json(&json).unwrap();
+        assert_eq!(before_sid, after.session_id());
     }
 }

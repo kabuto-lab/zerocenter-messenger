@@ -64,6 +64,18 @@ pub struct EncryptedPayload {
     /// the zero case — pre-Phase-5 senders observe no change.
     #[serde(default, skip_serializing_if = "is_zero_u8")]
     pub kind: u8,
+
+    /// Phase 2 PQ-X3DH ciphertext. Present only on the first message
+    /// of a fresh session AND only when both peers support PQ (the
+    /// responder published an `MlKemPrekey` in its prekey response).
+    /// Raw 1088 bytes — the responder decapsulates with its long-term
+    /// ML-KEM-768 decapsulation key to recover the same 32-byte
+    /// shared secret the initiator encapsulated, which is then fed
+    /// into the X3DH HKDF alongside the classical X25519 DH outputs.
+    /// Pre-Phase-2 peers omit this; receiving an envelope with
+    /// `ml_kem_ct: None` means the session uses classical X3DH only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ml_kem_ct: Option<Vec<u8>>,
 }
 
 fn is_zero_u8(v: &u8) -> bool {
@@ -228,6 +240,35 @@ impl ProtocolMessage {
         Ok(msg)
     }
 
+    /// Phase 3 deniable variant of [`Self::new_direct_signed`]. Builds a
+    /// direct-path envelope WITHOUT a per-message Ed25519 signature.
+    /// The empty-`signature` field is the wire signal to receivers that
+    /// the envelope is deniable; [`Self::verify`] then skips the
+    /// cryptographic check and relies on the downstream ratchet AEAD
+    /// (whose key is shared by both parties) for authentication.
+    ///
+    /// Cryptographically, ANY of the two participants in a session can
+    /// produce a syntactically valid envelope after the fact — so a
+    /// third party who later obtains a transcript cannot prove which
+    /// of the two actually wrote a given message. That's the property
+    /// "deniability" buys.
+    ///
+    /// Opt-in via the `--deniable-dm` CLI flag. Off by default for
+    /// wire-compatibility with peers expecting the signed legacy path
+    /// (they'd otherwise reject with `MissingSignature`).
+    pub fn new_direct_deniable(to: Vec<u8>, from: Vec<u8>, payload: Vec<u8>) -> Self {
+        Self {
+            to,
+            from,
+            sealed_sender: Vec::new(),
+            payload,
+            timestamp: current_timestamp(),
+            ttl: 7 * 24 * 60 * 60,
+            msg_type: MessageType::Direct,
+            signature: Vec::new(),
+        }
+    }
+
     /// Build a Phase 5 sealed envelope. `sender_pid` and `keypair` go
     /// INSIDE the seal; only the recipient (who holds the private of
     /// `recipient_x25519_pub`) can recover them. The outer envelope on
@@ -273,27 +314,89 @@ impl ProtocolMessage {
         Ok(msg)
     }
 
+    /// Phase 3 deniable variant of [`Self::new_sealed`]. Like the
+    /// signed sealed variant, the seal's contents carry
+    /// `(sender_pid || signature)` for wire-shape compatibility, but
+    /// the signature payload is empty (length-prefixed zero-length
+    /// vector). [`Self::verify_sealed`] treats an empty inner sig as
+    /// "deniable, trust the parsed sender_pid + rely on AEAD downstream
+    /// for authentication". Sealed sender's recipient-hiding property
+    /// is preserved orthogonally to the deniability property.
+    pub fn new_sealed_deniable(
+        to: Vec<u8>,
+        sender_pid: Vec<u8>,
+        payload: Vec<u8>,
+        recipient_x25519_pub: &[u8; 32],
+    ) -> Result<Self, ProtocolError> {
+        let mut msg = Self {
+            to,
+            from: Vec::new(),
+            sealed_sender: Vec::new(),
+            payload,
+            timestamp: current_timestamp(),
+            ttl: 7 * 24 * 60 * 60,
+            msg_type: MessageType::Direct,
+            signature: Vec::new(),
+        };
+        // Wire-shape parity with `new_sealed`: cert layout is
+        // length-prefixed `sender_pid || signature`, with the
+        // signature half having length zero.
+        let mut cert = Vec::with_capacity(8 + sender_pid.len() + 0);
+        push_bytes(&mut cert, &sender_pid);
+        push_bytes(&mut cert, &[]);
+        let sealed = crate::crypto::sealed::seal_sender_cert(recipient_x25519_pub, &cert)
+            .map_err(|e| ProtocolError::SealDecryptFailed(format!("seal failed: {}", e)))?;
+        msg.sealed_sender = sealed;
+        Ok(msg)
+    }
+
     /// Returns true iff this envelope uses the Phase 5 sealed path
     /// (i.e. has a non-empty `sealed_sender` field).
     pub fn is_sealed(&self) -> bool {
         !self.sealed_sender.is_empty()
     }
 
+    /// Returns true iff this envelope is in Phase 3 deniable mode.
+    /// Direct path: `signature` is empty AND `from` is non-empty.
+    /// Sealed path: callers should rely on `verify_sealed()` returning
+    /// Ok without observing a sig — there's no cheap external check.
+    pub fn is_deniable_direct(&self) -> bool {
+        !self.is_sealed() && self.signature.is_empty() && !self.from.is_empty()
+    }
+
     /// Direct-path verification. Returns the parsed sender PeerId on
     /// success. Caller MUST call [`Self::is_sealed`] first and route
     /// sealed envelopes to [`Self::verify_sealed`] instead.
+    ///
+    /// **Two modes:**
+    /// - **Signed (legacy).** `signature` is non-empty → Ed25519
+    ///   verification against the PeerId-embedded pubkey. Failure ⇒
+    ///   `BadSignature`. Tampered envelopes drop here before any
+    ///   state change.
+    /// - **Deniable (Phase 3).** `signature` is empty → the parsed
+    ///   `from` PeerId is returned WITHOUT a cryptographic check. The
+    ///   ratchet AEAD downstream provides per-message authenticity
+    ///   (its key is shared by exactly the two session participants,
+    ///   so a forgery requires the recipient's own key — useless to
+    ///   any third party but indistinguishable from a real Alice
+    ///   message *to the recipient*). This is the property
+    ///   "deniability" buys: neither participant can prove to a third
+    ///   party that the other authored a specific transcript.
     pub fn verify(&self) -> Result<PeerId, ProtocolError> {
         if self.is_sealed() {
             return Err(ProtocolError::EnvelopeIsSealed);
         }
-        if self.signature.is_empty() {
-            return Err(ProtocolError::MissingSignature);
-        }
 
         let peer_id = PeerId::from_bytes(&self.from)
             .map_err(|e| ProtocolError::InvalidSender(e.to_string()))?;
-        let public_key = extract_inline_pubkey(&peer_id)?;
 
+        // Phase 3 deniable path. Empty signature = caller opted into
+        // the deniable construction; AEAD downstream is the auth.
+        if self.signature.is_empty() {
+            return Ok(peer_id);
+        }
+
+        let public_key = extract_inline_pubkey(&peer_id)?;
         if public_key.verify(&self.direct_signing_bytes(), &self.signature) {
             Ok(peer_id)
         } else {
@@ -331,8 +434,17 @@ impl ProtocolMessage {
 
         let peer_id = PeerId::from_bytes(&sender_pid_bytes)
             .map_err(|e| ProtocolError::InvalidSender(e.to_string()))?;
-        let public_key = extract_inline_pubkey(&peer_id)?;
 
+        // Phase 3 deniable sealed-path: an empty inner signature
+        // means the sender opted into the deniable construction. Same
+        // semantics as the deniable direct path — AEAD downstream is
+        // the auth, and either participant could have produced this
+        // envelope, so no third party can prove authorship.
+        if sig_bytes.is_empty() {
+            return Ok(peer_id);
+        }
+
+        let public_key = extract_inline_pubkey(&peer_id)?;
         let signing_bytes = self.sealed_signing_bytes(&sender_pid_bytes);
         if public_key.verify(&signing_bytes, &sig_bytes) {
             Ok(peer_id)
@@ -510,7 +622,11 @@ mod tests {
     }
 
     #[test]
-    fn missing_signature_is_rejected() {
+    fn empty_envelope_rejects_for_unparseable_sender() {
+        // Phase 3: empty signature no longer triggers MissingSignature —
+        // it now means "deniable mode". An empty envelope with no
+        // parseable `from` field still fails, but at a later step
+        // (PeerId::from_bytes on an empty slice).
         let msg = ProtocolMessage {
             to: vec![],
             from: vec![],
@@ -521,7 +637,83 @@ mod tests {
             msg_type: MessageType::Direct,
             signature: Vec::new(),
         };
-        assert!(matches!(msg.verify(), Err(ProtocolError::MissingSignature)));
+        assert!(matches!(msg.verify(), Err(ProtocolError::InvalidSender(_))));
+    }
+
+    // -------- Phase 3 deniable tests --------
+
+    #[test]
+    fn deniable_envelope_verifies_to_parsed_sender() {
+        // A deniable envelope: empty signature, valid `from`. verify()
+        // returns the parsed sender PeerId WITHOUT a cryptographic
+        // check (relies on downstream AEAD for auth).
+        let alice = Keypair::generate_ed25519();
+        let alice_pid = PeerId::from(alice.public()).to_bytes();
+        let msg = ProtocolMessage::new_direct_deniable(
+            b"to".to_vec(),
+            alice_pid.clone(),
+            b"payload".to_vec(),
+        );
+        assert!(msg.is_deniable_direct(), "should detect deniable mode");
+        let verified = msg.verify().expect("deniable envelope should verify");
+        assert_eq!(verified.to_bytes(), alice_pid);
+    }
+
+    #[test]
+    fn deniable_envelope_accepts_any_claimed_from() {
+        // Property of deniability: ANY party can claim ANY `from`
+        // (Mallory pretends to be Alice). The envelope verifies on
+        // its own — the downstream ratchet AEAD with the actual
+        // session key is what catches the forgery, NOT verify().
+        // This test pins that behavior so we don't accidentally
+        // re-introduce signature-style auth at the envelope layer.
+        let alice = Keypair::generate_ed25519();
+        let alice_pid = PeerId::from(alice.public()).to_bytes();
+        let msg = ProtocolMessage::new_direct_deniable(
+            b"to".to_vec(),
+            alice_pid.clone(),
+            b"forged-payload".to_vec(),
+        );
+        let parsed = msg.verify().expect("verifies");
+        assert_eq!(parsed.to_bytes(), alice_pid);
+        // The point: no signature was required to produce this.
+        assert!(msg.signature.is_empty());
+    }
+
+    #[test]
+    fn deniable_sealed_envelope_roundtrips() {
+        let alice = Keypair::generate_ed25519();
+        let alice_pid = PeerId::from(alice.public()).to_bytes();
+        let (bob_priv, bob_pub) = random_x25519_keypair();
+        let msg = ProtocolMessage::new_sealed_deniable(
+            b"to".to_vec(),
+            alice_pid.clone(),
+            b"payload".to_vec(),
+            &bob_pub,
+        )
+        .expect("seal ok");
+        assert!(msg.is_sealed(), "is sealed");
+        assert!(msg.signature.is_empty(), "outer signature empty");
+        assert!(msg.from.is_empty(), "outer from empty (sender inside seal)");
+        let recovered = msg.verify_sealed(&bob_priv).expect("unseal ok");
+        assert_eq!(recovered.to_bytes(), alice_pid);
+    }
+
+    #[test]
+    fn signed_envelope_still_verifies_normally() {
+        // Wire-compat sanity: legacy signed envelopes work unchanged.
+        let alice = Keypair::generate_ed25519();
+        let alice_pid = PeerId::from(alice.public()).to_bytes();
+        let msg = ProtocolMessage::new_direct_signed(
+            b"to".to_vec(),
+            alice_pid.clone(),
+            b"payload".to_vec(),
+            &alice,
+        )
+        .expect("sign ok");
+        assert!(!msg.signature.is_empty(), "legacy path: signature present");
+        let parsed = msg.verify().expect("legacy verify works");
+        assert_eq!(parsed.to_bytes(), alice_pid);
     }
 
     // -------- Phase 5 sealed-sender tests --------

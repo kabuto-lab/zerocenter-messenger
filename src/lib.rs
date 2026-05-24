@@ -4,6 +4,7 @@ pub mod network;
 pub mod storage;
 pub mod protocol;
 pub mod cli;
+pub mod entry;
 pub(crate) mod serde_helpers;
 
 // Tauri webview frontend. Gated on the `gui` Cargo feature; see

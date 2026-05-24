@@ -1,6 +1,6 @@
 use libp2p::{
-    gossipsub, identify, kad, mdns,
-    swarm::NetworkBehaviour,
+    dcutr, gossipsub, identify, kad, mdns, relay,
+    swarm::{behaviour::toggle::Toggle, NetworkBehaviour},
     StreamProtocol, request_response,
 };
 use std::collections::hash_map::DefaultHasher;
@@ -32,6 +32,13 @@ pub struct PrekeyRequest;
 /// DH between initiator's ephemeral and this OTPK) for stronger forward
 /// secrecy on the very first message. Each OTPK is consumed by the
 /// responder after a single successful handshake.
+///
+/// Phase 2 PQ-X3DH adds an optional `pq_prekey` field carrying the
+/// responder's signed ML-KEM-768 encapsulation key. When both peers
+/// have populated it, the initial X3DH is **hybrid**: classical X25519
+/// DH outputs are combined with the ML-KEM shared secret via HKDF,
+/// secure as long as either primitive is unbroken. Old responders
+/// without this field downgrade cleanly to pure classical X25519.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrekeyResponse {
     pub x25519_public: [u8; 32],
@@ -42,6 +49,29 @@ pub struct PrekeyResponse {
     /// initiators ignore it (default-None on deserialize).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub otpk: Option<OneTimePrekey>,
+
+    /// Optional Phase 2 PQ prekey. When present, the initiator
+    /// encapsulates against this ML-KEM-768 public key and feeds the
+    /// resulting shared secret into the X3DH HKDF for hybrid security.
+    /// Pre-Phase-2 peers omit this; the initiator falls back to pure
+    /// X25519 X3DH (existing wire path).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pq_prekey: Option<MlKemPrekey>,
+}
+
+/// Phase 2 PQ prekey bundle. `ek` is the raw 1184-byte ML-KEM-768
+/// encapsulation key; `signature` is an Ed25519 signature over
+/// `ml_kem_prekey_signing_bytes(ek)` made by the responder's
+/// long-term identity key. The initiator MUST verify the signature
+/// against the responder's PeerId-embedded Ed25519 pubkey before
+/// encapsulating.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MlKemPrekey {
+    /// Raw 1184-byte ML-KEM-768 encapsulation key.
+    pub ek: Vec<u8>,
+    /// Ed25519 signature over `ML_KEM_PREKEY_SIG_DOMAIN || ek`.
+    #[serde(with = "crate::serde_helpers::serde_arr64")]
+    pub signature: [u8; 64],
 }
 
 /// One-time prekey bundle. `id` is the responder's local row id — the
@@ -78,11 +108,40 @@ pub struct Behaviour {
     /// have to advertise full DM support, and so the two flows can evolve
     /// their wire formats independently.
     pub prekey: request_response::cbor::Behaviour<PrekeyRequest, PrekeyResponse>,
+
+    /// Circuit-relay v2 client. Lets this peer dial others through a
+    /// relay node when both ends are behind NAT. Constructed externally
+    /// via `relay::client::new(peer_id)` and passed into
+    /// [`Behaviour::new`] because the relay-client transport and
+    /// behaviour are conceptually one component.
+    pub relay_client: relay::client::Behaviour,
+
+    /// Circuit-relay v2 server. Toggled on per `--relay-server`. NAT'd
+    /// nodes leave it off (they couldn't actually serve traffic);
+    /// public-IP nodes turn it on so they can act as relays for others.
+    pub relay_server: Toggle<relay::Behaviour>,
+
+    /// Direct Connection Upgrade through Relay — hole-punching on top
+    /// of an existing relay connection. After the initial circuit
+    /// connect succeeds, both peers attempt to coordinate a direct
+    /// TCP connection so the relay can drop out of the path.
+    pub dcutr: dcutr::Behaviour,
 }
 
 impl Behaviour {
-    /// Create a new network behaviour
-    pub fn new(identity: &Identity) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+    /// Create a new network behaviour.
+    ///
+    /// `relay_client` comes from `libp2p::relay::client::new(peer_id)`
+    /// — its companion relay-client transport must be spliced into the
+    /// swarm's transport stack via `OrTransport` (or libp2p's
+    /// `SwarmBuilder::with_relay_client`). `enable_relay_server`
+    /// flips on the relay-server behaviour (only set this on nodes
+    /// with a publicly reachable address).
+    pub fn new(
+        identity: &Identity,
+        relay_client: relay::client::Behaviour,
+        enable_relay_server: bool,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let peer_id = identity.peer_id();
         let keypair = identity.keypair().clone();
 
@@ -158,6 +217,19 @@ impl Behaviour {
             request_response_config,
         );
 
+        // Relay server is a per-node opt-in. The Toggle wrapper lets us
+        // keep the same Behaviour struct shape for both relay-server and
+        // pure-client deployments.
+        let relay_server: Toggle<relay::Behaviour> = if enable_relay_server {
+            Some(relay::Behaviour::new(peer_id, relay::Config::default())).into()
+        } else {
+            None.into()
+        };
+
+        // DCUtR — symmetric, both client and server roles share the same
+        // behaviour type. Cheap to always include.
+        let dcutr = dcutr::Behaviour::new(peer_id);
+
         Ok(Self {
             kademlia,
             gossipsub,
@@ -165,6 +237,9 @@ impl Behaviour {
             identify_behaviour,
             request_response,
             prekey,
+            relay_client,
+            relay_server,
+            dcutr,
         })
     }
 }

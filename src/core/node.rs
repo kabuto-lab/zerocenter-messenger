@@ -77,6 +77,17 @@ pub struct P2PNode {
     /// the 2-DH fallback path. Pruned periodically on the cleanup
     /// tick to bound memory.
     recent_otpk_fetches: HashMap<PeerId, i64>,
+    /// Phase 2 PQ-X3DH. In-memory cache of verified ML-KEM-768
+    /// encapsulation keys, keyed by peer PeerId. Populated by
+    /// `handle_prekey_event` after Ed25519-signature verification on
+    /// the `pq_prekey` field. Initiator side reads this before the
+    /// first message of a fresh session — present ⇒ hybrid X3DH,
+    /// absent ⇒ classical X25519 X3DH (clean downgrade).
+    /// Not yet SQLite-persisted: a node restart loses the cache and
+    /// the next fresh session starts classical (still cryptographically
+    /// safe, just no PQ for that bootstrap). SQLite persistence is
+    /// Phase 2.B.
+    cached_pq_prekeys: HashMap<PeerId, Vec<u8>>,
     /// Push-refresh channel for the GUI. `None` on the headless CLI path
     /// (no listener); `Some` when `--gui` wired a receiver via
     /// [`Self::set_gui_event_sender`]. Sends use `try_send` so a slow
@@ -104,12 +115,21 @@ pub enum GuiEvent {
 }
 
 /// Inputs that travel only on the first message of a fresh session:
-/// the X3DH ephemeral pubkey, plus (optionally) the OTPK id consumed.
+/// the X3DH ephemeral pubkey, plus (optionally) the OTPK id consumed
+/// and (optionally) the ML-KEM-768 ciphertext from Phase 2 PQ-X3DH.
 struct FirstMessageHello {
     x3dh_eph: X25519Pub,
     /// `None` when 2-DH X3DH was used (peer published no OTPK); `Some`
     /// when 3-DH was used.
     otpk_id: Option<i64>,
+    /// `Some(ct_bytes)` when the responder published a verified
+    /// `MlKemPrekey` and the initiator's X3DH derived the hybrid SK
+    /// via [`crate::crypto::x3dh::initiator_derive_hybrid`] (or the
+    /// `_with_otpk_hybrid` variant). The ct goes into
+    /// `EncryptedPayload::ml_kem_ct` so the responder can recover the
+    /// same PQ shared secret via [`crate::crypto::x3dh::pq_decapsulate`].
+    /// `None` ⇒ classical X25519 X3DH only.
+    ml_kem_ct: Option<Vec<u8>>,
 }
 
 /// Command for P2P node operations.
@@ -238,6 +258,7 @@ impl P2PNode {
             pending_record_queries: HashMap::new(),
             pending_ack_queries: HashMap::new(),
             recent_otpk_fetches: HashMap::new(),
+            cached_pq_prekeys: HashMap::new(),
             gui_tx: None,
         })
     }
@@ -261,14 +282,16 @@ impl P2PNode {
     pub async fn start(&mut self) -> Result<()> {
         info!("Starting P2P node...");
 
-        // Create the network behaviour
-        let behaviour = Behaviour::new(&self.identity)
-            .map_err(|e| anyhow::anyhow!("Failed to create behaviour: {}", e))?;
-
-        // Build the swarm
+        // Build the swarm. We build the Behaviour inside the
+        // SwarmBuilder closure because libp2p's `with_relay_client`
+        // hands us the `relay::client::Behaviour` at the same time
+        // as it splices the relay-client transport into the stack —
+        // we can't construct Behaviour up-front without it.
         let keypair = self.identity.keypair().clone();
         let obfs_key = self.config.obfs_key;
         let obfs_jitter_ms = self.config.obfs_jitter_ms;
+        let identity_for_behaviour = self.identity.clone();
+        let enable_relay_server = self.config.enable_relay_server;
 
         if obfs_key.is_some() {
             info!(
@@ -337,7 +360,18 @@ impl P2PNode {
                     .map(|(p, c), _| (p, StreamMuxerBox::new(c))))
             })?
             .with_dns()?
-            .with_behaviour(|_| behaviour)?
+            // Splice in the relay-client transport (used when dialing
+            // `/p2p/<relay>/p2p-circuit/p2p/<target>` multiaddrs).
+            // The companion `relay::client::Behaviour` lands in the
+            // next `with_behaviour` closure as a second argument.
+            .with_relay_client(noise::Config::new, yamux::Config::default)?
+            .with_behaviour(move |_kp, relay_client| {
+                Behaviour::new(
+                    &identity_for_behaviour,
+                    relay_client,
+                    enable_relay_server,
+                )
+            })?
             .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(60)))
             .build();
 
@@ -350,12 +384,118 @@ impl P2PNode {
 
         info!("Listening on: {:?}", listen_addr);
 
-        // Seed Kademlia from any user-supplied bootstrap nodes. Each
-        // entry must be a full multiaddr including the `/p2p/<PeerId>`
-        // suffix — the PeerId is what Kademlia needs to slot the
-        // address into its routing table. Bad addresses are warned
-        // about and skipped so one typo can't block startup.
-        for addr_str in &self.config.bootstrap_nodes {
+        // Build the effective seed-address list in priority order:
+        //   1. CLI --bootstrap flags (highest priority, user override)
+        //   2. PEX cache — peers we previously had successful
+        //      exchanges with, newest first, cap 50. Lets a returning
+        //      user reconnect without ever touching the public
+        //      bootstrap network.
+        //   3. Signed HTTPS manifest from
+        //      https://bootstrap.me55.network/manifest.json (Phase
+        //      1.A.2). Soft failure: skipped on network errors or
+        //      while MAINTAINER_PUBKEY is the placeholder zero.
+        //   4. Hardcoded default bootstraps shipped with the binary
+        //      (skipped when --no-default-bootstrap is set).
+        //   5. DNSADDR TXT lookup at _dnsaddr.bootstrap.me55.network
+        //      (Phase 1.A.2). Unsigned — used only as a fallback when
+        //      earlier sources are empty.
+        // Duplicates across sources are de-duped by multiaddr-string
+        // so the libp2p dial loop doesn't fire twice for the same peer.
+        let mut seeds: Vec<String> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for s in &self.config.bootstrap_nodes {
+            if seen.insert(s.clone()) {
+                seeds.push(s.clone());
+            }
+        }
+        if let Some(ref store) = self.message_store {
+            match store.peer_cache_recent_good(50) {
+                Ok(rows) => {
+                    for (_pid_bytes, addr_str) in rows {
+                        if seen.insert(addr_str.clone()) {
+                            seeds.push(addr_str);
+                        }
+                    }
+                }
+                Err(e) => warn!("PEX cache read failed: {}", e),
+            }
+        }
+        if self.config.use_default_bootstraps {
+            // Phase 1.A.2: try the signed manifest first (fresher than
+            // the hardcoded list). 10s timeout via the reqwest client
+            // built inside fetch_signed_manifest. Errors are expected
+            // pre-release (MAINTAINER_PUBKEY is still the placeholder)
+            // and on hostile networks (DNS blocked, HTTPS blocked) —
+            // we log at info! and fall through.
+            match crate::network::bootstrap::fetch_signed_manifest(
+                crate::network::bootstrap::DEFAULT_MANIFEST_URL,
+                &crate::network::bootstrap::MAINTAINER_PUBKEY,
+            )
+            .await
+            {
+                Ok(manifest) => {
+                    info!(
+                        "Bootstrap manifest v{} fetched + verified ({} entries, expires {})",
+                        manifest.version,
+                        manifest.bootstraps.len(),
+                        manifest.expires_at
+                    );
+                    for entry in manifest.bootstraps {
+                        if seen.insert(entry.multiaddr.clone()) {
+                            seeds.push(entry.multiaddr);
+                        }
+                    }
+                }
+                Err(e) => {
+                    info!("Signed manifest skipped: {} (falling back to hardcoded list)", e);
+                }
+            }
+
+            for addr in crate::network::bootstrap::hardcoded_defaults() {
+                let s = addr.to_string();
+                if seen.insert(s.clone()) {
+                    seeds.push(s);
+                }
+            }
+
+            // DNSADDR: lowest priority because unsigned. Only attempt
+            // when no peers from any higher-priority source landed,
+            // OR keep them as a true last-resort fallback.
+            if seeds.is_empty() {
+                let dns_addrs = crate::network::bootstrap::dnsaddr_lookup(
+                    crate::network::bootstrap::DEFAULT_DNSADDR_DOMAIN,
+                )
+                .await;
+                if !dns_addrs.is_empty() {
+                    info!(
+                        "DNSADDR fallback yielded {} bootstrap addr(s) from {}",
+                        dns_addrs.len(),
+                        crate::network::bootstrap::DEFAULT_DNSADDR_DOMAIN
+                    );
+                }
+                for addr in dns_addrs {
+                    let s = addr.to_string();
+                    if seen.insert(s.clone()) {
+                        seeds.push(s);
+                    }
+                }
+            }
+        }
+        if seeds.is_empty() {
+            info!(
+                "No bootstrap seeds configured (no --bootstrap, no PEX cache, no defaults). \
+                 Node will only find peers via mDNS on the local network."
+            );
+        } else {
+            info!("Seeding {} bootstrap candidate(s)", seeds.len());
+        }
+
+        // Seed Kademlia from the merged list. Each entry must be a
+        // full multiaddr including the `/p2p/<PeerId>` suffix — the
+        // PeerId is what Kademlia needs to slot the address into its
+        // routing table. Bad addresses are warned about and skipped
+        // so one typo can't block startup.
+        for addr_str in &seeds {
             match Self::parse_bootstrap_addr(addr_str) {
                 Ok((peer, addr)) => {
                     swarm
@@ -370,6 +510,40 @@ impl P2PNode {
                 }
                 Err(e) => warn!("Skipping bad bootstrap addr {:?}: {}", addr_str, e),
             }
+        }
+
+        // Relay setup. For each `--relay` multiaddr: dial the relay,
+        // then listen on `addr/p2p-circuit` so other peers (also
+        // configured with the same relay) can reach this node through
+        // it. `listen_on` succeeds immediately — the listener only
+        // becomes active once the relay reservation is accepted.
+        for addr_str in &self.config.relay_addrs {
+            match Self::parse_bootstrap_addr(addr_str) {
+                Ok((peer, addr)) => {
+                    if let Err(e) = swarm.dial(addr.clone()) {
+                        warn!("Relay dial failed for {}: {}", addr_str, e);
+                        continue;
+                    }
+                    info!("Dialing relay {} at {}", peer, addr);
+
+                    let circuit_addr: Multiaddr = match format!("{}/p2p-circuit", addr).parse() {
+                        Ok(a) => a,
+                        Err(e) => {
+                            warn!("Failed to build circuit multiaddr from {}: {}", addr, e);
+                            continue;
+                        }
+                    };
+                    match swarm.listen_on(circuit_addr.clone()) {
+                        Ok(_) => info!("Listening on circuit-relay: {}", circuit_addr),
+                        Err(e) => warn!("listen_on({}) failed: {}", circuit_addr, e),
+                    }
+                }
+                Err(e) => warn!("Skipping bad relay addr {:?}: {}", addr_str, e),
+            }
+        }
+
+        if self.config.enable_relay_server {
+            info!("Relay-server mode: this node will accept circuit reservations from NAT'd peers");
         }
 
         self.swarm = Some(swarm);
@@ -688,6 +862,14 @@ impl P2PNode {
                             Ok(n) => info!("Mailbox sweep: deleted {} expired/ACK'd drops", n),
                             Err(e) => warn!("Mailbox sweep failed: {}", e),
                         }
+                        // Cap the PEX cache at 50 rows (LRU by
+                        // last_good_at). Older entries are dialed
+                        // last anyway, so dropping them costs little.
+                        match store.peer_cache_trim(50) {
+                            Ok(0) => {}
+                            Ok(n) => info!("PEX cache: trimmed {} old peer(s)", n),
+                            Err(e) => warn!("PEX trim failed: {}", e),
+                        }
                     }
                     // Phase 5: bound the OTPK-fetch rate-limit map.
                     self.prune_recent_otpk_fetches();
@@ -716,6 +898,30 @@ impl P2PNode {
                             info!("Connected to: {} via {:?}", peer_id, endpoint);
                             let addr = endpoint.get_remote_address();
                             self.connected_peers.insert(peer_id, addr.clone());
+                            // PEX writeback. A completed connection means
+                            // TCP + Noise XX + Yamux all succeeded — far
+                            // more than a port-scanner can fake, so the
+                            // peer is worth remembering for cold-start
+                            // dialing next time. We store the address
+                            // WITH the `/p2p/<peer_id>` suffix appended
+                            // so the cached value is directly dial-able
+                            // by Kademlia on the next startup.
+                            if let Some(ref store) = self.message_store {
+                                let dialable: Multiaddr = addr
+                                    .clone()
+                                    .with(libp2p::multiaddr::Protocol::P2p(peer_id));
+                                let now = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|d| d.as_secs() as i64)
+                                    .unwrap_or(0);
+                                if let Err(e) = store.peer_cache_upsert(
+                                    &peer_id.to_bytes(),
+                                    &dialable.to_string(),
+                                    now,
+                                ) {
+                                    debug!("PEX upsert failed for {}: {}", peer_id, e);
+                                }
+                            }
                             // Send anything queued for this peer while they
                             // were offline.
                             self.drain_outbox_for(&mut swarm, peer_id);
@@ -846,6 +1052,18 @@ impl P2PNode {
             crate::network::BehaviourEvent::Prekey(req_event) => {
                 self.handle_prekey_event(swarm, req_event);
             }
+            // Circuit-relay + hole-punching events. Logged for observability
+            // — no state transitions to drive here; libp2p handles the
+            // protocol bookkeeping inside the behaviours.
+            crate::network::BehaviourEvent::RelayClient(ev) => {
+                debug!("Relay client event: {:?}", ev);
+            }
+            crate::network::BehaviourEvent::RelayServer(ev) => {
+                debug!("Relay server event: {:?}", ev);
+            }
+            crate::network::BehaviourEvent::Dcutr(ev) => {
+                debug!("DCUtR event: {:?}", ev);
+            }
         }
         Ok(())
     }
@@ -880,10 +1098,19 @@ impl P2PNode {
                         );
                         None
                     };
+                    // Phase 2 PQ-X3DH: attach our long-term ML-KEM-768
+                    // encapsulation key with its Ed25519 signature. Old
+                    // initiators ignore the unknown field; new initiators
+                    // use it to upgrade to hybrid X3DH.
+                    let pq_prekey = Some(crate::network::MlKemPrekey {
+                        ek: self.identity.ml_kem_ek_bytes().to_vec(),
+                        signature: self.identity.ml_kem_signature().to_bytes(),
+                    });
                     let resp = PrekeyResponse {
                         x25519_public: *self.identity.x25519_public().as_bytes(),
                         signature: self.identity.x25519_signature().to_bytes(),
                         otpk: otpk_bundle,
+                        pq_prekey,
                     };
                     if swarm
                         .behaviour_mut()
@@ -907,6 +1134,36 @@ impl P2PNode {
                                     warn!("Dropping unverifiable OTPK from {}", peer);
                                 }
                             }
+                            // Phase 2 PQ-X3DH: verify and cache the PQ prekey
+                            // if attached. A bad signature is a soft failure —
+                            // session continues with classical X3DH.
+                            // Phase 2.B: ALSO persist to SQLite so a node
+                            // restart doesn't lose the PQ pubkey.
+                            if let Some(ref pq) = response.pq_prekey {
+                                match self.verify_pq_prekey(peer, pq) {
+                                    Ok(()) => {
+                                        info!(
+                                            "Cached verified PQ prekey ({}B) from {}",
+                                            pq.ek.len(),
+                                            peer
+                                        );
+                                        self.cached_pq_prekeys.insert(peer, pq.ek.clone());
+                                        if let Some(ref store) = self.message_store {
+                                            if let Err(e) =
+                                                store.save_pq_prekey(&peer.to_bytes(), &pq.ek)
+                                            {
+                                                warn!("Failed to persist PQ prekey for {}: {}", peer, e);
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        warn!(
+                                            "Dropping PQ prekey from {} (classical fallback): {}",
+                                            peer, e
+                                        );
+                                    }
+                                }
+                            }
                             self.inflight_prekey_fetches.remove(&peer);
                             self.process_pending(swarm, peer, prekey_pub);
                         }
@@ -926,6 +1183,45 @@ impl P2PNode {
             }
             request_response::Event::ResponseSent { .. } => {}
         }
+    }
+
+    /// Phase 2 PQ-X3DH. Verify the Ed25519 signature on a peer's
+    /// `MlKemPrekey` bundle. Signature is over
+    /// `ML_KEM_PREKEY_SIG_DOMAIN || ek` using the peer's identity
+    /// Ed25519 key (extracted from their PeerId-embedded inline pubkey).
+    /// Returns Ok(()) on valid sig + correct ek length; caller is
+    /// responsible for inserting into `cached_pq_prekeys`.
+    fn verify_pq_prekey(
+        &self,
+        sender: PeerId,
+        pq: &crate::network::MlKemPrekey,
+    ) -> Result<()> {
+        if pq.ek.len() != crate::core::identity::ML_KEM_EK_LEN {
+            anyhow::bail!(
+                "wrong ek length: expected {}, got {}",
+                crate::core::identity::ML_KEM_EK_LEN,
+                pq.ek.len()
+            );
+        }
+        let multihash = sender.as_ref();
+        if multihash.code() != 0 {
+            anyhow::bail!("peer id does not embed an inline public key");
+        }
+        let libp2p_pk = libp2p::identity::PublicKey::try_decode_protobuf(multihash.digest())
+            .map_err(|e| anyhow::anyhow!("decode peer pubkey: {}", e))?;
+        let ed_bytes = libp2p_pk
+            .try_into_ed25519()
+            .map_err(|_| anyhow::anyhow!("peer is not Ed25519"))?
+            .to_bytes();
+        let verifying = VerifyingKey::from_bytes(&ed_bytes)
+            .map_err(|e| anyhow::anyhow!("ed25519 key decode: {}", e))?;
+        let sig = Ed25519Sig::from_bytes(&pq.signature);
+        verifying
+            .verify_strict(
+                &crate::core::identity::ml_kem_prekey_signing_bytes(&pq.ek),
+                &sig,
+            )
+            .map_err(|_| anyhow::anyhow!("PQ prekey signature did not verify"))
     }
 
     /// Verify the Ed25519 signature on a prekey response and persist it.
@@ -1115,8 +1411,72 @@ impl P2PNode {
         plaintext: &str,
         their_prekey_pub: X25519Pub,
     ) {
-        let hello = match self.cached_otpks.remove(&peer) {
-            Some(otpk_bundle) => {
+        let hello = self.build_x3dh_hello(peer, their_prekey_pub);
+        self.encrypt_and_send_existing(swarm, peer, plaintext, Some(hello));
+    }
+
+    /// Run the initiator side of X3DH. Picks one of four variants
+    /// based on what's cached for this peer:
+    ///
+    ///   classical 2-DH   — no OTPK,  no PQ prekey
+    ///   classical 3-DH   — OTPK,     no PQ prekey
+    ///   hybrid    2-DH   — no OTPK,  PQ prekey  → initiator_derive_hybrid
+    ///   hybrid    3-DH   — OTPK,     PQ prekey  → initiator_derive_with_otpk_hybrid
+    ///
+    /// Inserts the resulting ratchet state into `self.sessions` and
+    /// returns the `FirstMessageHello` payload (ephemeral pub, optional
+    /// OTPK id, optional ML-KEM ciphertext) that the caller wraps into
+    /// the first message's `EncryptedPayload`.
+    fn build_x3dh_hello(
+        &mut self,
+        peer: PeerId,
+        their_prekey_pub: X25519Pub,
+    ) -> FirstMessageHello {
+        // PQ encapsulation is optional. Run it once up-front so both
+        // OTPK / no-OTPK branches can use the same `pq_ss`. A failure
+        // here downgrades the session to classical with a warn log.
+        // Phase 2.B: if the in-memory cache is empty (e.g. after node
+        // restart) fall back to the SQLite store, then re-populate
+        // the in-memory cache for subsequent sessions.
+        if !self.cached_pq_prekeys.contains_key(&peer) {
+            if let Some(ref store) = self.message_store {
+                if let Ok(Some(ek)) = store.load_pq_prekey(&peer.to_bytes()) {
+                    debug!("Loaded PQ prekey for {} from store ({}B)", peer, ek.len());
+                    self.cached_pq_prekeys.insert(peer, ek);
+                }
+            }
+        }
+        let pq_pair = self
+            .cached_pq_prekeys
+            .get(&peer)
+            .and_then(|ek| match x3dh::pq_encapsulate(ek) {
+                Ok((ct, ss)) => Some((ct, ss)),
+                Err(e) => {
+                    warn!("PQ encapsulate failed for {}: {} (classical fallback)", peer, e);
+                    None
+                }
+            });
+
+        let otpk = self.cached_otpks.remove(&peer);
+
+        match (otpk, &pq_pair) {
+            (Some(otpk_bundle), Some((_ct, pq_ss))) => {
+                let otpk_pub = X25519Pub::from(otpk_bundle.x25519_public);
+                let (eph_pub, sk) = x3dh::initiator_derive_with_otpk_hybrid(
+                    self.identity.x25519_secret(),
+                    &their_prekey_pub,
+                    &otpk_pub,
+                    pq_ss,
+                );
+                let session = RatchetState::new_initiator(sk, their_prekey_pub);
+                self.sessions.insert(peer, session);
+                FirstMessageHello {
+                    x3dh_eph: eph_pub,
+                    otpk_id: Some(otpk_bundle.id),
+                    ml_kem_ct: pq_pair.map(|(ct, _)| ct),
+                }
+            }
+            (Some(otpk_bundle), None) => {
                 let otpk_pub = X25519Pub::from(otpk_bundle.x25519_public);
                 let (eph_pub, sk) = x3dh::initiator_derive_with_otpk(
                     self.identity.x25519_secret(),
@@ -1128,9 +1488,24 @@ impl P2PNode {
                 FirstMessageHello {
                     x3dh_eph: eph_pub,
                     otpk_id: Some(otpk_bundle.id),
+                    ml_kem_ct: None,
                 }
             }
-            None => {
+            (None, Some((_ct, pq_ss))) => {
+                let (eph_pub, sk) = x3dh::initiator_derive_hybrid(
+                    self.identity.x25519_secret(),
+                    &their_prekey_pub,
+                    pq_ss,
+                );
+                let session = RatchetState::new_initiator(sk, their_prekey_pub);
+                self.sessions.insert(peer, session);
+                FirstMessageHello {
+                    x3dh_eph: eph_pub,
+                    otpk_id: None,
+                    ml_kem_ct: pq_pair.map(|(ct, _)| ct),
+                }
+            }
+            (None, None) => {
                 let (eph_pub, sk) = x3dh::initiator_derive(
                     self.identity.x25519_secret(),
                     &their_prekey_pub,
@@ -1140,10 +1515,10 @@ impl P2PNode {
                 FirstMessageHello {
                     x3dh_eph: eph_pub,
                     otpk_id: None,
+                    ml_kem_ct: None,
                 }
             }
-        };
-        self.encrypt_and_send_existing(swarm, peer, plaintext, Some(hello));
+        }
     }
 
     /// Encrypt `plaintext` with the existing ratchet session for `peer`
@@ -1241,6 +1616,13 @@ impl P2PNode {
             x3dh_eph: hello.as_ref().map(|h| *h.x3dh_eph.as_bytes()),
             otpk_id: hello.as_ref().and_then(|h| h.otpk_id),
             kind,
+            // Phase 2: ml_kem_ct is set ONLY for the first message of a
+            // fresh PQ-hybrid session — `build_x3dh_hello` populates it
+            // when the responder's `cached_pq_prekeys` entry exists.
+            // Steady-state encrypts pass `hello = None` → ml_kem_ct = None.
+            // `.take()` would be ideal but `hello` is borrowed; we
+            // `.clone()` the ct bytes (one-shot copy, 1088 bytes max).
+            ml_kem_ct: hello.as_ref().and_then(|h| h.ml_kem_ct.clone()),
         };
 
         let payload_bytes = match payload.to_bytes() {
@@ -1258,14 +1640,37 @@ impl P2PNode {
         // Falls back to the legacy direct path when the prekey isn't
         // cached (typically only the very first send to a brand-new
         // contact before the prekey-fetch reply has landed).
+        //
+        // Phase 3 deniable variants are selected per `config.deniable_dm`.
+        // When set, the per-message Ed25519 signature is omitted (empty
+        // signature on direct path, empty inner sig in sealed cert).
+        // Receivers' AEAD-via-ratchet provides authenticity; no third
+        // party can prove which session participant authored a given
+        // message. Wire-incompatible with pre-Phase-3 recipients (they
+        // require a non-empty signature) — opt-in for a reason.
         let proto_msg_result = if let Some(recipient_prekey) = self.cached_prekey(&peer) {
-            ProtocolMessage::new_sealed(
+            if self.config.deniable_dm {
+                ProtocolMessage::new_sealed_deniable(
+                    peer.to_bytes(),
+                    self.identity.peer_id().to_bytes(),
+                    payload_bytes,
+                    recipient_prekey.as_bytes(),
+                )
+            } else {
+                ProtocolMessage::new_sealed(
+                    peer.to_bytes(),
+                    self.identity.peer_id().to_bytes(),
+                    payload_bytes,
+                    self.identity.keypair(),
+                    recipient_prekey.as_bytes(),
+                )
+            }
+        } else if self.config.deniable_dm {
+            Ok(ProtocolMessage::new_direct_deniable(
                 peer.to_bytes(),
                 self.identity.peer_id().to_bytes(),
                 payload_bytes,
-                self.identity.keypair(),
-                recipient_prekey.as_bytes(),
-            )
+            ))
         } else {
             ProtocolMessage::new_direct_signed(
                 peer.to_bytes(),
@@ -1315,35 +1720,10 @@ impl P2PNode {
         let prekey_pub = self.cached_prekey(&peer)?;
         // Inline X3DH bootstrap (parallel to `bootstrap_initiator_and_send`
         // but without the network send — the wire bytes are returned
-        // to the caller for delivery via outbox + mailbox).
-        let hello = match self.cached_otpks.remove(&peer) {
-            Some(otpk_bundle) => {
-                let otpk_pub = X25519Pub::from(otpk_bundle.x25519_public);
-                let (eph_pub, sk) = x3dh::initiator_derive_with_otpk(
-                    self.identity.x25519_secret(),
-                    &prekey_pub,
-                    &otpk_pub,
-                );
-                let session = RatchetState::new_initiator(sk, prekey_pub);
-                self.sessions.insert(peer, session);
-                FirstMessageHello {
-                    x3dh_eph: eph_pub,
-                    otpk_id: Some(otpk_bundle.id),
-                }
-            }
-            None => {
-                let (eph_pub, sk) = x3dh::initiator_derive(
-                    self.identity.x25519_secret(),
-                    &prekey_pub,
-                );
-                let session = RatchetState::new_initiator(sk, prekey_pub);
-                self.sessions.insert(peer, session);
-                FirstMessageHello {
-                    x3dh_eph: eph_pub,
-                    otpk_id: None,
-                }
-            }
-        };
+        // to the caller for delivery via outbox + mailbox). Uses the
+        // same `build_x3dh_hello` helper so the PQ-hybrid logic stays
+        // in one place.
+        let hello = self.build_x3dh_hello(peer, prekey_pub);
         self.ratchet_encrypt_and_wrap(peer, plaintext, Some(hello))
             .map(|(b, _ttl)| b)
     }
@@ -1407,6 +1787,41 @@ impl P2PNode {
             }
         }
 
+        // Phase 4 session-keyed parallel publish. When we already have
+        // a Double-Ratchet session with `peer`, derive the shared
+        // session_id and additionally PUT the same wire bytes under
+        // `session_drop_kad_key(session_id, slot)`. A passive observer
+        // sees only the opaque session-hash; only the recipient can
+        // re-derive the same key. During the Phase-4 migration window
+        // we keep publishing the legacy key too so pre-Phase-4
+        // recipients (no session-keyed poll loop) can still fetch.
+        if let Some(sid) = self
+            .sessions
+            .get(&peer)
+            .map(|s| s.session_id())
+        {
+            let session_drop_key = mailbox::session_drop_kad_key(&sid, slot);
+            let session_record = kad::Record {
+                key: session_drop_key,
+                value: wire_bytes.to_vec(),
+                publisher: None,
+                expires: None,
+            };
+            match swarm
+                .behaviour_mut()
+                .kademlia
+                .put_record(session_record, kad::Quorum::One)
+            {
+                Ok(_) => debug!(
+                    "Mailbox session put_record for {} at slot {} ({}B)",
+                    peer,
+                    slot,
+                    wire_bytes.len()
+                ),
+                Err(e) => warn!("Mailbox session put_record({}) failed: {:?}", peer, e),
+            }
+        }
+
         info!("📨 Mailbox drop published for {} (slot {})", peer, slot);
     }
 
@@ -1453,12 +1868,27 @@ impl P2PNode {
             let ack_qid = swarm.behaviour_mut().kademlia.get_record(ack_key);
             self.pending_ack_queries.insert(ack_qid, id);
 
+            // Phase 4.B session-keyed ACK poll. If we have a session
+            // for this recipient, also poll the session-keyed ACK key
+            // — Phase-4 recipients publish only there (not the legacy
+            // ack_key). Without this, sender would republish forever
+            // even after Phase-4 recipient ingested.
+            let session_id_opt = match PeerId::from_bytes(&recipient_pid) {
+                Ok(pid) => self.sessions.get(&pid).map(|s| s.session_id()),
+                Err(_) => None,
+            };
+            if let Some(sid) = session_id_opt {
+                let session_ack_key = mailbox::session_ack_kad_key(&sid, slot);
+                let qid = swarm.behaviour_mut().kademlia.get_record(session_ack_key);
+                self.pending_ack_queries.insert(qid, id);
+            }
+
             if let Err(e) = swarm.behaviour_mut().kademlia.start_providing(slot_key) {
                 warn!("Republish start_providing failed for id={}: {:?}", id, e);
             }
             let record = kad::Record {
                 key: drop_key,
-                value: wire_bytes,
+                value: wire_bytes.clone(),
                 publisher: None,
                 expires: None,
             };
@@ -1473,6 +1903,27 @@ impl P2PNode {
                     }
                 }
                 Err(e) => warn!("Republish put_record failed for id={}: {:?}", id, e),
+            }
+
+            // Phase 4.B session-keyed parallel republish. Keep the
+            // session-keyed copy alive on the DHT in step with the
+            // legacy copy. Same backoff cadence (the touch happened
+            // above; this is just another put_record on the same row).
+            if let Some(sid) = session_id_opt {
+                let session_drop_key = mailbox::session_drop_kad_key(&sid, slot);
+                let session_record = kad::Record {
+                    key: session_drop_key,
+                    value: wire_bytes,
+                    publisher: None,
+                    expires: None,
+                };
+                if let Err(e) = swarm
+                    .behaviour_mut()
+                    .kademlia
+                    .put_record(session_record, kad::Quorum::One)
+                {
+                    warn!("Republish session put_record failed for id={}: {:?}", id, e);
+                }
             }
         }
     }
@@ -1514,6 +1965,33 @@ impl P2PNode {
             debug!("Mailbox poll: queued {} provider queries (slots {}..={})",
                 queued, start, now_slot);
         }
+
+        // Phase 4 session-keyed parallel poll. For each Double-Ratchet
+        // session we hold, derive its session_id and `get_record` the
+        // session_drop_key for every slot in our range. Result comes
+        // back through `pending_record_queries` and feeds the regular
+        // `process_incoming_dm` pipeline — the wire bytes are the same
+        // shape whether the source was legacy or session-keyed.
+        //
+        // For sessions that the corresponding sender hasn't yet
+        // upgraded to Phase 4, the get_record simply returns "no
+        // record" — no extra round-trip cost beyond the empty lookups.
+        let active_sessions: Vec<(PeerId, [u8; 32])> = self
+            .sessions
+            .iter()
+            .map(|(pid, st)| (*pid, st.session_id()))
+            .collect();
+        for (peer, sid) in active_sessions {
+            for slot in start..=now_slot {
+                let key = mailbox::session_drop_kad_key(&sid, slot);
+                let qid = swarm.behaviour_mut().kademlia.get_record(key);
+                // Reuse pending_record_queries; the value carries the
+                // peer for attribution. Result handler doesn't need to
+                // know whether the lookup was session- or pid-keyed.
+                self.pending_record_queries.insert(qid, (slot, peer));
+            }
+        }
+
         // Bump last_polled to one before now_slot — the current slot
         // remains "in progress" and gets re-queried each tick.
         if now_slot > 0 {
@@ -1735,6 +2213,35 @@ impl P2PNode {
                 );
             }
         }
+
+        // Phase 4.B session-keyed parallel ACK. If we hold a session
+        // for this sender, also publish at the session-keyed ACK key
+        // so a Phase-4 sender (who only checks the session ACK key,
+        // because their drop went out under session_drop_key) sees it.
+        // No-op for pre-Phase-4 senders (no session yet, no key to derive).
+        if let Some(sid) = self.sessions.get(&sender).map(|s| s.session_id()) {
+            let session_ack_key = mailbox::session_ack_kad_key(&sid, slot);
+            let session_record = kad::Record {
+                key: session_ack_key,
+                value: my_pid_bytes,
+                publisher: None,
+                expires: None,
+            };
+            match swarm
+                .behaviour_mut()
+                .kademlia
+                .put_record(session_record, kad::Quorum::One)
+            {
+                Ok(_) => debug!(
+                    "Mailbox session-keyed ACK published for {} at slot {}",
+                    sender, slot
+                ),
+                Err(e) => warn!(
+                    "Mailbox session-keyed ACK put_record failed for {} at slot {}: {:?}",
+                    sender, slot, e
+                ),
+            }
+        }
     }
 
     // ============================================================
@@ -1884,39 +2391,75 @@ impl P2PNode {
     ) -> bool {
         let eph_pub = X25519Pub::from(eph_bytes);
 
-        // 3-DH path if the initiator says they consumed an OTPK. We
-        // refuse to fall back to 2-DH in that case because the initiator
-        // definitely derived SK with 3-DH; a 2-DH derivation would yield
-        // a different SK and AEAD would fail anyway — better to drop
-        // explicitly with a clear log line.
-        let sk = if let Some(otpk_id) = payload.otpk_id {
-            let otpk_priv_bytes = match self
-                .message_store
-                .as_ref()
-                .and_then(|s| s.load_otpk_private(otpk_id).ok().flatten())
-            {
-                Some(b) => b,
-                None => {
+        // Phase 2 PQ-X3DH. If the initiator attached an ML-KEM
+        // ciphertext, decapsulate it with our long-term ML-KEM dk to
+        // recover the PQ shared secret. Decap failure with a present
+        // ct is a hard error: the initiator's hybrid-derived SK and a
+        // classical responder-derived SK don't match (different HKDF
+        // info tags + different ikm), so AEAD would fail anyway —
+        // better to drop loudly than silently corrupt the session.
+        let pq_ss_opt: Option<[u8; 32]> = match &payload.ml_kem_ct {
+            None => None,
+            Some(ct) => match x3dh::pq_decapsulate(self.identity.ml_kem_dk_bytes(), ct) {
+                Ok(ss) => Some(ss),
+                Err(e) => {
                     warn!(
-                        "Dropping first DM from {}: OTPK id={} not found in our store",
-                        peer, otpk_id
+                        "Dropping first DM from {}: PQ decapsulate failed: {}",
+                        peer, e
                     );
                     return false;
                 }
-            };
-            let otpk_secret = x25519_dalek::StaticSecret::from(otpk_priv_bytes);
-            x3dh::responder_derive_with_otpk(
+            },
+        };
+
+        // Four-way switch over (OTPK present?) × (PQ present?). The
+        // OTPK path refuses to fall back to 2-DH because the initiator
+        // definitely committed to 3-DH; a 2-DH derivation would yield
+        // a different SK and AEAD would fail anyway.
+        let sk = match (payload.otpk_id, pq_ss_opt) {
+            (Some(otpk_id), pq_opt) => {
+                let otpk_priv_bytes = match self
+                    .message_store
+                    .as_ref()
+                    .and_then(|s| s.load_otpk_private(otpk_id).ok().flatten())
+                {
+                    Some(b) => b,
+                    None => {
+                        warn!(
+                            "Dropping first DM from {}: OTPK id={} not found in our store",
+                            peer, otpk_id
+                        );
+                        return false;
+                    }
+                };
+                let otpk_secret = x25519_dalek::StaticSecret::from(otpk_priv_bytes);
+                match pq_opt {
+                    Some(pq_ss) => x3dh::responder_derive_with_otpk_hybrid(
+                        self.identity.x25519_secret(),
+                        &otpk_secret,
+                        &eph_pub,
+                        &initiator_x25519,
+                        &pq_ss,
+                    ),
+                    None => x3dh::responder_derive_with_otpk(
+                        self.identity.x25519_secret(),
+                        &otpk_secret,
+                        &eph_pub,
+                        &initiator_x25519,
+                    ),
+                }
+            }
+            (None, Some(pq_ss)) => x3dh::responder_derive_hybrid(
                 self.identity.x25519_secret(),
-                &otpk_secret,
                 &eph_pub,
                 &initiator_x25519,
-            )
-        } else {
-            x3dh::responder_derive(
+                &pq_ss,
+            ),
+            (None, None) => x3dh::responder_derive(
                 self.identity.x25519_secret(),
                 &eph_pub,
                 &initiator_x25519,
-            )
+            ),
         };
 
         // Clone our signed prekey secret for the ratchet's keepsake

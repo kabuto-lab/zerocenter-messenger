@@ -98,15 +98,34 @@ impl MessageStore {
         // /ME55/prekey/1.0.0 response handler. Each row's signature
         // has already been verified against the peer's Ed25519 key before
         // insertion — callers can trust the bytes here.
+        //
+        // Phase 2.B: the optional `ml_kem_ek` column carries the peer's
+        // verified ML-KEM-768 encapsulation key (1184 bytes) for the
+        // PQ-X3DH hybrid path. NULL = peer is pre-Phase-2 / no PQ
+        // prekey published; initiator falls back to classical X25519.
+        // CREATE includes the column; pre-Phase-2.B databases get it
+        // backfilled via the ALTER TABLE below.
         conn.execute(
             "CREATE TABLE IF NOT EXISTS prekeys_seen (
                 peer_id    BLOB PRIMARY KEY,
                 x25519_pub BLOB NOT NULL,
                 signature  BLOB NOT NULL,
-                fetched_at INTEGER NOT NULL
+                fetched_at INTEGER NOT NULL,
+                ml_kem_ek  BLOB
             )",
             [],
         )?;
+        // Idempotent column-add migration for pre-Phase-2.B databases.
+        // Same pattern as the outbox.is_wire_bytes migration above.
+        if let Err(e) = conn.execute(
+            "ALTER TABLE prekeys_seen ADD COLUMN ml_kem_ek BLOB",
+            [],
+        ) {
+            let msg = format!("{}", e);
+            if !msg.contains("duplicate column") {
+                return Err(e.into());
+            }
+        }
 
         // Persistent Double Ratchet sessions, one per remote peer. The
         // state blob is JSON (see RatchetState::to_json / from_json).
@@ -303,6 +322,33 @@ impl MessageStore {
                 id              INTEGER PRIMARY KEY,
                 last_slot_polled INTEGER NOT NULL
             )",
+            [],
+        )?;
+
+        // Phase 1.A peer-exchange (PEX) cache. Every time we complete a
+        // successful DM exchange with a peer, the (peer_id, observed
+        // multiaddr) pair is upserted here. On node startup we read the
+        // most-recently-good N entries and seed the dial loop with them
+        // BEFORE falling back to the shipped default bootstraps — so a
+        // returning user reconnects to peers they already know without
+        // depending on the public bootstrap network being reachable.
+        //
+        // Schema is intentionally minimal: no encryption (peer_id +
+        // observed multiaddr aren't more sensitive than what an on-path
+        // observer can already see), no source-attribution, no quality
+        // score. LRU eviction by `last_good_at` keeps the table bounded
+        // — see `peer_cache_trim` for the cap.
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS peer_cache (
+                peer_id       BLOB PRIMARY KEY,
+                multiaddr     TEXT NOT NULL,
+                last_good_at  INTEGER NOT NULL
+            )",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_peer_cache_recent
+             ON peer_cache(last_good_at DESC)",
             [],
         )?;
 
@@ -606,13 +652,50 @@ impl MessageStore {
         x25519_pub: &[u8; 32],
         signature: &[u8; 64],
     ) -> Result<()> {
+        // Preserve any existing ml_kem_ek when overwriting the X25519
+        // half — UPSERT semantics, not full REPLACE, so a pre-existing
+        // PQ prekey doesn't get nulled out by a routine X25519 refresh.
         self.conn.execute(
-            "INSERT OR REPLACE INTO prekeys_seen
+            "INSERT INTO prekeys_seen
                  (peer_id, x25519_pub, signature, fetched_at)
-             VALUES (?1, ?2, ?3, ?4)",
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(peer_id) DO UPDATE SET
+                 x25519_pub = excluded.x25519_pub,
+                 signature  = excluded.signature,
+                 fetched_at = excluded.fetched_at",
             params![peer_id, &x25519_pub[..], &signature[..], chrono_time()],
         )?;
         Ok(())
+    }
+
+    /// Phase 2.B. Upsert the verified ML-KEM-768 encapsulation key for
+    /// a peer. Caller must verify the Ed25519 signature over `ek` against
+    /// the peer's identity key BEFORE invoking this. The row's x25519
+    /// half must already exist (created via [`Self::save_prekey`]);
+    /// otherwise this is a no-op so we don't accidentally create a row
+    /// that's PQ-only without classical fallback.
+    pub fn save_pq_prekey(&self, peer_id: &[u8], ml_kem_ek: &[u8]) -> Result<()> {
+        self.conn.execute(
+            "UPDATE prekeys_seen
+                SET ml_kem_ek = ?2
+              WHERE peer_id = ?1",
+            params![peer_id, ml_kem_ek],
+        )?;
+        Ok(())
+    }
+
+    /// Phase 2.B. Load the cached ML-KEM-768 encapsulation key for a
+    /// peer, if any was previously verified and stored.
+    pub fn load_pq_prekey(&self, peer_id: &[u8]) -> Result<Option<Vec<u8>>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT ml_kem_ek FROM prekeys_seen WHERE peer_id = ?1",
+        )?;
+        let mut rows = stmt.query(params![peer_id])?;
+        let Some(row) = rows.next()? else {
+            return Ok(None);
+        };
+        let ek_opt: Option<Vec<u8>> = row.get(0)?;
+        Ok(ek_opt)
     }
 
     /// Persist (or update) the ratchet session for `peer_id`.
@@ -1362,6 +1445,68 @@ impl MessageStore {
             .collect();
         Ok(rows)
     }
+
+    // -------------------------------------------------------------
+    // Phase 1.A PEX cache helpers.
+    // -------------------------------------------------------------
+
+    /// Upsert a peer we just had a successful exchange with. Overwrites
+    /// `multiaddr` and bumps `last_good_at` if the row already exists.
+    /// Called from the DM-decrypt success path so the cache reflects
+    /// peers we proved a working bidirectional flow with — not just
+    /// "we saw them on the wire".
+    pub fn peer_cache_upsert(
+        &self,
+        peer_id: &[u8],
+        multiaddr: &str,
+        now: i64,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO peer_cache (peer_id, multiaddr, last_good_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(peer_id) DO UPDATE SET
+                 multiaddr = excluded.multiaddr,
+                 last_good_at = excluded.last_good_at",
+            params![peer_id, multiaddr, now],
+        )?;
+        Ok(())
+    }
+
+    /// Return the most-recently-good peers, newest first, capped at
+    /// `limit`. Returned as `(peer_id_bytes, multiaddr_str)` so the
+    /// caller can hand them straight to libp2p without re-parsing.
+    /// Failures to parse the stored multiaddr at dial time are the
+    /// caller's problem (logged and skipped, not propagated here).
+    pub fn peer_cache_recent_good(&self, limit: i64) -> Result<Vec<(Vec<u8>, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT peer_id, multiaddr FROM peer_cache
+              ORDER BY last_good_at DESC
+              LIMIT ?1",
+        )?;
+        let rows = stmt
+            .query_map(params![limit], |row| {
+                Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, String>(1)?))
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    /// Cap the cache at `max_rows`, deleting the oldest entries first.
+    /// Cheap: indexed by `last_good_at`. Called periodically (on the
+    /// hourly cleanup tick) rather than on every upsert.
+    pub fn peer_cache_trim(&self, max_rows: i64) -> Result<usize> {
+        let deleted = self.conn.execute(
+            "DELETE FROM peer_cache
+              WHERE peer_id IN (
+                  SELECT peer_id FROM peer_cache
+                   ORDER BY last_good_at DESC
+                   LIMIT -1 OFFSET ?1
+              )",
+            params![max_rows],
+        )?;
+        Ok(deleted)
+    }
 }
 
 /// Inflate a `groups` row from SQL. Outer `Result` is sqlite's; inner
@@ -1464,6 +1609,46 @@ mod tests {
         let dir = tempdir().unwrap();
         let store = MessageStore::open(dir.path(), test_dek()).unwrap();
         assert!(store.load_prekey(&[1, 2, 3]).unwrap().is_none());
+    }
+
+    #[test]
+    fn pq_prekey_roundtrip_and_rotation() {
+        let dir = tempdir().unwrap();
+        let store = MessageStore::open(dir.path(), test_dek()).unwrap();
+        let peer = [11u8; 38];
+        let pubkey = [7u8; 32];
+        let sig = [3u8; 64];
+        // Row must exist (PQ update is a no-op without a base row).
+        store.save_prekey(&peer, &pubkey, &sig).unwrap();
+        assert!(store.load_pq_prekey(&peer).unwrap().is_none());
+
+        // Set, read back.
+        let ek = vec![42u8; 1184];
+        store.save_pq_prekey(&peer, &ek).unwrap();
+        assert_eq!(store.load_pq_prekey(&peer).unwrap().as_deref(), Some(&ek[..]));
+
+        // X25519 rotation must preserve the PQ key (UPSERT semantics).
+        let pubkey2 = [4u8; 32];
+        let sig2 = [5u8; 64];
+        store.save_prekey(&peer, &pubkey2, &sig2).unwrap();
+        assert_eq!(store.load_pq_prekey(&peer).unwrap().as_deref(), Some(&ek[..]));
+
+        // PQ rotation: latest wins.
+        let ek2 = vec![99u8; 1184];
+        store.save_pq_prekey(&peer, &ek2).unwrap();
+        assert_eq!(store.load_pq_prekey(&peer).unwrap().as_deref(), Some(&ek2[..]));
+    }
+
+    #[test]
+    fn pq_prekey_save_without_base_row_is_noop() {
+        // We refuse to create a PQ-only row — that would defeat the
+        // classical-fallback property. The UPDATE just affects 0 rows.
+        let dir = tempdir().unwrap();
+        let store = MessageStore::open(dir.path(), test_dek()).unwrap();
+        let peer = [22u8; 38];
+        let ek = vec![1u8; 1184];
+        store.save_pq_prekey(&peer, &ek).unwrap();
+        assert!(store.load_pq_prekey(&peer).unwrap().is_none());
     }
 
     #[test]

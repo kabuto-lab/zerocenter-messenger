@@ -25,6 +25,35 @@ pub struct Config {
     /// effective when `obfs_key` is also set; the ScrambleStream waits
     /// `uniform(0..=obfs_jitter_ms)` ms before emitting each new frame.
     pub obfs_jitter_ms: Option<u32>,
+
+    /// Circuit-relay multiaddrs to dial on startup. Each address must
+    /// include a `/p2p/<PeerId>` suffix — the relay-server's PeerId.
+    /// After a successful dial the node will `listen_on(addr/p2p-circuit)`
+    /// so peers behind NAT can reach it through the relay. Combine with
+    /// `bootstrap_nodes` so the same VPS-hosted node can serve both
+    /// roles (DHT bootstrap + circuit relay).
+    pub relay_addrs: Vec<String>,
+
+    /// Run this node as a relay server. Public-IP / port-forwarded nodes
+    /// set this to `true` so NAT'd peers can use them as relays for
+    /// reaching each other. NAT'd peers themselves leave this `false`
+    /// (they'd just be advertising a relay they can't actually serve).
+    pub enable_relay_server: bool,
+
+    /// Whether to merge the hardcoded fallback bootstrap list
+    /// ([`crate::network::bootstrap::DEFAULT_BOOTSTRAPS`]) into the
+    /// effective bootstrap set on startup. On by default — this is the
+    /// "install and works" path. Off when the user passed
+    /// `--no-default-bootstrap` (e.g. private deployments, isolated
+    /// test networks, or distrust of the shipped defaults).
+    pub use_default_bootstraps: bool,
+
+    /// Phase 3 deniable DMs. When true, outgoing 1:1 DMs use
+    /// `new_direct_deniable` / `new_sealed_deniable` — empty
+    /// per-message Ed25519 signature, authenticity carried by the
+    /// downstream ratchet AEAD. Off by default for wire-compatibility
+    /// with peers still on the legacy signed path.
+    pub deniable_dm: bool,
 }
 
 impl Default for Config {
@@ -36,6 +65,10 @@ impl Default for Config {
             bootstrap_nodes: vec![],
             obfs_key: None,
             obfs_jitter_ms: None,
+            relay_addrs: vec![],
+            enable_relay_server: false,
+            use_default_bootstraps: true,
+            deniable_dm: false,
         }
     }
 }
