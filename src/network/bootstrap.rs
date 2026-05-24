@@ -38,7 +38,11 @@ use serde::Deserialize;
 /// added to the Kademlia routing table without an extra resolution
 /// round-trip.
 pub const DEFAULT_BOOTSTRAPS: &[&str] = &[
-    // "/dns4/bootstrap-1.me55.network/tcp/4001/p2p/12D3KooW...",
+    // bootstrap-1 — Beget VPS (RU), provisioned 2026-05-24 per
+    // BEGET_SETUP.md. IP-pinned for now; will move behind
+    // /dns4/bootstrap-1.me55.network once DNS is set up.
+    "/ip4/45.9.40.37/tcp/4001/p2p/12D3KooWQ643AEmTK2CHDmhLAgXQ1oCZ12pNZHVvGgrrUTEVcPD9",
+    // Future slots (uncomment + replace when added):
     // "/dns4/bootstrap-2.me55.network/tcp/4001/p2p/12D3KooW...",
     // "/dns4/bootstrap-3.me55.network/tcp/4001/p2p/12D3KooW...",
 ];
