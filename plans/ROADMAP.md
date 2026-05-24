@@ -136,7 +136,7 @@ Most recent first.
 - `info!`-level log lines still mention PeerIds verbatim everywhere. Plaintext is fixed (INVARIANTS §19) but PeerIds are still metadata. For high-paranoia deployments we'd want a config to redact those too.
 - QUIC re-enable: `[[project-quic-disabled]]` blocker may already be obsolete on current MSVC toolchain — needs a real test. Re-enable `quic` in `Cargo.toml`, restore `.with_quic()` in `node.rs::start` after `with_other_transport(...)`, run two-peer smoke.
 - Known pre-existing test flake: `storage::store::tests::mailbox_drops_basic_lifecycle` races on `chrono_time()` calls that span a 1-second boundary; re-run if it fails on first try (not an audit finding).
-- Stray untracked working-tree files (not commit blockers): `Managing_Public_Money_*.docx` (unrelated user files), `.claude/settings.local.json` harness state, `TEST_GUIDE.html` + `bats/` (testing helpers — untracked by choice).
+- Stray untracked working-tree files (not commit blockers): `Managing_Public_Money_*.docx` (unrelated user files), `TEST_GUIDE.html` + `bats/` (testing helpers — untracked by choice).
 - The OTPK serve/consume regression (fixed in b365be4) means the 3-DH X3DH path was silently broken from 835c299 until 2026-05-20. No release shipped in that window, but any `messages.db` created against an affected build may hold half-open sessions — wipe and re-handshake if in doubt.
 
 ## Conventions

@@ -45,3 +45,6 @@ identity.json
 
 # Build staging dir for the friend ZIP (contents go into release/ME55-windows.zip)
 dist-friend/
+
+# Local dev-tooling state
+.claude/

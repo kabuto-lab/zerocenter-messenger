@@ -334,7 +334,7 @@ process_incoming_dm(transport_peer, request_bytes)
 </div>
 
 <div class="note">
-<b>Git on this repo requires a per-command <code>safe.directory</code> override.</b> The repo is owned by a different Windows account than the current user. Don't write to git config (per <code>CLAUDE.md</code>); pass <code>-c safe.directory=F:/__Qwen1/ME55</code> on each <code>git</code> invocation. Same for user identity if commits are needed: <code>-c user.name="kabuto-lab" -c user.email="hdart.ru@gmail.com"</code> (matches existing commit history).
+<b>Git on this repo requires a per-command <code>safe.directory</code> override.</b> The repo is owned by a different Windows account than the current user. Pass <code>-c safe.directory=F:/__Qwen1/ME55</code> on each <code>git</code> invocation rather than editing the global git config. Same for user identity if commits are needed: <code>-c user.name="kabuto-lab" -c user.email="hdart.ru@gmail.com"</code> (matches existing commit history).
 </div>
 
 <h2>Forward plan</h2>
