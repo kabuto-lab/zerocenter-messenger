@@ -1,0 +1,531 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<title>ME55 — почему это объективно вынос мозга</title>
+<style>
+:root {
+  --bg: #0a0e14;
+  --bg2: #11161e;
+  --fg: #e6e8eb;
+  --muted: #8b9199;
+  --accent: #ff5e7e;
+  --accent2: #5ee0ff;
+  --good: #6fdc6f;
+  --bad: #ff6b6b;
+  --meh: #ffd166;
+  --code-bg: #1a1f29;
+  --border: #1f2733;
+}
+* { box-sizing: border-box; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--fg);
+  margin: 0;
+  padding: 0;
+  line-height: 1.65;
+}
+.wrap {
+  max-width: 920px;
+  margin: 0 auto;
+  padding: 48px 28px 80px;
+}
+h1 {
+  font-family: "JetBrains Mono", "Consolas", monospace;
+  font-size: clamp(2.4rem, 7vw, 4.2rem);
+  margin: 0 0 8px;
+  letter-spacing: -0.02em;
+  background: linear-gradient(135deg, var(--accent), var(--accent2));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.subtitle {
+  color: var(--muted);
+  font-size: 1.15rem;
+  margin: 0 0 48px;
+  font-style: italic;
+}
+h2 {
+  font-size: 1.6rem;
+  margin: 56px 0 8px;
+  color: var(--accent2);
+  letter-spacing: -0.01em;
+}
+h2 .num {
+  color: var(--muted);
+  font-family: "JetBrains Mono", monospace;
+  font-weight: 400;
+  margin-right: 12px;
+  font-size: 1.2rem;
+}
+.tagline {
+  color: var(--muted);
+  font-size: 0.95rem;
+  margin: 0 0 16px;
+  font-style: italic;
+}
+.section {
+  border-left: 2px solid var(--border);
+  padding-left: 22px;
+  margin-bottom: 8px;
+}
+.section.killer { border-left-color: var(--accent); }
+p { margin: 12px 0; }
+.simple {
+  background: rgba(94, 224, 255, 0.06);
+  border: 1px solid rgba(94, 224, 255, 0.2);
+  border-radius: 6px;
+  padding: 12px 16px;
+  margin: 14px 0;
+}
+.simple::before {
+  content: "💁  Простыми словами";
+  display: block;
+  color: var(--accent2);
+  font-size: 0.85rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 6px;
+}
+.techy {
+  background: rgba(255, 94, 126, 0.04);
+  border: 1px solid rgba(255, 94, 126, 0.18);
+  border-radius: 6px;
+  padding: 12px 16px;
+  margin: 14px 0;
+  font-family: "JetBrains Mono", "Consolas", monospace;
+  font-size: 0.88rem;
+}
+.techy::before {
+  content: "🤓  По-настоящему";
+  display: block;
+  color: var(--accent);
+  font-size: 0.85rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 6px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+}
+.lol {
+  color: var(--muted);
+  font-size: 0.95rem;
+  font-style: italic;
+  margin-top: 8px;
+}
+code {
+  background: var(--code-bg);
+  padding: 2px 7px;
+  border-radius: 4px;
+  font-family: "JetBrains Mono", "Consolas", monospace;
+  font-size: 0.88em;
+  color: var(--accent2);
+}
+.cmp {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 24px 0;
+  font-size: 0.94rem;
+  background: var(--bg2);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.cmp th, .cmp td {
+  padding: 12px 14px;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+}
+.cmp th {
+  background: #161c25;
+  color: var(--muted);
+  font-weight: 600;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.cmp td:first-child {
+  font-weight: 500;
+}
+.cmp .y { color: var(--good); font-weight: 700; }
+.cmp .n { color: var(--bad); font-weight: 700; }
+.cmp .m { color: var(--meh); font-weight: 700; }
+.cmp tr:last-child td { border-bottom: none; }
+.cmp .me55 { background: rgba(255, 94, 126, 0.07); }
+
+.tldr {
+  background: linear-gradient(135deg, rgba(255, 94, 126, 0.1), rgba(94, 224, 255, 0.05));
+  border: 1px solid rgba(255, 94, 126, 0.25);
+  padding: 24px 28px;
+  border-radius: 10px;
+  margin: 32px 0 48px;
+}
+.tldr h3 {
+  margin: 0 0 12px;
+  color: var(--accent);
+  font-family: "JetBrains Mono", monospace;
+  letter-spacing: -0.01em;
+}
+.tldr p { margin: 8px 0; }
+
+.foot {
+  margin-top: 80px;
+  padding-top: 32px;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 0.88rem;
+  text-align: center;
+}
+
+a { color: var(--accent2); }
+a:hover { color: var(--accent); }
+
+.honest {
+  background: rgba(255, 209, 102, 0.05);
+  border-left: 3px solid var(--meh);
+  padding: 14px 18px;
+  margin: 20px 0;
+  border-radius: 0 6px 6px 0;
+  font-size: 0.92rem;
+}
+.honest::before {
+  content: "⚠ Честная мелочь";
+  display: block;
+  color: var(--meh);
+  font-size: 0.78rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 4px;
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>ME55</h1>
+<p class="subtitle">Что это такое и почему это объективно вынос мозга по сравнению с тем, в чём ты сейчас сидишь.</p>
+
+<div class="tldr">
+  <h3>TL;DR для блондинки</h3>
+  <p>ME55 — это мессенджер, у которого <b>нет компании за спиной</b>, <b>нет серверов</b>, <b>нет регистрации по номеру</b> и <b>нет способа его выключить</b>. Шифрование такое, что его не сломает квантовый компьютер. Никто (включая автора) не может прочитать твою переписку. А ещё ты можешь честно сказать в суде «это не я писал», и доказать обратное математически невозможно.</p>
+  <p>Это не «WhatsApp без Цукерберга». Это <b>другая категория</b>.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 class="section killer"><span class="num">01</span>Нет серверов. Реально нет.</h2>
+<div class="section killer">
+<p class="tagline">Telegram, Signal, WhatsApp — у всех есть «центр». У нас — нет.</p>
+
+<div class="simple">
+Когда ты пишешь сообщение в Telegram, оно летит на сервер в Дубае (или где они там). Сервер хранит, потом отдаёт собеседнику. <b>Дуров может почитать. Российская / эмиратская полиция может потребовать дать почитать.</b> Можно отрубить кнопкой — было же. С WhatsApp то же самое, только Цукерберг. С Signal — фонд в Калифорнии, ФБР приходит с ордером, фонд сопротивляется (Signal — молодцы), но <b>в принципе может</b>.
+<br><br>
+В ME55 сообщение летит <b>прямо от тебя — прямо к собеседнику</b>. Между вами нет ни одной железки, которая принадлежит какой-то компании. Если все серверы интернета сгорят, а у вас останется хоть какая-то сетевая связь — вы всё ещё друг другу пишете.
+</div>
+
+<div class="techy">
+Архитектура — pure peer-to-peer на <code>libp2p 0.53</code> поверх TCP+Noise+Yamux. Discovery через DHT (Kademlia, <code>/ME55/kad/1.0.0</code>) + mDNS для локальной сети. Bootstrap-ноды нужны только чтобы новый юзер впервые попал в сеть — после этого его и так уже знают сотни peer'ов. Любой может поднять свой bootstrap (<code>--relay-server</code>) — централизованной точки отказа нет в принципе.
+</div>
+
+<p class="lol">Сравни: Telegram упал на 4 часа в 2024 — мир онемел. ME55 упасть <b>не может как концепция</b>. Чтобы его «отключить», надо отключить интернет.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2><span class="num">02</span>Постквантовая криптография. Уже сейчас.</h2>
+<div class="section">
+<p class="tagline">Готовы к 2030-м, когда квантовый компьютер сломает RSA и ECDH.</p>
+
+<div class="simple">
+Все обычные мессенджеры шифруются математикой, которую <b>квантовый компьютер взломает за минуты</b>. Не сейчас. Через 10-15 лет. Но: <b>спецслужбы уже сегодня сохраняют</b> весь твой зашифрованный трафик — на потом, когда квант появится. Это называется «Harvest Now, Decrypt Later». ME55 — устойчив к этому уже сегодня.
+</div>
+
+<div class="techy">
+Hybrid <b>X25519 + ML-KEM-768</b> в X3DH-handshake. ML-KEM (бывший CRYSTALS-Kyber) — стандарт <a href="https://csrc.nist.gov/pubs/fips/203/final">NIST FIPS 203</a> от августа 2024. Итоговый shared secret = <code>HKDF(X25519_outputs || ML_KEM_ss)</code> — если хоть одна из примитивов выстоит, ключ безопасен. Тот же подход, что Signal развернул в <a href="https://signal.org/blog/pqxdh/">PQXDH (сентябрь 2023)</a> и Apple в <a href="https://security.apple.com/blog/imessage-pq3/">iMessage PQ3 (февраль 2024)</a>.
+</div>
+
+<table class="cmp" style="margin-top: 16px;">
+  <tr><th>Мессенджер</th><th>Постквант?</th></tr>
+  <tr><td>iMessage (Apple)</td><td class="y">да (PQ3, 2024)</td></tr>
+  <tr><td>Signal</td><td class="y">да (PQXDH, 2023)</td></tr>
+  <tr class="me55"><td><b>ME55</b></td><td class="y"><b>да (ML-KEM-768)</b></td></tr>
+  <tr><td>Telegram</td><td class="n">нет</td></tr>
+  <tr><td>WhatsApp</td><td class="n">нет</td></tr>
+  <tr><td>Viber</td><td class="n">нет</td></tr>
+</table>
+</div>
+
+<!-- ============================================================ -->
+<h2><span class="num">03</span>Отрицание авторства (deniability)</h2>
+<div class="section">
+<p class="tagline">Скриншот переписки в суде ничего не доказывает. От слова совсем.</p>
+
+<div class="simple">
+В обычном мессенджере каждое твоё сообщение подписано <b>криптографической подписью</b>. Тебе скажут «вот посмотри, это ТЫ написал», и математически это правда. С ME55 это работает иначе: <b>математически невозможно доказать</b>, что сообщение написал именно ты, а не твой собеседник (если включить <code>--deniable-dm</code>). У вас обоих есть техническая возможность сгенерировать любое сообщение «от имени другого». А значит — <b>скриншот в суде = ничего не значит</b>.
+</div>
+
+<div class="techy">
+Опциональный режим (<code>--deniable-dm</code>) убирает per-message Ed25519-подпись из envelope'а. Аутентичность гарантирует AEAD ratchet'а, ключ которого симметричен — оба участника могут «подделать» любое сообщение с тем же тегом. Свойство называется <b>cryptographic deniability</b>, его исследовали ещё в OTR (Off-the-Record Messaging) 2004 года. У Signal оно есть в DM (TripleDH), у iMessage — нет.
+</div>
+</div>
+
+<!-- ============================================================ -->
+<h2><span class="num">04</span>«Запечатанный отправитель» (sealed sender)</h2>
+<div class="section">
+<p class="tagline">Сеть знает, кому пришло, но не знает, от кого. Минус полметаданных.</p>
+
+<div class="simple">
+Когда ты пишешь сообщение в обычном мессенджере, провайдер видит: <b>«отправитель Аня → получатель Бóря»</b>. Контент он не прочитает (шифрование), но <b>факт связи известен</b>. Это называется «метаданные», и они часто опаснее самого контента — по графу связей можно понять кто куда ходит и с кем дружит, без единой буквы переписки. ME55 шифрует и сам факт «от кого». Сеть видит только «кому-то пришло что-то».
+</div>
+
+<div class="techy">
+Sender identity внутри AEAD-envelope'а, зашифрован под публичный X25519 получателя. Внешний <code>ProtocolMessage</code> содержит только <code>to</code>-PeerId (нужен для роутинга) + opaque <code>sealed_sender: Vec&lt;u8&gt;</code>. Этот блоб — ECIES: ephemeral X25519 + HKDF + ChaCha20-Poly1305 над <code>(sender_pid || signature)</code>. Forward-secrecy: ephemeral private дропается после отправки. Domain separator <code>"ME55-sealed-dm-v1"</code>. Signal развернул аналог в 2018 — мы реализовали то же самое.
+</div>
+</div>
+
+<!-- ============================================================ -->
+<h2><span class="num">05</span>DPI-resistant обфускация</h2>
+<div class="section">
+<p class="tagline">Провайдер не понимает, что ты вообще запустил мессенджер.</p>
+
+<div class="simple">
+Государства научились распознавать «протокол мессенджера X» прямо в трафике — это называется DPI (Deep Packet Inspection). Сидишь в кафе, открываешь Telegram — вышел роскомнадзор. С ME55 (при включённом <code>--obfs-key</code>) трафик выглядит как <b>случайный байтовый шум</b>. Никаких сигнатур, ни длин-фингерпринтов, ни тайминговых паттернов. Провайдеру для блокировки придётся блокировать <b>весь шифрованный трафик целиком</b>, что они себе позволить не могут.
+</div>
+
+<div class="techy">
+Транспортная обёртка <code>ScrambleStream</code> поверх TCP, до libp2p Noise. NTOR-style handshake через elligator2 (32-байтовые ephemeral X25519, неотличимы от uniform random). ChaCha20-keystream XOR в обе стороны, ключи деривируются раздельно (фикс F1 из аудита). Frame-padding: <code>FRAME_QUANTUM=256</code> — все наблюдаемые фреймы в {256, 512, 768, 1024} байт. Опциональный IAT-jitter (<code>--obfs-jitter-ms</code>) против тайминг-атак.
+</div>
+</div>
+
+<!-- ============================================================ -->
+<h2><span class="num">06</span>NAT-traversal — звонок «напрямую» сквозь два роутера</h2>
+<div class="section">
+<p class="tagline">Оба за домашними роутерами? Звонок всё равно прямой.</p>
+
+<div class="simple">
+Знаешь почему в Skype/Zoom есть «облачные сервера для звонков»? Потому что когда два человека сидят за обычными WiFi-роутерами, они <b>не могут напрямую соединиться</b> — каждый видит только «внутренние» IP. Поэтому весь видеочат прокачивается через сервер посередине. ME55 решает это иначе: <b>пробивает дырку в роутерах</b> и устанавливает прямое соединение между двумя домашними сетями. Без посредника. Если не получится — fallback через relay-ноду, но всё ещё end-to-end шифрованно (relay не видит контента).
+</div>
+
+<div class="techy">
+libp2p <code>relay::Behaviour</code> v2 (RFC <a href="https://github.com/libp2p/specs/tree/master/relay">libp2p/specs/relay</a>) + <code>dcutr::Behaviour</code> для hole-punching. Workflow: A и B оба подключаются к публичной relay-ноде, идёт первичный обмен через circuit-relay. Затем DCUtR coordinates simultaneous TCP-connect, и если у обоих NAT'ы не симметричные — соединение апгрейдится до direct. Relay падает из пути, продолжаем напрямую.
+</div>
+</div>
+
+<!-- ============================================================ -->
+<h2><span class="num">07</span>Forward secrecy + post-compromise security</h2>
+<div class="section">
+<p class="tagline">Украли твой ключ сегодня — не прочитают вчерашнее. И завтрашнее тоже.</p>
+
+<div class="simple">
+В большинстве систем: если злоумышленник украл твой долгосрочный ключ — он прочитает <b>всё, что ты когда-либо писал</b> и <b>всё, что ещё будешь писать</b>. В ME55 ключ для каждого сообщения свой, и старые ключи стираются сразу после использования. Украли сегодня → не прочитают вчерашнее (forward secrecy). Завтра ratchet «прокрутится» дальше → не прочитают и будущее (post-compromise security).
+</div>
+
+<div class="techy">
+Полноценный <b>Double Ratchet</b> (Signal Protocol spec) с HKDF chain advance, X25519 DH-ratchet поверх. MAX_SKIP=1000 с oldest-first eviction для out-of-order. Per-message keys одноразовые, message keys дропаются сразу после <code>decrypt</code>. Зашифровано всё в покое: <code>session_blob</code> в SQLite — ChaCha20-Poly1305 под DEK из OS keyring.
+</div>
+</div>
+
+<!-- ============================================================ -->
+<h2><span class="num">08</span>Групповые чаты — как Matrix, но без серверов</h2>
+<div class="section">
+<p class="tagline">Группы 100+ человек, всё E2E, ротация ключей при удалении.</p>
+
+<div class="simple">
+Когда из обычного группового чата кого-то удаляют — он формально не видит новых сообщений, но если у него остались ключи, технически он бы мог прочитать. ME55 при каждом удалении <b>прокручивает ключи у всех остальных участников</b>. Бывший участник может перехватывать сетевой трафик группы сколько угодно — он расшифровать ничего не сможет.
+</div>
+
+<div class="techy">
+<b>Megolm-style</b> sender chains (как в Matrix/Element). На каждого участника свой SenderChain (HMAC-SHA256 chain advance, ChaCha20-Poly1305 AEAD, per-message Ed25519). Membership-контроль через founder-signed <code>MembershipUpdate</code> с epoch monotonicity. На <code>group remove</code> все оставшиеся участники ротируют свои SenderChains и рассылают новые bundles. Скипнутые ключи: cap MAX_SKIP=1000, oldest-first eviction. Signature verify <b>до</b> state mutation — forgeries не могут отравить cache.
+</div>
+</div>
+
+<!-- ============================================================ -->
+<h2><span class="num">09</span>Mailbox — пишешь оффлайн-собеседнику</h2>
+<div class="section">
+<p class="tagline">Друг не в сети? Положим сообщение «в облако», но в P2P-облако без облака.</p>
+
+<div class="simple">
+В обычном мессенджере твоё сообщение лежит на сервере компании, пока получатель не зайдёт. В ME55 — лежит «в DHT», то есть <b>размазано между тысячами случайных пиров</b>. Никакой конкретный сервер его не хранит. Контент зашифрован, путь к нему — opaque хеш (никто не видит «кто кому»). Когда получатель появится в сети, его ME55 сам найдёт и заберёт.
+</div>
+
+<div class="techy">
+Store-and-forward через Kademlia DHT. <code>session_drop_kad_key(session_id, slot_id)</code> — Kad-key с domain separator <code>"ME55-session-mailbox-drop-v1"</code>, без PeerId в preimage. Записи под этим ключом — AEAD-зашифрованный <code>ProtocolMessage</code>. Slots часовые (3600s), TTL 7 дней. На успешный decrypt получатель публикует ACK под <code>session_ack_kad_key</code>; sender проверяет ACK перед republish'ем — DHT-нагрузка ограничена.
+</div>
+</div>
+
+<!-- ============================================================ -->
+<h2><span class="num">10</span>At-rest encryption — украли ноут, читать не смогут</h2>
+<div class="section">
+<p class="tagline">Все сообщения и ключи на диске зашифрованы. Без OS-keyring расшифровать нельзя.</p>
+
+<div class="simple">
+Локальная база сообщений ME55 на диске <b>зашифрована</b>. Ключ хранится в системном keyring (Windows Credential Manager / macOS Keychain / Linux Secret Service). Украли ноут, выдернули жёсткий диск — без логина в твою винду никто ничего не прочитает. Даже если форензик-эксперт. Даже если знает что искать.
+</div>
+
+<div class="techy">
+Per-profile DEK (32 байта) в OS keyring под service <code>"ME55-messenger"</code>. Все persistent payloads — ChaCha20-Poly1305 (<code>[version=1 || nonce(12) || ct+tag]</code>): message bodies, ratchet sessions, OTPK privates, outbox, mailbox drops, group sender chains. Identity.json — единственное plaintext (Ed25519 secret), но без DEK всё остальное мусор. Fallback на ephemeral DEK с loud warning при недоступности keyring.
+</div>
+</div>
+
+<!-- ============================================================ -->
+<h2><span class="num">11</span>Open source, без телеметрии, без аккаунтов, без номера</h2>
+<div class="section">
+<p class="tagline">Никакой регистрации. Скачал .exe — запустил — у тебя есть identity.</p>
+
+<div class="simple">
+Не надо вводить номер телефона. Не надо email. Не надо «account». Не надо «принять условия использования». Запустил <code>ME55AGUI.exe</code> — у тебя появился PeerId (длинная строка). Дал друзьям — они тебе пишут. Удалил identity — стал новым человеком в сети. <b>Никакой телеметрии в принципе нет</b> (ни одной сетевой запроса наружу, кроме p2p-трафика и DHT).
+</div>
+
+<div class="techy">
+<code>Identity = Ed25519 keypair</code> в <code>identity.json</code>. PeerId = base58 multihash от публичного ключа. Полностью локальная генерация (OsRng). Никаких phone-home, никаких аналитик, никаких сторонних SDK. Кодовая база ~25k LOC Rust, MIT-license-able, в <a href="https://github.com/kabuto-lab/zerocenter-messenger">репозитории на GitHub</a> можно прочитать каждую строчку.
+</div>
+</div>
+
+<!-- ============================================================ -->
+<h2><span class="num">12</span>Single static binary — запуск с флешки</h2>
+<div class="section">
+<p class="tagline">Один .exe, никакого «установить», никаких прав администратора.</p>
+
+<div class="simple">
+ME55 — это <b>один файл</b>. Один .exe на 21 МБ. Не нужен инсталлятор. Не нужны права админа. Не нужен интернет для установки. Можно носить с собой на флешке. Можно запустить из временной папки и удалить через час. На корпоративном компе, где нельзя ставить программы — всё равно запустится.
+</div>
+
+<div class="techy">
+Rust + static linking (<code>cargo build --release</code> с <code>lto=true</code>, <code>codegen-units=1</code>). Зависимости статически вкомпилированы, никаких .dll-ов. Tauri webview использует системный WebView2 на Windows (предустановлен на Win 10+). На macOS / Linux — те же исходники собираются нативным toolchain'ом.
+</div>
+</div>
+
+<!-- ============================================================ -->
+<h2>Финальное сравнение</h2>
+
+<table class="cmp">
+<tr>
+  <th>Свойство</th>
+  <th>WhatsApp</th>
+  <th>Telegram</th>
+  <th>Signal</th>
+  <th>ME55</th>
+</tr>
+<tr>
+  <td>E2E шифрование DM</td>
+  <td class="y">да</td>
+  <td class="m">только Secret Chats</td>
+  <td class="y">да</td>
+  <td class="y"><b>да</b></td>
+</tr>
+<tr>
+  <td>Постквантовое</td>
+  <td class="n">нет</td>
+  <td class="n">нет</td>
+  <td class="y">да (PQXDH)</td>
+  <td class="y"><b>да (ML-KEM-768)</b></td>
+</tr>
+<tr>
+  <td>Deniability</td>
+  <td class="n">нет</td>
+  <td class="n">нет</td>
+  <td class="m">частично (DM)</td>
+  <td class="y"><b>да (--deniable-dm)</b></td>
+</tr>
+<tr>
+  <td>Sealed sender</td>
+  <td class="n">нет</td>
+  <td class="n">нет</td>
+  <td class="y">да</td>
+  <td class="y"><b>да</b></td>
+</tr>
+<tr>
+  <td>Без центральных серверов</td>
+  <td class="n">нет</td>
+  <td class="n">нет</td>
+  <td class="n">нет</td>
+  <td class="y"><b>да (P2P)</b></td>
+</tr>
+<tr>
+  <td>Без регистрации (no phone, no email)</td>
+  <td class="n">нет</td>
+  <td class="n">нет</td>
+  <td class="n">нет</td>
+  <td class="y"><b>да</b></td>
+</tr>
+<tr>
+  <td>DPI-resistant обфускация</td>
+  <td class="n">нет</td>
+  <td class="m">MTProto (свой)</td>
+  <td class="n">нет</td>
+  <td class="y"><b>да (NTOR+ScrambleStream)</b></td>
+</tr>
+<tr>
+  <td>Open source</td>
+  <td class="n">нет</td>
+  <td class="m">только клиент</td>
+  <td class="y">да</td>
+  <td class="y"><b>да</b></td>
+</tr>
+<tr>
+  <td>Возможность отключить компанией</td>
+  <td class="bad">тривиально</td>
+  <td class="bad">тривиально</td>
+  <td class="bad">тривиально</td>
+  <td class="y"><b>невозможно</b></td>
+</tr>
+<tr>
+  <td>Возможность забанить страну</td>
+  <td class="bad">да</td>
+  <td class="bad">да</td>
+  <td class="bad">да</td>
+  <td class="y"><b>не как концепция</b></td>
+</tr>
+</table>
+
+<!-- ============================================================ -->
+<h2>Где мы пока не дотягиваем — честно</h2>
+<div class="section">
+
+<div class="honest">
+<b>Network-layer анонимность.</b> Если кто-то снифает твой канал — он видит, что твой IP подключается к bootstrap-ноде и обменивается p2p-трафиком. Контент зашифрован, метаданные на p2p-уровне закрыты — но <b>сам факт «ты юзаешь P2P-протокол»</b> виден. Решение: Tor-integration, libp2p поддерживает. Roadmap'нуто, не реализовано.
+</div>
+
+<div class="honest">
+<b>Mobile.</b> Сейчас только Windows-сборка (Mac/Linux собирается из исходников). Native Android/iOS — следующий большой проект, потребует портирование Rust core + native UI.
+</div>
+
+<div class="honest">
+<b>Голос/видео.</b> Нет. Только текст и groupchat. WebRTC поверх libp2p — возможно, не реализовано.
+</div>
+
+<div class="honest">
+<b>Внешний security audit.</b> Self-audit пройден (5 high / 11 medium / 12 low / 7 info findings — все актированы или задокументированы как deferred). Независимый аудит у пейд-конторы — ещё впереди.
+</div>
+
+<div class="honest">
+<b>Bootstrap-сеть.</b> Сейчас одна публичная нода на VPS в Москве. SPOF. Нужно минимум 3-5 нод в разных регионах для устойчивости.
+</div>
+</div>
+
+<!-- ============================================================ -->
+<h2>Ну и шо?</h2>
+<div class="section">
+<p>ME55 — это не «ещё один мессенджер чтобы». Это <b>другой класс</b>. Если для тебя важно одно из:</p>
+<ul>
+  <li>чтобы тебя <b>не могли отключить</b> ни компания, ни государство;</li>
+  <li>чтобы переписку <b>не могли прочитать ни сейчас, ни через 15 лет</b> когда появится квантовый компьютер;</li>
+  <li>чтобы <b>граф связей не утекал</b> наружу (метаданные часто опаснее контента);</li>
+  <li>чтобы <b>скриншот в суде ничего не доказывал</b>;</li>
+  <li>чтобы <b>никаких аккаунтов, регистраций, телефонов</b>;</li>
+  <li>чтобы <b>трафик не палился</b> на гос. DPI;</li>
+</ul>
+<p>— то ME55 решает каждый из этих пунктов <b>в одном бинарнике</b>. Telegram не решает ни одного. Signal — большинство, но требует phone number и центральные серверы. WhatsApp — два с половиной.</p>
+
+<p>Это не для всех. Если тебе нужно «отправить мемасик однокласснику» — оставайся в Telegram. Если тебе нужно <b>гарантированно безопасно общаться с теми, кому доверяешь, в условиях, когда против тебя играют — ME55 единственный нормальный ответ</b>.</p>
+</div>
+
+<div class="foot">
+ME55 Messenger · open source · <a href="https://github.com/kabuto-lab/zerocenter-messenger">github.com/kabuto-lab</a><br>
+сделано на Rust, libp2p, ML-KEM-768, и нездоровой любви к крипто
+</div>
+
+</div>
+</body>
+</html>
