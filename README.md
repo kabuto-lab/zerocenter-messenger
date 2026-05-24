@@ -2,6 +2,27 @@
 
 Censorship-Resistant, Zero-Trust, Leaderless P2P Communication Platform
 
+---
+
+## 👋 Просто хочешь попробовать?
+
+> **TL;DR:** скачай, распакуй, дабл-клик. Никакой регистрации, никакого аккаунта, никакого номера телефона.
+
+📦 **[Скачать сборку для Windows (~7.4 MB)](release/ME55-windows.zip)** — папка [`release/`](release/) содержит готовый ZIP с бинарником, launcher'ом и инструкцией на русском.
+
+🤔 **Что это вообще и зачем?** — открой [**WHY_ME55.html**](https://htmlpreview.github.io/?https://github.com/kabuto-lab/zerocenter-messenger/blob/main/WHY_ME55.html) (онлайн-превью) или скачай [`WHY_ME55.html`](WHY_ME55.html) и открой локально. Объясняется простыми словами + сравнение с WhatsApp/Telegram/Signal/iMessage.
+
+**Минимум, чтобы запустить:**
+1. [Скачай ZIP](release/ME55-windows.zip) (правой кнопкой по ссылке → "Сохранить как")
+2. Распакуй в любую папку
+3. Дабл-клик по `start.bat`
+4. На предупреждении SmartScreen → "Подробнее" → "Выполнить в любом случае" (приложение не подписано Microsoft, мы не платим за code-signing)
+5. В сайдбаре увидишь свой Peer ID — скинь его собеседнику. У него получишь его Peer ID. "+" возле Contacts, вставляешь, Add — и пишете друг другу.
+
+Подробности в [`release/README.md`](release/README.md).
+
+---
+
 ## ✅ Working Features
 
 ### Phase 1 Complete
