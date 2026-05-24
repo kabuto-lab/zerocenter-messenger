@@ -54,6 +54,13 @@ pub struct Config {
     /// downstream ratchet AEAD. Off by default for wire-compatibility
     /// with peers still on the legacy signed path.
     pub deniable_dm: bool,
+
+    /// Disable mDNS loopback/LAN discovery. Off (mDNS enabled) by
+    /// default. Useful for testing the public-bootstrap path with two
+    /// instances on the same machine — otherwise they'd find each
+    /// other instantly via 224.0.0.251 multicast and the bootstrap
+    /// path would never be exercised.
+    pub disable_mdns: bool,
 }
 
 impl Default for Config {
@@ -69,6 +76,7 @@ impl Default for Config {
             enable_relay_server: false,
             use_default_bootstraps: true,
             deniable_dm: false,
+            disable_mdns: false,
         }
     }
 }

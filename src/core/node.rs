@@ -292,6 +292,7 @@ impl P2PNode {
         let obfs_jitter_ms = self.config.obfs_jitter_ms;
         let identity_for_behaviour = self.identity.clone();
         let enable_relay_server = self.config.enable_relay_server;
+        let disable_mdns = self.config.disable_mdns;
 
         if obfs_key.is_some() {
             info!(
@@ -370,6 +371,7 @@ impl P2PNode {
                     &identity_for_behaviour,
                     relay_client,
                     enable_relay_server,
+                    disable_mdns,
                 )
             })?
             .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(60)))

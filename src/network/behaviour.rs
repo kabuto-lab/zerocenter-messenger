@@ -94,8 +94,12 @@ pub struct Behaviour {
     /// Gossipsub for pubsub messaging
     pub gossipsub: gossipsub::Behaviour,
 
-    /// mDNS for local network discovery
-    pub mdns: mdns::tokio::Behaviour,
+    /// mDNS for local network discovery. `Toggle<>` so it can be
+    /// disabled via `--no-mdns` (handy when testing two instances on
+    /// the same machine and you want them to go through the public
+    /// bootstrap instead of finding each other instantly via the
+    /// loopback multicast).
+    pub mdns: Toggle<mdns::tokio::Behaviour>,
 
     /// Identify protocol for peer information exchange
     pub identify_behaviour: identify::Behaviour,
@@ -141,6 +145,7 @@ impl Behaviour {
         identity: &Identity,
         relay_client: relay::client::Behaviour,
         enable_relay_server: bool,
+        disable_mdns: bool,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let peer_id = identity.peer_id();
         let keypair = identity.keypair().clone();
@@ -178,11 +183,18 @@ impl Behaviour {
         let global_topic = gossipsub::IdentTopic::new("/ME55/global");
         gossipsub.subscribe(&global_topic)?;
 
-        // mDNS configuration
-        let mdns = mdns::tokio::Behaviour::new(
-            mdns::Config::default(),
-            peer_id,
-        )?;
+        // mDNS configuration — wrapped in Toggle so callers can flip
+        // it off via `--no-mdns`. When disabled, the node skips
+        // loopback/LAN multicast discovery entirely and relies on
+        // Kademlia (bootstrap + DHT) for finding peers.
+        let mdns: Toggle<mdns::tokio::Behaviour> = if disable_mdns {
+            None.into()
+        } else {
+            Some(mdns::tokio::Behaviour::new(
+                mdns::Config::default(),
+                peer_id,
+            )?).into()
+        };
 
         // Identify configuration
         let public_key = identity.keypair().public();

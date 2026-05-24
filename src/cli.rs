@@ -100,6 +100,14 @@ pub struct Cli {
     /// for cross-member anti-impersonation, INVARIANTS §24).
     #[arg(long = "deniable-dm")]
     pub deniable_dm: bool,
+
+    /// Disable mDNS local-network discovery. Skip the 224.0.0.251
+    /// multicast leg entirely — peer discovery then comes only from
+    /// Kademlia (bootstrap + DHT). Use when testing two instances on
+    /// the same host and you want them to find each other through the
+    /// public bootstrap node instead of via instant loopback mDNS.
+    #[arg(long = "no-mdns")]
+    pub no_mdns: bool,
 }
 
 impl Cli {

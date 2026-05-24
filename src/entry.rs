@@ -115,6 +115,7 @@ pub async fn run() -> Result<()> {
         enable_relay_server: cli.relay_server,
         use_default_bootstraps: !cli.no_default_bootstrap,
         deniable_dm: cli.deniable_dm,
+        disable_mdns: cli.no_mdns,
     };
 
     // Initialize P2P node
